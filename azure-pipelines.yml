@@ -7,7 +7,7 @@ pool:
 variables:
   node_version: "22.x"
   webAppName: "app-arion-api-prod"
-  azureSubscription: "IADM-Prod-ARM'"
+  azureSubscription: "IADM-Prod-ARM"
 
 steps:
   - task: NodeTool@0
