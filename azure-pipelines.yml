@@ -3,7 +3,7 @@ trigger:
 
 pool:
   vmImage: "ubuntu-latest"
-
+ 
 variables:
   node_version: "22.x"
   webAppName: "app-arion-api-prod"
