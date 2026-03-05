@@ -7,26 +7,30 @@ pool:
 variables:
   node_version: "22.x"
   webAppName: "app-arion-api-prod"
-  azureSubscription: "<YOUR_AZDO_SERVICE_CONNECTION_NAME>"
+  azureSubscription: "IADM-Prod-ARM"
 
 steps:
+  - checkout: self
+    clean: true
+
+  - script: |
+      echo "Repo contents:"
+      ls -la
+      if [ ! -f package.json ]; then
+        echo "No package.json yet (ARION API code not scaffolded). Pipeline intentionally exits success."
+        exit 0
+      fi
+    displayName: "Guard: skip until code scaffold exists"
+
   - task: NodeTool@0
     displayName: "Use Node $(node_version)"
     inputs:
       versionSpec: "$(node_version)"
 
-  - checkout: self
-    clean: true
-
-  # Keep this aligned with your existing pattern.
-  # If contract-check doesn't exist yet in arion-api, either add it OR remove that line.
   - script: |
-      echo "Working directory:"
-      pwd
-      ls -la
       npm ci
-      npm run contract-check
-    displayName: "npm ci + contract-check"
+      if npm run | grep -q "contract-check"; then npm run contract-check; fi
+    displayName: "npm ci (+ optional contract-check)"
 
   - task: ArchiveFiles@2
     displayName: "Archive app into drop.zip"

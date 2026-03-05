@@ -1,20 +1,37 @@
-# Introduction 
-TODO: Give a short introduction of your project. Let this section explain the objectives or the motivation behind this project. 
+# ARION API
 
-# Getting Started
-TODO: Guide users through getting your code up and running on their own system. In this section you can talk about:
-1.	Installation process
-2.	Software dependencies
-3.	Latest releases
-4.	API references
+Node + Express API for the ARION website operations module.
 
-# Build and Test
-TODO: Describe and show how to build your code and run the tests. 
+## Required app settings
 
-# Contribute
-TODO: Explain how other users and developers can contribute to make your code better. 
+- `AUTH_MODE`
+- `AUTH_METADATA_ADDRESS`
+- `AUTH_API_AUDIENCE`
+- `AUTH_ALLOWED_CLIENT_IDS`
+- `AUTH_PROVIDER_KEY`
+- `IADM_PORTAL_CLIENT_ID`
+- `EMPLOYEE_PORTAL_CLIENT_ID`
+- `CUSTOMER_PORTAL_CLIENT_ID`
+- `CORS_ORIGINS`
+- `PLATFORM_SQL_SERVER`
+- `PLATFORM_SQL_DATABASE` (default: `iadm_platform`)
+- `SERVICES_SQL_SERVER`
+- `SERVICES_SQL_DATABASE` (default: `iadm_services`)
+- `ARION_SERVICE_KEY` (default: `arion`)
+- `ARION_INGEST_KEY` (shared secret for future WP/plugin ingestion)
 
-If you want to learn more about creating good readme files then refer the following [guidelines](https://docs.microsoft.com/en-us/azure/devops/repos/git/create-a-readme?view=azure-devops). You can also seek inspiration from the below readme files:
-- [ASP.NET Core](https://github.com/aspnet/Home)
-- [Visual Studio Code](https://github.com/Microsoft/vscode)
-- [Chakra Core](https://github.com/Microsoft/ChakraCore)
+## Auth model
+
+This service intentionally reuses the exact token validation pattern from `platform-api`.
+Authentication is unchanged. The portal must send:
+
+- `Authorization: Bearer <token>`
+- `x-tenant-key: <tenant_id>`
+
+The API validates:
+1. token audience and calling portal client
+2. tenant resolution
+3. tenant membership in `iadm_platform`
+4. ARION service entitlement in `iadm_platform`
+
+Operational data is always read/written from `iadm_services.arion`.
