@@ -115,23 +115,82 @@ router.get('/overview', async (req, res) => {
     const siteCount = (await pool.request().input('tenantId', sql.UniqueIdentifier, tenantId)
       .query('SELECT COUNT(*) AS cnt FROM arion.site WHERE tenant_id = @tenantId')).recordset[0].cnt;
 
+    // Parallel queries for overview data (only if we have a site)
+    let formsCount = 0, bookingsCount = 0, gscSummary = null, gbpProfile = null, seoSummary = null;
+    if (site) {
+      const [formsRes, bookingsRes, gscRes, gbpRes, seoRes] = await Promise.all([
+        pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, site.site_id)
+          .query('SELECT COUNT(*) AS cnt FROM arion.site_form_submission WHERE tenant_id = @tenantId AND site_id = @siteId AND submitted_at >= DATEADD(day, -30, GETUTCDATE())'),
+        pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, site.site_id)
+          .query('SELECT COUNT(*) AS cnt FROM arion.site_booking_request WHERE tenant_id = @tenantId AND site_id = @siteId AND submitted_at >= DATEADD(day, -30, GETUTCDATE())'),
+        site.gsc_connected ? pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, site.site_id)
+          .query('SELECT SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -30, GETUTCDATE())') : Promise.resolve(null),
+        site.gbp_connected ? pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, site.site_id)
+          .query('SELECT * FROM arion.gbp_profile WHERE tenant_id = @tenantId AND site_id = @siteId') : Promise.resolve(null),
+        pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, site.site_id)
+          .query('SELECT TOP 1 * FROM arion.se_ranking_summary WHERE tenant_id = @tenantId AND site_id = @siteId ORDER BY fetched_at DESC')
+      ]);
+      formsCount = formsRes.recordset[0].cnt;
+      bookingsCount = bookingsRes.recordset[0].cnt;
+      gscSummary = gscRes?.recordset?.[0] || null;
+      gbpProfile = gbpRes?.recordset?.[0] || null;
+      seoSummary = seoRes.recordset[0] || null;
+    }
+
+    const gscConnected = site?.gsc_connected ? true : false;
+    const gbpConnected = site?.gbp_connected ? true : false;
+    const seoConnected = site?.se_ranking_project_id ? true : false;
+
+    const googleProfile = gbpProfile
+      ? { connected: true, editable: true, displayName: gbpProfile.business_name || null, primaryCategory: gbpProfile.categories || null, websiteUrl: gbpProfile.website || null, mapsUrl: null, phone: gbpProfile.phone || null, address: gbpProfile.address || null, hours: gbpProfile.hours || null, resourceUrl: null, integration: null }
+      : nullProfile(gbpConnected);
+
     res.json({
       tenant: { tenantId, tenantName: req.tenant.tenantName || null, tenantFullName: req.tenant.tenantFullName || null },
       site: site ? toSiteSummary(site) : null,
       permissions: { siteCount, siteLimit: null, canCreateSite: true, extraSitePriceMonthly: 0, extraSitePriceAnnual: 0 },
       integrations: {
         googleAnalytics: false,
-        googleSearchConsole: site?.gsc_connected ? true : false,
-        googleBusinessProfile: site?.gbp_connected ? true : false,
+        googleSearchConsole: gscConnected,
+        googleBusinessProfile: gbpConnected,
         bingWebmaster: false,
         bingPlaces: false,
         appleBusinessConnect: site?.apple_claimed ? true : false,
-        seRankingProject: false
+        seRankingProject: seoConnected
       },
-      overview: { users: null, sessions: null, clicks: null, impressions: null, ctr: null, avgPosition: null },
+      overview: {
+        users: null,
+        sessions: null,
+        clicks: gscSummary?.clicks ?? null,
+        impressions: gscSummary?.impressions ?? null,
+        ctr: gscSummary?.ctr ?? null,
+        avgPosition: gscSummary?.avgPosition ?? null,
+        formSubmissions30d: formsCount,
+        bookingRequests30d: bookingsCount
+      },
       hosting: { siteStatus: site?.status || null, sslStatus: site?.ssl_expiry ? (new Date(site.ssl_expiry) > new Date() ? 'valid' : 'expired') : null, pluginUpdatesAvailable: null, wordpressVersion: null, phpVersion: null, performanceScore: null, lastHealthCheckAt: null },
-      seo: { connected: false, seoPackageCode: null, visibilityScore: null, auditScore: null, trackedKeywords: null, trackedCompetitors: null, trackedModels: null, criticalIssues: null, warningIssues: null },
-      myBusiness: { google: nullProfile(site?.gbp_connected ? true : false), apple: nullProfile(site?.apple_claimed ? true : false), bing: nullProfile() }
+      seo: {
+        connected: seoConnected,
+        seoPackageCode: site?.seo_addon_tier || null,
+        visibilityScore: seoSummary?.visibility_score ?? null,
+        auditScore: seoSummary?.audit_score ?? null,
+        trackedKeywords: seoSummary?.tracked_keywords ?? null,
+        trackedCompetitors: seoSummary?.tracked_competitors ?? null,
+        trackedModels: seoSummary?.tracked_models ?? null,
+        criticalIssues: seoSummary?.critical_issues ?? null,
+        warningIssues: seoSummary?.warning_issues ?? null
+      },
+      myBusiness: { google: googleProfile, apple: nullProfile(site?.apple_claimed ? true : false), bing: nullProfile() }
     });
   } catch (err) {
     console.error('[arion/overview]', err);
@@ -150,7 +209,20 @@ router.get('/hosting', async (req, res) => {
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
     res.json({
       site: toSiteSummary(site),
-      health: { wordpressVersion: null, phpVersion: null, pluginUpdatesAvailable: null, themeUpdatesAvailable: null, sslStatus: site.ssl_expiry ? (new Date(site.ssl_expiry) > new Date() ? 'valid' : 'expired') : null, siteStatus: site.status, lastHealthCheckAt: null, formDeliveryStatus: null, performanceScore: null },
+      health: {
+        domain: site.domain || null,
+        sslExpiry: site.ssl_expiry || null,
+        hostingPlan: site.hosting_plan || null,
+        wordpressVersion: null,
+        phpVersion: null,
+        pluginUpdatesAvailable: null,
+        themeUpdatesAvailable: null,
+        sslStatus: site.ssl_expiry ? (new Date(site.ssl_expiry) > new Date() ? 'valid' : 'expired') : null,
+        siteStatus: site.status,
+        lastHealthCheckAt: null,
+        formDeliveryStatus: null,
+        performanceScore: null
+      },
       plugins: [],
       requests: []
     });
@@ -195,8 +267,29 @@ router.get('/console/:provider', async (req, res) => {
     const connected = provider === 'GOOGLE' ? (site.gsc_connected ? true : false) : false;
     let summary = { clicks: null, impressions: null, ctr: null, avgPosition: null };
     let breakdowns = { queries: [], pages: [], devices: [], countries: [], comparisons: [] };
-    // TODO: Wire Google Search Console API calls here
-    res.json({      site: toSiteSummary(site), provider, connected,      summary, breakdowns, integration: null    });
+
+    if (provider === 'GOOGLE' && connected) {
+      const [summaryRes, queriesRes, pagesRes] = await Promise.all([
+        pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .query('SELECT SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -28, GETUTCDATE())'),
+        pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .query('SELECT TOP 20 query, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -28, GETUTCDATE()) AND query IS NOT NULL GROUP BY query ORDER BY SUM(impressions) DESC'),
+        pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .query('SELECT TOP 20 page, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -28, GETUTCDATE()) AND page IS NOT NULL GROUP BY page ORDER BY SUM(impressions) DESC')
+      ]);
+      const s = summaryRes.recordset[0];
+      summary = { clicks: s.clicks ?? null, impressions: s.impressions ?? null, ctr: s.ctr ?? null, avgPosition: s.avgPosition ?? null };
+      breakdowns.queries = queriesRes.recordset.map(r => ({ query: r.query, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, avgPosition: r.avgPosition }));
+      breakdowns.pages = pagesRes.recordset.map(r => ({ page: r.page, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, avgPosition: r.avgPosition }));
+    }
+
+    res.json({ site: toSiteSummary(site), provider, connected, summary, breakdowns, integration: null });
   } catch (err) {
     console.error('[arion/console]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
@@ -212,12 +305,31 @@ router.get('/seo', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    let connected = false;
+    let connected = site.se_ranking_project_id ? true : false;
     let integration = null;
-    let sePackage = { code: null, label: null, keywordLimit: null, competitorLimit: null, modelLimit: null, groupLimit: null, aiEnabled: false, dataApiEnabled: false };
+    let sePackage = { code: site.seo_addon_tier || null, label: null, keywordLimit: null, competitorLimit: null, modelLimit: null, groupLimit: null, aiEnabled: false, dataApiEnabled: false };
     let snapshot = { visibilityScore: null, auditScore: null, trackedKeywords: null, trackedCompetitors: null, trackedModels: null, criticalIssues: null, warningIssues: null };
     let breakdowns = {};
-    // TODO: Wire SE Ranking Project API to fetch real data
+
+    if (connected && site.seo_addon_tier) {
+      const seoRes = await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .query('SELECT TOP 1 * FROM arion.se_ranking_summary WHERE tenant_id = @tenantId AND site_id = @siteId ORDER BY fetched_at DESC');
+      const row = seoRes.recordset[0];
+      if (row) {
+        snapshot = {
+          visibilityScore: row.visibility_score ?? null,
+          auditScore: row.audit_score ?? null,
+          trackedKeywords: row.tracked_keywords ?? null,
+          trackedCompetitors: row.tracked_competitors ?? null,
+          trackedModels: row.tracked_models ?? null,
+          criticalIssues: row.critical_issues ?? null,
+          warningIssues: row.warning_issues ?? null
+        };
+      }
+    }
+
     res.json({ site: toSiteSummary(site), connected, integration, package: sePackage, snapshot, breakdowns });
   } catch (err) {
     console.error('[arion/seo]', err);
@@ -239,7 +351,30 @@ router.get('/my-business/:provider', async (req, res) => {
     if (provider === 'google') connected = site.gbp_connected ? true : false;
     else if (provider === 'apple') connected = site.apple_claimed ? true : false;
     let profile = nullProfile(connected);
-    // TODO: Wire Google Business Profile API calls here
+
+    if (provider === 'google' && connected) {
+      const gbpRes = await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .query('SELECT * FROM arion.gbp_profile WHERE tenant_id = @tenantId AND site_id = @siteId');
+      const row = gbpRes.recordset[0];
+      if (row) {
+        profile = {
+          connected: true,
+          editable: true,
+          displayName: row.business_name || null,
+          primaryCategory: row.categories || null,
+          websiteUrl: row.website || null,
+          mapsUrl: null,
+          phone: row.phone || null,
+          address: row.address || null,
+          hours: row.hours || null,
+          resourceUrl: null,
+          integration: null
+        };
+      }
+    }
+
     res.json({ site: toSiteSummary(site), provider, profile });
   } catch (err) {
     console.error('[arion/my-business]', err);
