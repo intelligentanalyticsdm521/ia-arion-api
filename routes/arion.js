@@ -4,6 +4,9 @@ import crypto from 'node:crypto';
 import { getServicesPool } from '../db/servicesPool.js';
 import { firePlatformEvent } from '../lib/platformEvents.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
+import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries } from '../lib/googleServices.js';
+import { getAccessToken } from '../lib/googleBusiness.js';
+import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats } from '../lib/bingWebmaster.js';
 import formsRouter from './arion/forms.js';
 import bookingsRouter from './arion/bookings.js';
 
@@ -429,6 +432,413 @@ router.post('/seo/project/link', async (req, res) => {
     res.json({ integration: { siteIntegrationId: integrationId, providerCode: 'se_ranking', status: 'active', config: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, snapshot: null });
   } catch (err) {
     console.error('[arion/seo/project/link]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Search Routes
+// ---------------------------------------------------------------------------
+
+// --- GET /arion/search/performance?siteId=&provider=google|bing&days=28 ---
+router.get('/search/performance', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const provider = (req.query.provider || 'google').toLowerCase();
+  const days = parseInt(req.query.days, 10) || 28;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const safeCall = (promise) => promise.catch(e => { console.warn('[arion/search/performance] API call failed:', e.message); return null; });
+    let summary = { clicks: null, impressions: null, ctr: null, avgPosition: null };
+    let breakdowns = { queries: [], pages: [] };
+
+    if (provider === 'google') {
+      const refreshToken = site.gbp_oauth_token_ref;
+      if (!refreshToken) return res.json({ provider, summary, breakdowns, error: 'Google not connected' });
+      const siteUrl = 'https://' + site.domain;
+      const [queryData, pageData] = await Promise.all([
+        safeCall(getSearchConsoleData(refreshToken, siteUrl, days)),
+        safeCall(getSearchConsolePages(refreshToken, siteUrl, days)),
+      ]);
+      if (queryData) {
+        summary = { clicks: queryData.summary.clicks, impressions: queryData.summary.impressions, ctr: queryData.summary.ctr, avgPosition: queryData.summary.position };
+        breakdowns.queries = queryData.queries || [];
+      }
+      if (pageData) {
+        breakdowns.pages = pageData || [];
+      }
+    } else if (provider === 'bing') {
+      const bingKey = process.env.BING_WMT_API_KEY;
+      if (!bingKey) return res.json({ provider, summary, breakdowns, error: 'Bing not configured' });
+      const siteUrl = 'https://' + site.domain;
+      const [trafficData, pageData] = await Promise.all([
+        safeCall(bingGetTrafficData(bingKey, siteUrl, days)),
+        safeCall(bingGetPageTrafficData(bingKey, siteUrl)),
+      ]);
+      if (trafficData && Array.isArray(trafficData)) {
+        const totals = trafficData.reduce((acc, r) => { acc.clicks += r.Clicks || 0; acc.impressions += r.Impressions || 0; return acc; }, { clicks: 0, impressions: 0 });
+        summary = { clicks: totals.clicks, impressions: totals.impressions, ctr: totals.impressions > 0 ? totals.clicks / totals.impressions : 0, avgPosition: null };
+        breakdowns.queries = trafficData.map(r => ({ query: r.Query || '', clicks: r.Clicks || 0, impressions: r.Impressions || 0, ctr: r.Impressions > 0 ? (r.Clicks || 0) / r.Impressions : 0, position: r.AvgPosition ?? null }));
+      }
+      if (pageData && Array.isArray(pageData)) {
+        breakdowns.pages = pageData.map(r => ({ page: r.Url || r.Page || '', clicks: r.Clicks || 0, impressions: r.Impressions || 0, ctr: r.Impressions > 0 ? (r.Clicks || 0) / r.Impressions : 0, position: r.AvgPosition ?? null }));
+      }
+    } else {
+      return res.status(400).json({ error: { code: 'INVALID_PROVIDER', message: 'provider must be google or bing', status: 400 } });
+    }
+
+    res.json({ provider, summary, breakdowns });
+  } catch (err) {
+    console.error('[arion/search/performance]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/search/url-inspection?siteId=&url= ---
+router.get('/search/url-inspection', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const url = req.query.url;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  if (!url) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'url query param required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const refreshToken = site.gbp_oauth_token_ref;
+    if (!refreshToken) return res.json({ inspection: null, error: 'Google not connected' });
+
+    const tokenData = await getAccessToken(refreshToken).catch(() => null);
+    if (!tokenData) return res.json({ inspection: null, error: 'Failed to get access token' });
+
+    const siteUrl = 'https://' + site.domain;
+    let inspection = null;
+    try {
+      const apiRes = await fetch('https://searchconsole.googleapis.com/v1/urlInspection/index:inspect', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + tokenData.access_token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inspectionUrl: url, siteUrl }),
+      });
+      if (apiRes.ok) {
+        inspection = await apiRes.json();
+      } else {
+        const text = await apiRes.text().catch(() => '');
+        console.warn('[arion/search/url-inspection] GSC API error:', apiRes.status, text.slice(0, 200));
+      }
+    } catch (e) {
+      console.warn('[arion/search/url-inspection] API call failed:', e.message);
+    }
+
+    res.json({ inspection });
+  } catch (err) {
+    console.error('[arion/search/url-inspection]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/search/submit-url?siteId= ---
+router.post('/search/submit-url', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const { url } = req.body || {};
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  if (!url) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'url is required in body', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const siteUrl = 'https://' + site.domain;
+    let googleResult = null;
+    let bingResult = null;
+
+    // Google Indexing API (placeholder — requires separate service account setup)
+    googleResult = { submitted: false, message: 'Google Indexing API not yet configured' };
+
+    // Bing URL submission
+    const bingKey = process.env.BING_WMT_API_KEY;
+    if (bingKey) {
+      try {
+        bingResult = await bingSubmitUrl(bingKey, siteUrl, url);
+      } catch (e) {
+        console.warn('[arion/search/submit-url] Bing submit failed:', e.message);
+        bingResult = null;
+      }
+    }
+
+    res.json({ url, google: googleResult, bing: bingResult });
+  } catch (err) {
+    console.error('[arion/search/submit-url]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/search/sitemaps?siteId=&provider=google|bing ---
+router.get('/search/sitemaps', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const provider = (req.query.provider || 'google').toLowerCase();
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    let sitemaps = [];
+
+    if (provider === 'google') {
+      const refreshToken = site.gbp_oauth_token_ref;
+      if (!refreshToken) return res.json({ provider, sitemaps: [], error: 'Google not connected' });
+      const tokenData = await getAccessToken(refreshToken).catch(() => null);
+      if (!tokenData) return res.json({ provider, sitemaps: [], error: 'Failed to get access token' });
+      const siteUrl = encodeURIComponent('https://' + site.domain);
+      try {
+        const apiRes = await fetch('https://www.googleapis.com/webmasters/v3/sites/' + siteUrl + '/sitemaps', {
+          headers: { Authorization: 'Bearer ' + tokenData.access_token },
+        });
+        if (apiRes.ok) {
+          const data = await apiRes.json();
+          sitemaps = (data.sitemap || []).map(s => ({
+            url: s.path || '', type: s.type || null, lastSubmitted: s.lastSubmitted || null,
+            isPending: s.isPending || false, isSitemapsIndex: s.isSitemapsIndex || false,
+            warnings: s.warnings || 0, errors: s.errors || 0,
+          }));
+        } else {
+          console.warn('[arion/search/sitemaps] Google API error:', apiRes.status);
+        }
+      } catch (e) {
+        console.warn('[arion/search/sitemaps] Google API call failed:', e.message);
+      }
+    } else if (provider === 'bing') {
+      const bingKey = process.env.BING_WMT_API_KEY;
+      if (!bingKey) return res.json({ provider, sitemaps: [], error: 'Bing not configured' });
+      const siteUrl = 'https://' + site.domain;
+      try {
+        const data = await bingGetSitemaps(bingKey, siteUrl);
+        if (data && Array.isArray(data)) {
+          sitemaps = data.map(s => ({
+            url: s.Url || '', type: s.SitemapType || null, lastSubmitted: s.LastSubmittedDate || null,
+            status: s.Status || null, urlCount: s.UrlCount ?? null, errorCount: s.ErrorCount ?? null,
+          }));
+        }
+      } catch (e) {
+        console.warn('[arion/search/sitemaps] Bing API call failed:', e.message);
+      }
+    } else {
+      return res.status(400).json({ error: { code: 'INVALID_PROVIDER', message: 'provider must be google or bing', status: 400 } });
+    }
+
+    res.json({ provider, sitemaps });
+  } catch (err) {
+    console.error('[arion/search/sitemaps]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/search/core-web-vitals?siteId= ---
+router.get('/search/core-web-vitals', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    let metrics = { lcp: { p75: null, rating: null }, inp: { p75: null, rating: null }, cls: { p75: null, rating: null } };
+
+    const cruxApiKey = process.env.CRUX_API_KEY || process.env.GOOGLE_CRUX_API_KEY;
+    if (!cruxApiKey) return res.json({ metrics, error: 'CrUX API key not configured' });
+
+    try {
+      const apiRes = await fetch('https://chromeuxreport.googleapis.com/v1/records:queryRecord?key=' + cruxApiKey, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: 'https://' + site.domain }),
+      });
+      if (apiRes.ok) {
+        const data = await apiRes.json();
+        const m = data.record?.metrics || {};
+        if (m.largest_contentful_paint) {
+          metrics.lcp = { p75: m.largest_contentful_paint.percentiles?.p75 ?? null, rating: m.largest_contentful_paint.category ?? null };
+        }
+        if (m.interaction_to_next_paint) {
+          metrics.inp = { p75: m.interaction_to_next_paint.percentiles?.p75 ?? null, rating: m.interaction_to_next_paint.category ?? null };
+        }
+        if (m.cumulative_layout_shift) {
+          metrics.cls = { p75: m.cumulative_layout_shift.percentiles?.p75 ?? null, rating: m.cumulative_layout_shift.category ?? null };
+        }
+      } else {
+        const text = await apiRes.text().catch(() => '');
+        console.warn('[arion/search/core-web-vitals] CrUX API error:', apiRes.status, text.slice(0, 200));
+      }
+    } catch (e) {
+      console.warn('[arion/search/core-web-vitals] CrUX API call failed:', e.message);
+    }
+
+    res.json({ metrics });
+  } catch (err) {
+    console.error('[arion/search/core-web-vitals]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Business Routes
+// ---------------------------------------------------------------------------
+
+// --- GET /arion/business/overview?siteId=&provider=google|bing|apple ---
+router.get('/business/overview', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const provider = (req.query.provider || 'google').toLowerCase();
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    let connected = false;
+    if (provider === 'google') connected = site.gbp_connected ? true : false;
+    else if (provider === 'apple') connected = site.apple_claimed ? true : false;
+
+    let profile = nullProfile(connected);
+
+    if (provider === 'google' && connected) {
+      try {
+        const gbpRes = await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .query('SELECT * FROM arion.gbp_profile WHERE tenant_id = @tenantId AND site_id = @siteId');
+        const row = gbpRes.recordset[0];
+        if (row) {
+          profile = { connected: true, editable: true, displayName: row.business_name || null, primaryCategory: row.categories || null, websiteUrl: row.website || null, mapsUrl: null, phone: row.phone || null, address: row.address || null, hours: row.hours || null, resourceUrl: null, integration: null };
+        }
+      } catch (e) { console.warn('[arion/business/overview] gbp_profile query failed:', e.message); }
+    }
+
+    res.json({ site: toSiteSummary(site), provider, profile });
+  } catch (err) {
+    console.error('[arion/business/overview]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/business/posts?siteId= ---
+router.get('/business/posts', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    res.json({ posts: [] });
+  } catch (err) {
+    console.error('[arion/business/posts]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/business/posts?siteId= ---
+router.post('/business/posts', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    res.json({ ok: true, post: null });
+  } catch (err) {
+    console.error('[arion/business/posts:create]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/business/services?siteId= ---
+router.get('/business/services', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    res.json({ services: [] });
+  } catch (err) {
+    console.error('[arion/business/services]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Analytics Route
+// ---------------------------------------------------------------------------
+
+// --- GET /arion/analytics/report?siteId=&type=monthly_summary ---
+router.get('/analytics/report', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const type = req.query.type || 'monthly_summary';
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const safeQuery = (promise) => promise.catch(e => { console.warn('[arion/analytics/report] sub-query failed:', e.message); return null; });
+
+    const now = new Date();
+    const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+    const priorMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().split('T')[0];
+    const priorMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().split('T')[0];
+
+    const [currentForms, currentBookings, priorForms, priorBookings] = await Promise.all([
+      safeQuery(pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, site.site_id)
+        .input('start', sql.Date, currentMonthStart)
+        .query('SELECT COUNT(*) AS cnt FROM arion.site_form_submission WHERE tenant_id = @tenantId AND site_id = @siteId AND submitted_at >= @start')),
+      safeQuery(pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, site.site_id)
+        .input('start', sql.Date, currentMonthStart)
+        .query('SELECT COUNT(*) AS cnt FROM arion.site_booking_request WHERE tenant_id = @tenantId AND site_id = @siteId AND submitted_at >= @start')),
+      safeQuery(pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, site.site_id)
+        .input('start', sql.Date, priorMonthStart)
+        .input('end', sql.Date, priorMonthEnd)
+        .query('SELECT COUNT(*) AS cnt FROM arion.site_form_submission WHERE tenant_id = @tenantId AND site_id = @siteId AND submitted_at >= @start AND submitted_at <= @end')),
+      safeQuery(pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, site.site_id)
+        .input('start', sql.Date, priorMonthStart)
+        .input('end', sql.Date, priorMonthEnd)
+        .query('SELECT COUNT(*) AS cnt FROM arion.site_booking_request WHERE tenant_id = @tenantId AND site_id = @siteId AND submitted_at >= @start AND submitted_at <= @end')),
+    ]);
+
+    res.json({
+      type,
+      current: {
+        forms: currentForms?.recordset?.[0]?.cnt ?? 0,
+        bookings: currentBookings?.recordset?.[0]?.cnt ?? 0,
+        period: { start: currentMonthStart, end: now.toISOString().split('T')[0] },
+      },
+      prior: {
+        forms: priorForms?.recordset?.[0]?.cnt ?? 0,
+        bookings: priorBookings?.recordset?.[0]?.cnt ?? 0,
+        period: { start: priorMonthStart, end: priorMonthEnd },
+      },
+    });
+  } catch (err) {
+    console.error('[arion/analytics/report]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
