@@ -37,7 +37,7 @@ const corsOptions = {
     return callback(new Error('CORS blocked for origin: ' + origin));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Authorization', 'Content-Type', 'x-tenant-key', 'x-tenant-id', 'x-site-id', 'x-arion-ingest-key'],
+  allowedHeaders: ['Authorization', 'Content-Type', 'x-tenant-key', 'x-tenant-id', 'x-site-id', 'x-arion-ingest-key', 'x-portal-context'],
   credentials: false
 };
 
