@@ -6,8 +6,8 @@ pool:
 
 variables:
   node_version: "22.x"
-  functionAppName: "func-iadm-arion-prod"
-  functionAppResourceGroup: "rg-apps-prod"
+  webAppName: "app-arion-api-prod"
+  resourceGroup: "rg-apps-prod"
   azureSubscription: "IADM-Prod-ARM"
 
 steps:
@@ -25,13 +25,8 @@ steps:
       pwd
       ls -la
 
-      if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
-        echo "Lockfile found. Running npm ci..."
-        npm ci
-      else
-        echo "No lockfile found. Running npm install..."
-        npm install
-      fi
+      echo "Installing dependencies..."
+      npm install
 
       if npm run | grep -q " contract-check"; then
         echo "Running contract-check..."
@@ -42,59 +37,27 @@ steps:
         echo "Running build..."
         npm run build
       fi
-    displayName: "Install deps (+ optional contract-check/build)"
 
-  - task: ArchiveFiles@2
-    displayName: "Archive function app into drop.zip"
-    inputs:
-      rootFolderOrFile: "$(System.DefaultWorkingDirectory)"
-      includeRootFolder: false
-      archiveType: "zip"
-      archiveFile: "$(Build.ArtifactStagingDirectory)/drop.zip"
-      replaceExistingArchive: true
-      verbose: true
+      echo "Pruning dev dependencies..."
+      npm prune --omit=dev
+    displayName: "npm install (+ optional contract-check/build) + prune"
 
-  - task: AzureCLI@2
-    displayName: "Flex preflight: set required deployment storage setting"
-    inputs:
-      azureSubscription: "$(azureSubscription)"
-      scriptType: "bash"
-      scriptLocation: "inlineScript"
-      inlineScript: |
-        set -e
+  - script: |
+      set -e
+      cd "$(System.DefaultWorkingDirectory)"
+      echo "Creating deployment zip..."
+      zip -r "$(Build.ArtifactStagingDirectory)/drop.zip" . \
+        -x ".git/*" \
+           ".gitignore" \
+           "azure-pipelines.yml" \
+           "*.log" \
+           "**/*.log"
+      ls -lh "$(Build.ArtifactStagingDirectory)/drop.zip"
+    displayName: "Create drop.zip (includes node_modules)"
 
-        if [ -z "$DEPLOYMENT_STORAGE_CONNECTION_STRING" ]; then
-          echo "ERROR: Pipeline secret DEPLOYMENT_STORAGE_CONNECTION_STRING is not set."
-          echo "Add it in Azure DevOps pipeline Variables and mark it secret."
-          exit 1
-        fi
-
-        # Flex requires this exact setting name (as shown in functionAppConfig)
-        az functionapp config appsettings set \
-          --name "$(functionAppName)" \
-          --resource-group "$(functionAppResourceGroup)" \
-          --settings DEPLOYMENT_STORAGE_CONNECTION_STRING="$DEPLOYMENT_STORAGE_CONNECTION_STRING" \
-          1>/dev/null
-
-        az functionapp restart \
-          --name "$(functionAppName)" \
-          --resource-group "$(functionAppResourceGroup)" \
-          1>/dev/null
-
-        echo "Preflight complete."
-
-    env:
-      DEPLOYMENT_STORAGE_CONNECTION_STRING: $(DEPLOYMENT_STORAGE_CONNECTION_STRING)
-
-  - task: AzureCLI@2
-    displayName: "Deploy drop.zip to $(functionAppName) via az config-zip"
+  - task: AzureWebApp@1
+    displayName: "Deploy drop.zip to $(webAppName)"
     inputs:
       azureSubscription: "$(azureSubscription)"
-      scriptType: "bash"
-      scriptLocation: "inlineScript"
-      inlineScript: |
-        set -e
-        az functionapp deployment source config-zip \
-          --name "$(functionAppName)" \
-          --resource-group "$(functionAppResourceGroup)" \
-          --src "$(Build.ArtifactStagingDirectory)/drop.zip"
+      appName: "$(webAppName)"
+      package: "$(Build.ArtifactStagingDirectory)/drop.zip"
