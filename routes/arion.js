@@ -7,6 +7,7 @@ import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
 import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries } from '../lib/googleServices.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
 import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats } from '../lib/bingWebmaster.js';
+import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing } from '../lib/sitemapGenerator.js';
 import formsRouter from './arion/forms.js';
 import bookingsRouter from './arion/bookings.js';
 
@@ -839,6 +840,70 @@ router.get('/analytics/report', async (req, res) => {
     });
   } catch (err) {
     console.error('[arion/analytics/report]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/search/generate-sitemap ---
+router.post('/search/generate-sitemap', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId || req.body?.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const domain = site.domain;
+    if (!domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
+
+    // 1. Detect existing sitemap URL
+    const sitemapUrl = await detectSitemapUrl(domain);
+
+    // 2. Crawl WP REST API for page/post count
+    let wpUrls = [];
+    try {
+      wpUrls = await fetchWordPressPages(domain);
+    } catch (err) {
+      console.warn('[arion/search/generate-sitemap] WP REST API crawl failed:', err.message);
+    }
+
+    // 3. Submit to Google if connected
+    const submittedTo = [];
+    let googleResult = null;
+    let bingResult = null;
+
+    if (sitemapUrl) {
+      const siteUrl = 'https://' + domain;
+      const refreshToken = site.gbp_oauth_token_ref;
+
+      // Google
+      if (refreshToken) {
+        const tokenData = await getAccessToken(refreshToken).catch(() => null);
+        if (tokenData?.access_token) {
+          googleResult = await submitToGoogle(tokenData.access_token, siteUrl, sitemapUrl);
+          if (googleResult.submitted) submittedTo.push('google');
+        }
+      }
+
+      // Bing
+      const bingKey = process.env.BING_WMT_API_KEY;
+      if (bingKey) {
+        bingResult = await submitToBing(bingKey, siteUrl, sitemapUrl);
+        if (bingResult.submitted) submittedTo.push('bing');
+      }
+    }
+
+    res.json({
+      urls: wpUrls.length,
+      sitemapUrl: sitemapUrl || null,
+      sitemapDetected: !!sitemapUrl,
+      submittedTo,
+      google: googleResult,
+      bing: bingResult,
+    });
+  } catch (err) {
+    console.error('[arion/search/generate-sitemap]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
