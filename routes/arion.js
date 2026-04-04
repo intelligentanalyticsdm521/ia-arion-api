@@ -8,7 +8,9 @@ import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, g
 import { getAccessToken } from '../lib/googleBusiness.js';
 import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats } from '../lib/bingWebmaster.js';
 import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing } from '../lib/sitemapGenerator.js';
-import { getDomainInfo, getDnsRecords, getSslStatus, getWpSiteInfo, getWpPages, getWpPosts } from '../lib/hostinger.js';
+import { getDomainInfo, getDnsRecords, createDnsRecords, deleteDnsRecords, getSslStatus, getWpSiteInfo, getWpPages, getWpPosts, getWpPlugins } from '../lib/hostinger.js';
+import { runPageSpeedTest } from '../lib/pagespeed.js';
+import { meetsMinTier } from '../lib/tierCheck.js';
 import formsRouter from './arion/forms.js';
 import bookingsRouter from './arion/bookings.js';
 
@@ -226,13 +228,14 @@ router.get('/hosting', async (req, res) => {
     // Parallel calls to Hostinger API + WordPress REST API
     const safeCall = (p) => p.catch(e => { console.warn('[hosting] sub-call failed:', e.message); return null; });
 
-    const [domainInfo, dnsRecords, sslInfo, wpInfo, wpPages, wpPosts] = await Promise.all([
+    const [domainInfo, dnsRecords, sslInfo, wpInfo, wpPages, wpPosts, wpPlugins] = await Promise.all([
       site.domain ? safeCall(getDomainInfo(site.domain)) : null,
       site.domain ? safeCall(getDnsRecords(site.domain)) : null,
       site.domain ? safeCall(getSslStatus(site.domain)) : null,
       site.domain ? safeCall(getWpSiteInfo(site.domain)) : null,
       site.domain ? safeCall(getWpPages(site.domain)) : null,
       site.domain ? safeCall(getWpPosts(site.domain)) : null,
+      site.domain ? safeCall(getWpPlugins(site.domain)) : null,
     ]);
 
     // Detect staging environment
@@ -278,6 +281,8 @@ router.get('/hosting', async (req, res) => {
         name: wpInfo.name || null,
         description: wpInfo.description || null,
         url: wpInfo.url || null,
+        liteSpeedCache: wpPlugins ? wpPlugins.some(p => (p.plugin || p.textdomain || '').toLowerCase().includes('litespeed')) : null,
+        objectCache: wpPlugins ? wpPlugins.some(p => (p.plugin || p.textdomain || '').toLowerCase().includes('object-cache') || (p.plugin || p.textdomain || '').toLowerCase().includes('redis')) : null,
       } : null,
       content: {
         pages: wpPages?.length ?? null,
@@ -291,7 +296,12 @@ router.get('/hosting', async (req, res) => {
         manageUrl: site.domain ? 'https://hpanel.hostinger.com/websites/' + site.domain + '/wordpress/staging/' + site.domain : null,
       },
       quickEditorUrl: site.domain ? 'https://hpanel.hostinger.com/websites/' + site.domain + '/wordpress/dashboard' : null,
-      plugins: [], // still needs SSH/WP-CLI or auth'd REST API
+      plugins: wpPlugins || [], // from WP REST API — returns null if not auth'd
+      performance: {
+        lastDesktopScore: null,  // will be populated by PageSpeed test results stored in DB
+        lastMobileScore: null,
+        lastTestedAt: null,
+      },
       requests: [],
     });
   } catch (err) {
@@ -995,6 +1005,117 @@ router.post('/search/generate-sitemap', async (req, res) => {
     });
   } catch (err) {
     console.error('[arion/search/generate-sitemap]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/hosting/dns?siteId= — Create/update DNS records (Pro+ tier) ---
+router.post('/hosting/dns', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId query param required', status: 400 } });
+  const { records } = req.body;
+  if (!records || !Array.isArray(records) || records.length === 0) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'records array is required', status: 400 } });
+  }
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!meetsMinTier(site.arion_tier, 'pro')) {
+      return res.status(402).json({ error: { code: 'TIER_LIMIT_REACHED', message: 'This feature requires pro tier or above', status: 402, upgrade: { current_tier: site.arion_tier, required_tier: 'pro' } } });
+    }
+    if (!site.domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
+
+    const result = await createDnsRecords(site.domain, records, false);
+    if (!result) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: 'Failed to create DNS records', status: 502 } });
+
+    res.json({ domain: site.domain, result });
+  } catch (err) {
+    console.error('[arion/hosting/dns POST]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- DELETE /arion/hosting/dns?siteId= — Delete DNS records (Pro+ tier) ---
+router.delete('/hosting/dns', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId query param required', status: 400 } });
+  const { records } = req.body;
+  if (!records || !Array.isArray(records) || records.length === 0) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'records array is required', status: 400 } });
+  }
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!meetsMinTier(site.arion_tier, 'pro')) {
+      return res.status(402).json({ error: { code: 'TIER_LIMIT_REACHED', message: 'This feature requires pro tier or above', status: 402, upgrade: { current_tier: site.arion_tier, required_tier: 'pro' } } });
+    }
+    if (!site.domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
+
+    const result = await deleteDnsRecords(site.domain, records);
+    if (!result) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: 'Failed to delete DNS records', status: 502 } });
+
+    res.json({ domain: site.domain, result });
+  } catch (err) {
+    console.error('[arion/hosting/dns DELETE]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/hosting/pagespeed?siteId= — Run PageSpeed test ---
+router.post('/hosting/pagespeed', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId query param required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
+
+    const testUrl = 'https://' + site.domain;
+    const { strategy } = req.body || {};
+
+    let desktop = null;
+    let mobile = null;
+
+    if (!strategy || strategy === 'desktop') {
+      desktop = await runPageSpeedTest(testUrl, 'desktop');
+    }
+    if (!strategy || strategy === 'mobile') {
+      mobile = await runPageSpeedTest(testUrl, 'mobile');
+    }
+
+    res.json({ desktop, mobile });
+  } catch (err) {
+    console.error('[arion/hosting/pagespeed POST]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/hosting/pagespeed?siteId= — Get PageSpeed results (runs live for now) ---
+router.get('/hosting/pagespeed', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId query param required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
+
+    const testUrl = 'https://' + site.domain;
+    const [desktop, mobile] = await Promise.all([
+      runPageSpeedTest(testUrl, 'desktop'),
+      runPageSpeedTest(testUrl, 'mobile'),
+    ]);
+
+    res.json({ desktop, mobile });
+  } catch (err) {
+    console.error('[arion/hosting/pagespeed GET]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
