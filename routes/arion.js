@@ -26,7 +26,8 @@ function toSiteSummary(row) {
     isEcommerceEnabled: false,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    arionTier: row.arion_tier
+    arionTier: row.arion_tier,
+    seoAddonTier: row.seo_addon_tier || null
   };
 }
 
@@ -303,13 +304,13 @@ router.get('/seo', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    let connected = site.se_ranking_project_id ? true : false;
+    let connected = !!(site.se_ranking_project_id || site.seo_addon_tier);
     let integration = null;
     let sePackage = { code: site.seo_addon_tier || null, label: null, keywordLimit: null, competitorLimit: null, modelLimit: null, groupLimit: null, aiEnabled: false, dataApiEnabled: false };
     let snapshot = { visibilityScore: null, auditScore: null, trackedKeywords: null, trackedCompetitors: null, trackedModels: null, criticalIssues: null, warningIssues: null };
     let breakdowns = {};
 
-    if (connected && site.seo_addon_tier) {
+    if (site.seo_addon_tier) {
       try {
         const seoRes = await pool.request()
           .input('tenantId', sql.UniqueIdentifier, tenantId)
