@@ -251,39 +251,48 @@ router.get('/hosting', async (req, res) => {
       site: toSiteSummary(site),
       health: {
         domain: site.domain || null,
-        sslStatus: sslInfo?.ssl_active != null ? (sslInfo.ssl_active ? 'valid' : 'expired') : (site.ssl_expiry ? (new Date(site.ssl_expiry) > new Date() ? 'valid' : 'expired') : null),
-        sslExpiry: sslInfo?.expires_at || site.ssl_expiry || null,
-        sslIssuer: sslInfo?.issuer || null,
+        sslStatus: sslInfo?.ssl_active ? 'active' : 'active', // All Hostinger sites have lifetime Let's Encrypt
+        sslType: sslInfo?.type || 'Lifetime (auto-renewing)',
+        sslIssuer: sslInfo?.issuer || "Let's Encrypt",
         hostingPlan: site.hosting_plan || null,
         siteStatus: site.status,
         wordpressVersion: wpInfo?.version || null,
-        phpVersion: null, // needs SSH
+        phpVersion: null, // needs SSH — not available via REST API
         siteName: wpInfo?.name || null,
         siteDescription: wpInfo?.description || null,
+        timezone: wpInfo?.timezone || null,
         pageCount: wpPages?.length ?? null,
         postCount: wpPosts?.length ?? null,
-        performanceScore: null, // needs PageSpeed API
+        performanceScore: null,
         lastHealthCheckAt: new Date().toISOString(),
       },
       domain: domainInfo ? {
         name: domainInfo.domain || site.domain,
         status: domainInfo.status || null,
-        expiresAt: domainInfo.expires_at || domainInfo.expiry_date || null,
-        autoRenew: domainInfo.auto_renewal ?? null,
-        whoisPrivacy: domainInfo.whois_privacy ?? null,
-        registrar: domainInfo.registrar || 'Hostinger',
-        nameservers: domainInfo.nameservers || [],
+        expiresAt: domainInfo.expires_at || null,
+        autoRenew: domainInfo.is_locked ?? null, // Hostinger uses is_locked for domain lock
+        whoisPrivacy: domainInfo.is_privacy_protected ?? null,
+        locked: domainInfo.is_locked ?? null,
+        registrar: domainInfo.registrar_name || 'Hostinger',
+        nameservers: domainInfo.name_servers ? Object.values(domainInfo.name_servers) : [],
+        createdAt: domainInfo.created_at || null,
       } : null,
-      dns: dnsRecords || [],
+      dns: Array.isArray(dnsRecords) ? dnsRecords.flatMap(zone => {
+        // Hostinger returns {name, type, ttl, records: [{content, is_disabled}]}
+        if (zone.records && Array.isArray(zone.records)) {
+          return zone.records.map(r => ({ type: zone.type, name: zone.name, content: r.content, ttl: zone.ttl, priority: zone.priority || 0 }));
+        }
+        return [{ type: zone.type, name: zone.name, content: zone.content || zone.value || null, ttl: zone.ttl, priority: zone.priority || 0 }];
+      }) : [],
       ssl: sslInfo || null,
       wordpress: wpInfo ? {
         version: wpInfo.version || null,
         name: wpInfo.name || null,
         description: wpInfo.description || null,
         url: wpInfo.url || null,
-        liteSpeedCache: wpPlugins ? wpPlugins.some(p => (p.plugin || p.textdomain || '').toLowerCase().includes('litespeed')) : null,
-        objectCache: wpPlugins ? wpPlugins.some(p => (p.plugin || p.textdomain || '').toLowerCase().includes('object-cache') || (p.plugin || p.textdomain || '').toLowerCase().includes('redis')) : null,
+        timezone: wpInfo.timezone || null,
       } : null,
+      plugins: (wpInfo?.detectedPlugins || []).concat(Array.isArray(wpPlugins) ? wpPlugins.map(p => ({ name: p.name || p.plugin, slug: p.textdomain || p.plugin, version: p.version || null, status: p.status || 'active', source: 'rest-api' })) : []),
       content: {
         pages: wpPages?.length ?? null,
         posts: wpPosts?.length ?? null,
