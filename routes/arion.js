@@ -116,35 +116,37 @@ router.get('/overview', async (req, res) => {
       .query('SELECT COUNT(*) AS cnt FROM arion.site WHERE tenant_id = @tenantId')).recordset[0].cnt;
 
     // Parallel queries for overview data (only if we have a site)
+    // Each query wrapped to prevent a missing table from crashing the whole response
     let formsCount = 0, bookingsCount = 0, gscSummary = null, gbpProfile = null, seoSummary = null;
     if (site) {
+      const safeQuery = (promise) => promise.catch(e => { console.warn('[arion/overview] sub-query failed:', e.message); return null; });
       const [formsRes, bookingsRes, gscRes, gbpRes, seoRes] = await Promise.all([
-        pool.request()
+        safeQuery(pool.request()
           .input('tenantId', sql.UniqueIdentifier, tenantId)
           .input('siteId', sql.UniqueIdentifier, site.site_id)
-          .query('SELECT COUNT(*) AS cnt FROM arion.site_form_submission WHERE tenant_id = @tenantId AND site_id = @siteId AND submitted_at >= DATEADD(day, -30, GETUTCDATE())'),
-        pool.request()
+          .query('SELECT COUNT(*) AS cnt FROM arion.site_form_submission WHERE tenant_id = @tenantId AND site_id = @siteId AND submitted_at >= DATEADD(day, -30, GETUTCDATE())')),
+        safeQuery(pool.request()
           .input('tenantId', sql.UniqueIdentifier, tenantId)
           .input('siteId', sql.UniqueIdentifier, site.site_id)
-          .query('SELECT COUNT(*) AS cnt FROM arion.site_booking_request WHERE tenant_id = @tenantId AND site_id = @siteId AND submitted_at >= DATEADD(day, -30, GETUTCDATE())'),
-        site.gsc_connected ? pool.request()
+          .query('SELECT COUNT(*) AS cnt FROM arion.site_booking_request WHERE tenant_id = @tenantId AND site_id = @siteId AND submitted_at >= DATEADD(day, -30, GETUTCDATE())')),
+        site.gsc_connected ? safeQuery(pool.request()
           .input('tenantId', sql.UniqueIdentifier, tenantId)
           .input('siteId', sql.UniqueIdentifier, site.site_id)
-          .query('SELECT SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -30, GETUTCDATE())') : Promise.resolve(null),
-        site.gbp_connected ? pool.request()
+          .query('SELECT SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -30, GETUTCDATE())')) : Promise.resolve(null),
+        site.gbp_connected ? safeQuery(pool.request()
           .input('tenantId', sql.UniqueIdentifier, tenantId)
           .input('siteId', sql.UniqueIdentifier, site.site_id)
-          .query('SELECT * FROM arion.gbp_profile WHERE tenant_id = @tenantId AND site_id = @siteId') : Promise.resolve(null),
-        pool.request()
+          .query('SELECT * FROM arion.gbp_profile WHERE tenant_id = @tenantId AND site_id = @siteId')) : Promise.resolve(null),
+        safeQuery(pool.request()
           .input('tenantId', sql.UniqueIdentifier, tenantId)
           .input('siteId', sql.UniqueIdentifier, site.site_id)
-          .query('SELECT TOP 1 * FROM arion.se_ranking_summary WHERE tenant_id = @tenantId AND site_id = @siteId ORDER BY fetched_at DESC')
+          .query('SELECT TOP 1 * FROM arion.se_ranking_summary WHERE tenant_id = @tenantId AND site_id = @siteId ORDER BY fetched_at DESC'))
       ]);
-      formsCount = formsRes.recordset[0].cnt;
-      bookingsCount = bookingsRes.recordset[0].cnt;
+      formsCount = formsRes?.recordset?.[0]?.cnt ?? 0;
+      bookingsCount = bookingsRes?.recordset?.[0]?.cnt ?? 0;
       gscSummary = gscRes?.recordset?.[0] || null;
       gbpProfile = gbpRes?.recordset?.[0] || null;
-      seoSummary = seoRes.recordset[0] || null;
+      seoSummary = seoRes?.recordset?.[0] || null;
     }
 
     const gscConnected = site?.gsc_connected ? true : false;
@@ -269,24 +271,20 @@ router.get('/console/:provider', async (req, res) => {
     let breakdowns = { queries: [], pages: [], devices: [], countries: [], comparisons: [] };
 
     if (provider === 'GOOGLE' && connected) {
-      const [summaryRes, queriesRes, pagesRes] = await Promise.all([
-        pool.request()
-          .input('tenantId', sql.UniqueIdentifier, tenantId)
-          .input('siteId', sql.UniqueIdentifier, siteId)
-          .query('SELECT SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -28, GETUTCDATE())'),
-        pool.request()
-          .input('tenantId', sql.UniqueIdentifier, tenantId)
-          .input('siteId', sql.UniqueIdentifier, siteId)
-          .query('SELECT TOP 20 query, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -28, GETUTCDATE()) AND query IS NOT NULL GROUP BY query ORDER BY SUM(impressions) DESC'),
-        pool.request()
-          .input('tenantId', sql.UniqueIdentifier, tenantId)
-          .input('siteId', sql.UniqueIdentifier, siteId)
-          .query('SELECT TOP 20 page, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -28, GETUTCDATE()) AND page IS NOT NULL GROUP BY page ORDER BY SUM(impressions) DESC')
-      ]);
-      const s = summaryRes.recordset[0];
-      summary = { clicks: s.clicks ?? null, impressions: s.impressions ?? null, ctr: s.ctr ?? null, avgPosition: s.avgPosition ?? null };
-      breakdowns.queries = queriesRes.recordset.map(r => ({ query: r.query, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, avgPosition: r.avgPosition }));
-      breakdowns.pages = pagesRes.recordset.map(r => ({ page: r.page, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, avgPosition: r.avgPosition }));
+      try {
+        const safeQ = (p) => p.catch(e => { console.warn('[arion/console] sub-query failed:', e.message); return null; });
+        const [summaryRes, queriesRes, pagesRes] = await Promise.all([
+          safeQ(pool.request().input('tenantId', sql.UniqueIdentifier, tenantId).input('siteId', sql.UniqueIdentifier, siteId)
+            .query('SELECT SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -28, GETUTCDATE())')),
+          safeQ(pool.request().input('tenantId', sql.UniqueIdentifier, tenantId).input('siteId', sql.UniqueIdentifier, siteId)
+            .query('SELECT TOP 20 query, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -28, GETUTCDATE()) AND query IS NOT NULL GROUP BY query ORDER BY SUM(impressions) DESC')),
+          safeQ(pool.request().input('tenantId', sql.UniqueIdentifier, tenantId).input('siteId', sql.UniqueIdentifier, siteId)
+            .query('SELECT TOP 20 page, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -28, GETUTCDATE()) AND page IS NOT NULL GROUP BY page ORDER BY SUM(impressions) DESC'))
+        ]);
+        if (summaryRes) { const s = summaryRes.recordset[0]; summary = { clicks: s?.clicks ?? null, impressions: s?.impressions ?? null, ctr: s?.ctr ?? null, avgPosition: s?.avgPosition ?? null }; }
+        if (queriesRes) breakdowns.queries = queriesRes.recordset.map(r => ({ query: r.query, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, avgPosition: r.avgPosition }));
+        if (pagesRes) breakdowns.pages = pagesRes.recordset.map(r => ({ page: r.page, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, avgPosition: r.avgPosition }));
+      } catch (e) { console.warn('[arion/console] gsc queries failed:', e.message); }
     }
 
     res.json({ site: toSiteSummary(site), provider, connected, summary, breakdowns, integration: null });
@@ -312,22 +310,16 @@ router.get('/seo', async (req, res) => {
     let breakdowns = {};
 
     if (connected && site.seo_addon_tier) {
-      const seoRes = await pool.request()
-        .input('tenantId', sql.UniqueIdentifier, tenantId)
-        .input('siteId', sql.UniqueIdentifier, siteId)
-        .query('SELECT TOP 1 * FROM arion.se_ranking_summary WHERE tenant_id = @tenantId AND site_id = @siteId ORDER BY fetched_at DESC');
-      const row = seoRes.recordset[0];
-      if (row) {
-        snapshot = {
-          visibilityScore: row.visibility_score ?? null,
-          auditScore: row.audit_score ?? null,
-          trackedKeywords: row.tracked_keywords ?? null,
-          trackedCompetitors: row.tracked_competitors ?? null,
-          trackedModels: row.tracked_models ?? null,
-          criticalIssues: row.critical_issues ?? null,
-          warningIssues: row.warning_issues ?? null
-        };
-      }
+      try {
+        const seoRes = await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .query('SELECT TOP 1 * FROM arion.se_ranking_summary WHERE tenant_id = @tenantId AND site_id = @siteId ORDER BY fetched_at DESC');
+        const row = seoRes.recordset[0];
+        if (row) {
+          snapshot = { visibilityScore: row.visibility_score ?? null, auditScore: row.audit_score ?? null, trackedKeywords: row.tracked_keywords ?? null, trackedCompetitors: row.tracked_competitors ?? null, trackedModels: row.tracked_models ?? null, criticalIssues: row.critical_issues ?? null, warningIssues: row.warning_issues ?? null };
+        }
+      } catch (e) { console.warn('[arion/seo] se_ranking_summary query failed:', e.message); }
     }
 
     res.json({ site: toSiteSummary(site), connected, integration, package: sePackage, snapshot, breakdowns });
@@ -353,26 +345,16 @@ router.get('/my-business/:provider', async (req, res) => {
     let profile = nullProfile(connected);
 
     if (provider === 'google' && connected) {
-      const gbpRes = await pool.request()
-        .input('tenantId', sql.UniqueIdentifier, tenantId)
-        .input('siteId', sql.UniqueIdentifier, siteId)
-        .query('SELECT * FROM arion.gbp_profile WHERE tenant_id = @tenantId AND site_id = @siteId');
-      const row = gbpRes.recordset[0];
-      if (row) {
-        profile = {
-          connected: true,
-          editable: true,
-          displayName: row.business_name || null,
-          primaryCategory: row.categories || null,
-          websiteUrl: row.website || null,
-          mapsUrl: null,
-          phone: row.phone || null,
-          address: row.address || null,
-          hours: row.hours || null,
-          resourceUrl: null,
-          integration: null
-        };
-      }
+      try {
+        const gbpRes = await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .query('SELECT * FROM arion.gbp_profile WHERE tenant_id = @tenantId AND site_id = @siteId');
+        const row = gbpRes.recordset[0];
+        if (row) {
+          profile = { connected: true, editable: true, displayName: row.business_name || null, primaryCategory: row.categories || null, websiteUrl: row.website || null, mapsUrl: null, phone: row.phone || null, address: row.address || null, hours: row.hours || null, resourceUrl: null, integration: null };
+        }
+      } catch (e) { console.warn('[arion/my-business] gbp_profile query failed:', e.message); }
     }
 
     res.json({ site: toSiteSummary(site), provider, profile });
