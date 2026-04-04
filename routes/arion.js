@@ -8,6 +8,7 @@ import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, g
 import { getAccessToken } from '../lib/googleBusiness.js';
 import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats } from '../lib/bingWebmaster.js';
 import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing } from '../lib/sitemapGenerator.js';
+import { getDomainInfo, getDnsRecords, getSslStatus, getWpSiteInfo, getWpPages, getWpPosts } from '../lib/hostinger.js';
 import formsRouter from './arion/forms.js';
 import bookingsRouter from './arion/bookings.js';
 
@@ -123,9 +124,10 @@ router.get('/overview', async (req, res) => {
     // Parallel queries for overview data (only if we have a site)
     // Each query wrapped to prevent a missing table from crashing the whole response
     let formsCount = 0, bookingsCount = 0, gscSummary = null, gbpProfile = null, seoSummary = null;
+    let wpInfo = null, wpPages = null, wpPosts = null;
     if (site) {
       const safeQuery = (promise) => promise.catch(e => { console.warn('[arion/overview] sub-query failed:', e.message); return null; });
-      const [formsRes, bookingsRes, gscRes, gbpRes, seoRes] = await Promise.all([
+      const [formsRes, bookingsRes, gscRes, gbpRes, seoRes, wpInfoRes, wpPagesRes, wpPostsRes] = await Promise.all([
         safeQuery(pool.request()
           .input('tenantId', sql.UniqueIdentifier, tenantId)
           .input('siteId', sql.UniqueIdentifier, site.site_id)
@@ -145,13 +147,19 @@ router.get('/overview', async (req, res) => {
         safeQuery(pool.request()
           .input('tenantId', sql.UniqueIdentifier, tenantId)
           .input('siteId', sql.UniqueIdentifier, site.site_id)
-          .query('SELECT TOP 1 * FROM arion.se_ranking_summary WHERE tenant_id = @tenantId AND site_id = @siteId ORDER BY fetched_at DESC'))
+          .query('SELECT TOP 1 * FROM arion.se_ranking_summary WHERE tenant_id = @tenantId AND site_id = @siteId ORDER BY fetched_at DESC')),
+        site.domain ? safeQuery(getWpSiteInfo(site.domain)) : Promise.resolve(null),
+        site.domain ? safeQuery(getWpPages(site.domain)) : Promise.resolve(null),
+        site.domain ? safeQuery(getWpPosts(site.domain)) : Promise.resolve(null),
       ]);
       formsCount = formsRes?.recordset?.[0]?.cnt ?? 0;
       bookingsCount = bookingsRes?.recordset?.[0]?.cnt ?? 0;
       gscSummary = gscRes?.recordset?.[0] || null;
       gbpProfile = gbpRes?.recordset?.[0] || null;
       seoSummary = seoRes?.recordset?.[0] || null;
+      wpInfo = wpInfoRes;
+      wpPages = wpPagesRes;
+      wpPosts = wpPostsRes;
     }
 
     const gscConnected = site?.gsc_connected ? true : false;
@@ -185,7 +193,7 @@ router.get('/overview', async (req, res) => {
         formSubmissions30d: formsCount,
         bookingRequests30d: bookingsCount
       },
-      hosting: { siteStatus: site?.status || null, sslStatus: site?.ssl_expiry ? (new Date(site.ssl_expiry) > new Date() ? 'valid' : 'expired') : null, pluginUpdatesAvailable: null, wordpressVersion: null, phpVersion: null, performanceScore: null, lastHealthCheckAt: null },
+      hosting: { siteStatus: site?.status || null, sslStatus: site?.ssl_expiry ? (new Date(site.ssl_expiry) > new Date() ? 'valid' : 'expired') : null, pluginUpdatesAvailable: null, wordpressVersion: wpInfo?.version || null, siteName: wpInfo?.name || null, pageCount: wpPages?.length ?? null, postCount: wpPosts?.length ?? null, phpVersion: null, performanceScore: null, lastHealthCheckAt: wpInfo ? new Date().toISOString() : null },
       seo: {
         connected: seoConnected,
         seoPackageCode: site?.seo_addon_tier || null,
@@ -214,27 +222,95 @@ router.get('/hosting', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    // Parallel calls to Hostinger API + WordPress REST API
+    const safeCall = (p) => p.catch(e => { console.warn('[hosting] sub-call failed:', e.message); return null; });
+
+    const [domainInfo, dnsRecords, sslInfo, wpInfo, wpPages, wpPosts] = await Promise.all([
+      site.domain ? safeCall(getDomainInfo(site.domain)) : null,
+      site.domain ? safeCall(getDnsRecords(site.domain)) : null,
+      site.domain ? safeCall(getSslStatus(site.domain)) : null,
+      site.domain ? safeCall(getWpSiteInfo(site.domain)) : null,
+      site.domain ? safeCall(getWpPages(site.domain)) : null,
+      site.domain ? safeCall(getWpPosts(site.domain)) : null,
+    ]);
+
     res.json({
       site: toSiteSummary(site),
       health: {
         domain: site.domain || null,
-        sslExpiry: site.ssl_expiry || null,
+        sslStatus: sslInfo?.ssl_active != null ? (sslInfo.ssl_active ? 'valid' : 'expired') : (site.ssl_expiry ? (new Date(site.ssl_expiry) > new Date() ? 'valid' : 'expired') : null),
+        sslExpiry: sslInfo?.expires_at || site.ssl_expiry || null,
+        sslIssuer: sslInfo?.issuer || null,
         hostingPlan: site.hosting_plan || null,
-        wordpressVersion: null,
-        phpVersion: null,
-        pluginUpdatesAvailable: null,
-        themeUpdatesAvailable: null,
-        sslStatus: site.ssl_expiry ? (new Date(site.ssl_expiry) > new Date() ? 'valid' : 'expired') : null,
         siteStatus: site.status,
-        lastHealthCheckAt: null,
-        formDeliveryStatus: null,
-        performanceScore: null
+        wordpressVersion: wpInfo?.version || null,
+        phpVersion: null, // needs SSH
+        siteName: wpInfo?.name || null,
+        siteDescription: wpInfo?.description || null,
+        pageCount: wpPages?.length ?? null,
+        postCount: wpPosts?.length ?? null,
+        performanceScore: null, // needs PageSpeed API
+        lastHealthCheckAt: new Date().toISOString(),
       },
-      plugins: [],
-      requests: []
+      domain: domainInfo ? {
+        name: domainInfo.domain || site.domain,
+        status: domainInfo.status || null,
+        expiresAt: domainInfo.expires_at || domainInfo.expiry_date || null,
+        autoRenew: domainInfo.auto_renewal ?? null,
+        whoisPrivacy: domainInfo.whois_privacy ?? null,
+        registrar: domainInfo.registrar || 'Hostinger',
+        nameservers: domainInfo.nameservers || [],
+      } : null,
+      dns: dnsRecords || [],
+      ssl: sslInfo || null,
+      wordpress: wpInfo ? {
+        version: wpInfo.version || null,
+        name: wpInfo.name || null,
+        description: wpInfo.description || null,
+        url: wpInfo.url || null,
+      } : null,
+      content: {
+        pages: wpPages?.length ?? null,
+        posts: wpPosts?.length ?? null,
+        recentPages: (wpPages || []).slice(0, 5).map(p => ({ id: p.id, title: p.title?.rendered || p.title, slug: p.slug, modified: p.modified, link: p.link })),
+        recentPosts: (wpPosts || []).slice(0, 5).map(p => ({ id: p.id, title: p.title?.rendered || p.title, slug: p.slug, modified: p.modified, link: p.link })),
+      },
+      plugins: [], // still needs SSH/WP-CLI or auth'd REST API
+      requests: [],
     });
   } catch (err) {
     console.error('[arion/hosting]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/hosting/dns?siteId= ---
+router.get('/hosting/dns', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId query param required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.domain) return res.json({ domain: null, records: [] });
+
+    const dnsRecords = await getDnsRecords(site.domain);
+    const records = Array.isArray(dnsRecords) ? dnsRecords : (dnsRecords?.records || []);
+
+    res.json({
+      domain: site.domain,
+      records: records.map(r => ({
+        type: r.type || null,
+        name: r.name || r.host || null,
+        value: r.value || r.content || r.address || null,
+        ttl: r.ttl ?? null,
+        priority: r.priority ?? null,
+      })),
+    });
+  } catch (err) {
+    console.error('[arion/hosting/dns]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
