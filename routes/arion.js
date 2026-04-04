@@ -235,6 +235,15 @@ router.get('/hosting', async (req, res) => {
       site.domain ? safeCall(getWpPosts(site.domain)) : null,
     ]);
 
+    // Detect staging environment
+    let stagingExists = false;
+    if (site.domain) {
+      try {
+        const stagingRes = await fetch('https://staging.' + site.domain, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+        stagingExists = stagingRes.ok;
+      } catch { /* staging not reachable */ }
+    }
+
     res.json({
       site: toSiteSummary(site),
       health: {
@@ -276,6 +285,12 @@ router.get('/hosting', async (req, res) => {
         recentPages: (wpPages || []).slice(0, 5).map(p => ({ id: p.id, title: p.title?.rendered || p.title, slug: p.slug, modified: p.modified, link: p.link })),
         recentPosts: (wpPosts || []).slice(0, 5).map(p => ({ id: p.id, title: p.title?.rendered || p.title, slug: p.slug, modified: p.modified, link: p.link })),
       },
+      staging: {
+        exists: stagingExists,
+        url: site.domain ? 'https://staging.' + site.domain : null,
+        manageUrl: site.domain ? 'https://hpanel.hostinger.com/websites/' + site.domain + '/wordpress/staging/' + site.domain : null,
+      },
+      quickEditorUrl: site.domain ? 'https://hpanel.hostinger.com/websites/' + site.domain + '/wordpress/dashboard' : null,
       plugins: [], // still needs SSH/WP-CLI or auth'd REST API
       requests: [],
     });
