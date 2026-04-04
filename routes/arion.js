@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { getServicesPool } from '../db/servicesPool.js';
 import { firePlatformEvent } from '../lib/platformEvents.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
-import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries } from '../lib/googleServices.js';
+import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries, getAnalyticsData } from '../lib/googleServices.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
 import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats } from '../lib/bingWebmaster.js';
 import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing } from '../lib/sitemapGenerator.js';
@@ -359,6 +359,24 @@ router.get('/website-analytics/:provider', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const days = parseInt(req.query.days) || 28;
+
+    // If provider is GOOGLE and site has a refresh token, call GA4 API
+    if (provider === 'GOOGLE' && site.gbp_oauth_token_ref) {
+      try {
+        const gaData = await getAnalyticsData(site.gbp_oauth_token_ref, site.ga4_property_id || site.domain, days);
+        if (gaData) {
+          return res.json({
+            site: toSiteSummary(site), provider, connected: true,
+            summary: gaData.summary,
+            breakdowns: { topPages: gaData.topPages, topSources: gaData.topSources, devices: gaData.devices, geos: gaData.geos || [], landingPages: gaData.landingPages || [] },
+            integration: null
+          });
+        }
+      } catch (e) { console.warn('[analytics] GA4 call failed:', e.message); }
+    }
+
+    // Fallback: return null response
     res.json({
       site: toSiteSummary(site), provider, connected: false,
       summary: { users: null, sessions: null, views: null, engagementRate: null, avgEngagementTimeSeconds: null, conversions: null, revenueUsd: null },
