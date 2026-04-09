@@ -11,14 +11,21 @@ import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing } f
 import { getDomainInfo, getDnsRecords, createDnsRecords, deleteDnsRecords, getSslStatus, getWpSiteInfo, getWpPages, getWpPosts, getWpPlugins } from '../lib/hostinger.js';
 import { runPageSpeedTest } from '../lib/pagespeed.js';
 import { meetsMinTier } from '../lib/tierCheck.js';
+import { getKeywordPositions, getProjectCompetitors, getAuditSummary } from '../lib/seranking.js';
 import formsRouter from './arion/forms.js';
 import bookingsRouter from './arion/bookings.js';
+import gbpRouter from './arion/gbp.js';
+import integrationsRouter from './arion/integrations.js';
+import domainsRouter from './arion/domains.js';
 
 const router = Router();
 
 // Sub-routers for site-scoped data (blueprint routes)
 router.use('/sites/:siteId/forms', formsRouter);
 router.use('/sites/:siteId/bookings', bookingsRouter);
+router.use('/sites/:siteId/gbp', gbpRouter);
+router.use('/sites/:siteId', integrationsRouter);
+router.use('/sites/:siteId/domain', domainsRouter);
 
 // Helper: get site summary for portal
 function toSiteSummary(row) {
@@ -453,6 +460,53 @@ router.get('/seo', async (req, res) => {
           snapshot = { visibilityScore: row.visibility_score ?? null, auditScore: row.audit_score ?? null, trackedKeywords: row.tracked_keywords ?? null, trackedCompetitors: row.tracked_competitors ?? null, trackedModels: row.tracked_models ?? null, criticalIssues: row.critical_issues ?? null, warningIssues: row.warning_issues ?? null };
         }
       } catch (e) { console.warn('[arion/seo] se_ranking_summary query failed:', e.message); }
+    }
+
+    // Enrich breakdowns with real SE Ranking data
+    if (site.se_ranking_project_id) {
+      const [rankings, competitors] = await Promise.all([
+        getKeywordPositions(site.se_ranking_project_id, tenantId).catch(() => []),
+        getProjectCompetitors(site.se_ranking_project_id, tenantId).catch(() => []),
+      ]);
+
+      // Aggregate across engines: group by keyword name, average positions
+      const byKeyword = {};
+      for (const r of rankings) {
+        const name = r.name || r.keyword || '';
+        if (!byKeyword[name]) byKeyword[name] = { keyword: name, positions: [], volume: r.volume || 0, serp_features: r.serp_features || [] };
+        if (r.pos != null) byKeyword[name].positions.push(r.pos);
+      }
+      const aggregatedRankings = Object.values(byKeyword).map(kw => ({
+        keyword: kw.keyword,
+        position: kw.positions.length ? Math.round(kw.positions.reduce((a, b) => a + b, 0) / kw.positions.length) : null,
+        change: null,
+        volume: kw.volume,
+        serp_features: kw.serp_features,
+      }));
+
+      // Compute opportunities: keywords at positions 11-20
+      const opportunities = aggregatedRankings
+        .filter(k => k.position >= 11 && k.position <= 20)
+        .map(k => ({ keyword: k.keyword, position: k.position, volume: k.volume, estimated_gain: Math.round(k.volume * 0.05) }));
+
+      breakdowns = { rankings: aggregatedRankings, competitors, opportunities };
+
+      // Audit data
+      if (site.se_ranking_audit_id) {
+        const auditData = await getAuditSummary(site.se_ranking_audit_id, tenantId).catch(() => null);
+        if (auditData) {
+          snapshot.auditScore = auditData.score_percent ?? snapshot.auditScore;
+          snapshot.issuesFound = (auditData.total_errors || 0) + (auditData.total_warnings || 0);
+          snapshot.pagesCrawled = auditData.total_pages ?? null;
+          breakdowns.auditSections = auditData.sections ?? [];
+          breakdowns.auditTotals = {
+            errors: auditData.total_errors || 0,
+            warnings: auditData.total_warnings || 0,
+            notices: auditData.total_notices || 0,
+            passed: auditData.total_passed || 0,
+          };
+        }
+      }
     }
 
     res.json({ site: toSiteSummary(site), connected, integration, package: sePackage, snapshot, breakdowns });
@@ -1143,6 +1197,180 @@ router.get('/hosting/pagespeed', async (req, res) => {
     res.json({ desktop, mobile });
   } catch (err) {
     console.error('[arion/hosting/pagespeed GET]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/sites/:siteId/consulting-inquiry ---
+router.post('/sites/:siteId/consulting-inquiry', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  const { service_type, description, contact_pref, trigger_page } = req.body;
+  if (!service_type) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'service_type required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const inquiryId = crypto.randomUUID();
+    await pool.request()
+      .input('inquiryId', sql.UniqueIdentifier, inquiryId)
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('serviceType', sql.NVarChar(100), service_type)
+      .input('description', sql.NVarChar(sql.MAX), description || null)
+      .input('contactPref', sql.NVarChar(30), contact_pref || 'email')
+      .input('arionTier', sql.NVarChar(20), site.arion_tier)
+      .input('seoAddon', sql.NVarChar(20), site.seo_addon_tier || null)
+      .input('triggerPage', sql.NVarChar(200), trigger_page || null)
+      .query(`INSERT INTO arion.consulting_inquiry
+        (inquiry_id,tenant_id,site_id,service_type,description,contact_pref,arion_tier,seo_addon,trigger_page)
+        VALUES(@inquiryId,@tenantId,@siteId,@serviceType,@description,@contactPref,@arionTier,@seoAddon,@triggerPage)`);
+    await firePlatformEvent(pool, { tenantId, eventType: 'arion.consulting.inquiry_created',
+      eventRefId: inquiryId, payload: { inquiry_id: inquiryId, site_id: siteId, service_type, arion_tier: site.arion_tier } });
+    res.json({ data: { inquiry_id: inquiryId }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    console.error('[consulting-inquiry]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/sites/:siteId/content-seo ---
+router.get('/sites/:siteId/content-seo', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.wp_admin_url) return res.status(409).json({ error: { code: 'NOT_READY', message: 'Site not provisioned', status: 409 } });
+
+    const domain = site.domain || site.wp_admin_url.replace(/https?:\/\//, '').replace(/\/$/, '');
+    const appPwRef = site.wp_app_password_ref;
+
+    const wpBase = `https://${domain}/wp-json/wp/v2`;
+    const headers = appPwRef
+      ? { Authorization: 'Basic ' + Buffer.from(appPwRef).toString('base64') }
+      : {};
+
+    const [pagesRes, postsRes] = await Promise.all([
+      fetch(`${wpBase}/pages?per_page=50&_fields=id,slug,link,title,modified`, { headers }).then(r => r.json()).catch(() => []),
+      fetch(`${wpBase}/posts?per_page=50&_fields=id,slug,link,title,modified,status`, { headers }).then(r => r.json()).catch(() => []),
+    ]);
+
+    const enrichItem = async (item, type) => {
+      try {
+        const url = item.link || `https://${domain}/${item.slug}`;
+        const head = await fetch(`https://${domain}/wp-json/rankmath/v1/getHead?url=${encodeURIComponent(url)}`)
+          .then(r => r.json()).catch(() => null);
+        const score = head?.head ? parseInt((head.head.match(/content="(\d+)\/100"/) || [])[1] || '0') : null;
+        const metaTitle = head?.head?.match(/<title>([^<]*)<\/title>/)?.[1] || null;
+        const metaDesc = head?.head?.match(/name="description" content="([^"]*)"/)?.[1] || null;
+        return {
+          id: item.id, type, title: item.title?.rendered || item.title || '--',
+          url: item.link, slug: item.slug, modified: item.modified,
+          seo_score: score, meta_title: metaTitle, meta_title_length: metaTitle?.length || 0,
+          meta_desc: metaDesc, meta_desc_length: metaDesc?.length || 0,
+          focus_keyword: null, robots: 'index,follow', schema_type: null,
+        };
+      } catch { return { id: item.id, type, title: item.title?.rendered || '--', seo_score: null }; }
+    };
+
+    const [pages, posts] = await Promise.all([
+      Promise.all((Array.isArray(pagesRes) ? pagesRes : []).map(p => enrichItem(p, 'page'))),
+      Promise.all((Array.isArray(postsRes) ? postsRes : []).map(p => enrichItem(p, 'post'))),
+    ]);
+
+    const all = [...pages, ...posts];
+    const scored = all.filter(i => i.seo_score != null);
+    const avgScore = scored.length ? Math.round(scored.reduce((s, i) => s + i.seo_score, 0) / scored.length) : 0;
+    res.json({ data: { pages, posts, summary: { avg_score: avgScore,
+      missing_meta: all.filter(i => !i.meta_desc).length,
+      no_focus_keyword: all.filter(i => !i.focus_keyword).length,
+      total: all.length } }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    console.error('[content-seo]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- PUT /arion/sites/:siteId/content-seo/:postId (Pro+ tier) ---
+router.put('/sites/:siteId/content-seo/:postId', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId, postId } = req.params;
+  const { rank_math_title, rank_math_description, rank_math_focus_keyword } = req.body;
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!meetsMinTier(site.arion_tier, 'pro'))
+      return res.status(402).json({ error: { code: 'TIER_REQUIRED', message: 'Pro plan required for inline SEO editing', status: 402 } });
+    const domain = site.domain;
+    const appPwRef = site.wp_app_password_ref;
+    if (!appPwRef) return res.status(409).json({ error: { code: 'NOT_CONFIGURED', message: 'WP Application Password not configured', status: 409 } });
+    const meta = {};
+    if (rank_math_title !== undefined) meta.rank_math_title = rank_math_title;
+    if (rank_math_description !== undefined) meta.rank_math_description = rank_math_description;
+    if (rank_math_focus_keyword !== undefined) meta.rank_math_focus_keyword = rank_math_focus_keyword;
+    const wpRes = await fetch(`https://${domain}/wp-json/wp/v2/posts/${encodeURIComponent(postId)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json',
+        Authorization: 'Basic ' + Buffer.from(appPwRef).toString('base64') },
+      body: JSON.stringify({ meta }),
+    });
+    if (!wpRes.ok) throw new Error('WP REST API returned ' + wpRes.status);
+    res.json({ data: { post_id: postId, updated: true }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    console.error('[content-seo:put]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/sites/:siteId/vulnerabilities ---
+router.get('/sites/:siteId/vulnerabilities', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const plugins = await getWpPlugins(site.domain).catch(() => []);
+    const vulnRes = await fetch('https://www.wordfence.com/api/intelligence/v2/vulnerabilities/scanner/', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plugins: plugins.map(p => ({ slug: p.slug || p.name, version: p.version || '' })) })
+    }).then(r => r.json()).catch(() => ({ vulnerabilities: [] }));
+    const vulns = (vulnRes.vulnerabilities || []).map(v => ({
+      plugin: v.software?.[0]?.name || v.slug, slug: v.slug,
+      installed_version: plugins.find(p => p.slug === v.slug)?.version || '--',
+      severity: v.severity || 'medium', cve: v.cve || null,
+      title: v.title, recommendation: 'Update to latest version',
+    }));
+    res.json({ data: { vulnerabilities: vulns, plugins_checked: plugins.length,
+      critical: vulns.filter(v => v.severity === 'critical').length,
+      high: vulns.filter(v => v.severity === 'high').length,
+      medium: vulns.filter(v => v.severity === 'medium').length },
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    console.error('[vulnerabilities]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/sites/:siteId/pagespeed-history ---
+router.get('/sites/:siteId/pagespeed-history', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const result = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .query(`SELECT TOP 30 * FROM arion.site_pagespeed_snapshot
+        WHERE tenant_id = @tenantId AND site_id = @siteId
+        ORDER BY run_date DESC`);
+    res.json({ data: { snapshots: result.recordset }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    console.error('[pagespeed-history]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
