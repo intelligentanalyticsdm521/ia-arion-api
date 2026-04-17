@@ -1633,6 +1633,187 @@ router.get('/analytics', async (req, res) => {
       avgDuration: parseFloat(r.metricValues[3].value),
     }));
 
+    // 6. Traffic sources (source/medium)
+    let trafficSources = [];
+    try {
+      const srcRes = await ga4Fetch({
+        dateRanges: [dateRanges[0]],
+        dimensions: [{ name: 'sessionSource' }, { name: 'sessionMedium' }],
+        metrics: [{ name: 'sessions' }, { name: 'activeUsers' }, { name: 'bounceRate' }, { name: 'averageSessionDuration' }, { name: 'keyEvents' }],
+        orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+        limit: '15',
+      });
+      trafficSources = (srcRes.rows || []).map(r => ({
+        source: r.dimensionValues[0].value,
+        medium: r.dimensionValues[1].value,
+        sessions: parseInt(r.metricValues[0].value),
+        users: parseInt(r.metricValues[1].value),
+        bounceRate: parseFloat(r.metricValues[2].value),
+        avgDuration: parseFloat(r.metricValues[3].value),
+        conversions: parseInt(r.metricValues[4].value),
+      }));
+    } catch (e) { console.warn('[analytics] trafficSources failed:', e.message); }
+
+    // 7. Landing pages
+    let landingPages = [];
+    try {
+      const lpRes = await ga4Fetch({
+        dateRanges: [dateRanges[0]],
+        dimensions: [{ name: 'landingPagePlusQueryString' }],
+        metrics: [{ name: 'sessions' }, { name: 'activeUsers' }, { name: 'bounceRate' }, { name: 'averageSessionDuration' }, { name: 'keyEvents' }],
+        orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+        limit: '10',
+      });
+      landingPages = (lpRes.rows || []).map(r => ({
+        page: r.dimensionValues[0].value,
+        sessions: parseInt(r.metricValues[0].value),
+        users: parseInt(r.metricValues[1].value),
+        bounceRate: parseFloat(r.metricValues[2].value),
+        avgDuration: parseFloat(r.metricValues[3].value),
+        conversions: parseInt(r.metricValues[4].value),
+      }));
+    } catch (e) { console.warn('[analytics] landingPages failed:', e.message); }
+
+    // 8. Geography (countries)
+    let countries = [];
+    try {
+      const geoRes = await ga4Fetch({
+        dateRanges: [dateRanges[0]],
+        dimensions: [{ name: 'country' }],
+        metrics: [{ name: 'sessions' }, { name: 'activeUsers' }],
+        orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+        limit: '10',
+      });
+      countries = (geoRes.rows || []).map(r => ({
+        country: r.dimensionValues[0].value,
+        sessions: parseInt(r.metricValues[0].value),
+        users: parseInt(r.metricValues[1].value),
+      }));
+    } catch (e) { console.warn('[analytics] countries failed:', e.message); }
+
+    // 9. Cities
+    let cities = [];
+    try {
+      const cityRes = await ga4Fetch({
+        dateRanges: [dateRanges[0]],
+        dimensions: [{ name: 'city' }],
+        metrics: [{ name: 'sessions' }, { name: 'activeUsers' }],
+        orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+        limit: '10',
+      });
+      cities = (cityRes.rows || []).map(r => ({
+        city: r.dimensionValues[0].value,
+        sessions: parseInt(r.metricValues[0].value),
+        users: parseInt(r.metricValues[1].value),
+      }));
+    } catch (e) { console.warn('[analytics] cities failed:', e.message); }
+
+    // 10. Browser breakdown
+    let browsers = [];
+    try {
+      const brRes = await ga4Fetch({
+        dateRanges: [dateRanges[0]],
+        dimensions: [{ name: 'browser' }],
+        metrics: [{ name: 'sessions' }],
+        orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+        limit: '8',
+      });
+      browsers = (brRes.rows || []).map(r => ({
+        browser: r.dimensionValues[0].value,
+        sessions: parseInt(r.metricValues[0].value),
+      }));
+    } catch (e) { console.warn('[analytics] browsers failed:', e.message); }
+
+    // 11. New vs returning users
+    let newVsReturning = [];
+    try {
+      const nvrRes = await ga4Fetch({
+        dateRanges: [dateRanges[0]],
+        dimensions: [{ name: 'newVsReturning' }],
+        metrics: [{ name: 'sessions' }, { name: 'activeUsers' }, { name: 'engagementRate' }],
+      });
+      newVsReturning = (nvrRes.rows || []).map(r => ({
+        type: r.dimensionValues[0].value,
+        sessions: parseInt(r.metricValues[0].value),
+        users: parseInt(r.metricValues[1].value),
+        engagementRate: parseFloat(r.metricValues[2].value),
+      }));
+    } catch (e) { console.warn('[analytics] newVsReturning failed:', e.message); }
+
+    // 12. Engagement metrics
+    let engagement = {};
+    try {
+      const engRes = await ga4Fetch({
+        dateRanges: [dateRanges[0]],
+        metrics: [
+          { name: 'engagedSessions' }, { name: 'engagementRate' },
+          { name: 'eventsPerSession' }, { name: 'screenPageViewsPerSession' },
+          { name: 'sessionsPerUser' }, { name: 'newUsers' },
+          { name: 'eventCount' }, { name: 'keyEvents' },
+          { name: 'scrolledUsers' },
+        ],
+      });
+      const emv = engRes.rows?.[0]?.metricValues || [];
+      engagement = {
+        engagedSessions: parseInt(emv[0]?.value || '0'),
+        engagementRate: parseFloat(emv[1]?.value || '0'),
+        eventsPerSession: parseFloat(emv[2]?.value || '0'),
+        pageviewsPerSession: parseFloat(emv[3]?.value || '0'),
+        sessionsPerUser: parseFloat(emv[4]?.value || '0'),
+        newUsers: parseInt(emv[5]?.value || '0'),
+        totalEvents: parseInt(emv[6]?.value || '0'),
+        keyEvents: parseInt(emv[7]?.value || '0'),
+        scrolledUsers: parseInt(emv[8]?.value || '0'),
+      };
+    } catch (e) { console.warn('[analytics] engagement failed:', e.message); }
+
+    // 13. Pageviews by day (for content trend)
+    let pageviewsByDay = [];
+    try {
+      const pvRes = await ga4Fetch({
+        dateRanges: [dateRanges[0]],
+        dimensions: [{ name: 'date' }],
+        metrics: [{ name: 'screenPageViews' }],
+        orderBys: [{ dimension: { dimensionName: 'date' } }],
+        limit: '366',
+      });
+      pageviewsByDay = (pvRes.rows || []).map(r => ({
+        date: r.dimensionValues[0].value.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3'),
+        pageviews: parseInt(r.metricValues[0].value),
+      }));
+    } catch (e) { console.warn('[analytics] pageviewsByDay failed:', e.message); }
+
+    // 14. Hours of day (best time to post)
+    let hourlyBreakdown = [];
+    try {
+      const hourRes = await ga4Fetch({
+        dateRanges: [dateRanges[0]],
+        dimensions: [{ name: 'hour' }],
+        metrics: [{ name: 'sessions' }, { name: 'activeUsers' }],
+        orderBys: [{ dimension: { dimensionName: 'hour' } }],
+      });
+      hourlyBreakdown = (hourRes.rows || []).map(r => ({
+        hour: parseInt(r.dimensionValues[0].value),
+        sessions: parseInt(r.metricValues[0].value),
+        users: parseInt(r.metricValues[1].value),
+      }));
+    } catch (e) { console.warn('[analytics] hourlyBreakdown failed:', e.message); }
+
+    // 15. Day of week
+    let dayOfWeekBreakdown = [];
+    try {
+      const dowRes = await ga4Fetch({
+        dateRanges: [dateRanges[0]],
+        dimensions: [{ name: 'dayOfWeekName' }],
+        metrics: [{ name: 'sessions' }, { name: 'activeUsers' }],
+      });
+      dayOfWeekBreakdown = (dowRes.rows || []).map(r => ({
+        day: r.dimensionValues[0].value,
+        sessions: parseInt(r.metricValues[0].value),
+        users: parseInt(r.metricValues[1].value),
+      }));
+    } catch (e) { console.warn('[analytics] dayOfWeekBreakdown failed:', e.message); }
+
     // 6. Comparison (if requested)
     let comparison = null;
     if (dateRanges.length > 1) {
@@ -1677,11 +1858,21 @@ router.get('/analytics', async (req, res) => {
       period,
       dateRange: { start: start.toISOString().split('T')[0], end: end.toISOString().split('T')[0] },
       summary,
+      engagement,
       sessionsByDay,
       usersByDay,
+      pageviewsByDay,
       channelBreakdown,
       deviceSplit,
       topPages,
+      landingPages,
+      trafficSources,
+      countries,
+      cities,
+      browsers,
+      newVsReturning,
+      hourlyBreakdown,
+      dayOfWeekBreakdown,
       comparison,
     };
 
