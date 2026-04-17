@@ -161,9 +161,9 @@ router.get('/google/callback', async (req, res) => {
     `);
   }
 
-  // Redirect back to portal
-  const fallbackUrl = process.env.PORTAL_URL || 'https://portal.oliverpos.com';
-  const redirectTo = returnUrl || fallbackUrl;
+  // Redirect back to portal settings with selectProperties flag
+  const portalUrl = process.env.PORTAL_URL || 'https://portal.intelligentanalyticsdm.com';
+  const redirectTo = returnUrl || `${portalUrl}/app/settings?tab=connected&selectProperties=true&siteId=${encodeURIComponent(siteId)}`;
   res.redirect(redirectTo);
 });
 

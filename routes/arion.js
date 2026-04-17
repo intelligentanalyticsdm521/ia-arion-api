@@ -1375,4 +1375,100 @@ router.get('/sites/:siteId/pagespeed-history', async (req, res) => {
   }
 });
 
+// --- GET /arion/integrations/google/properties?siteId= ---
+router.get('/integrations/google/properties', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.gbp_oauth_token_ref) return res.status(409).json({ error: { code: 'NOT_CONNECTED', message: 'Google not connected. Complete OAuth first.', status: 409 } });
+
+    const { getAccessToken } = await import('../lib/googleBusiness.js');
+    const tokenData = await getAccessToken(site.gbp_oauth_token_ref);
+    if (!tokenData) return res.status(502).json({ error: { code: 'TOKEN_ERROR', message: 'Failed to refresh Google token', status: 502 } });
+    const accessToken = tokenData.access_token;
+
+    // Fetch GA4 properties
+    let ga4Properties = [];
+    try {
+      const ga4Res = await fetch('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
+        headers: { Authorization: 'Bearer ' + accessToken }
+      });
+      if (ga4Res.ok) {
+        const data = await ga4Res.json();
+        for (const acct of (data.accountSummaries || [])) {
+          for (const prop of (acct.propertySummaries || [])) {
+            ga4Properties.push({
+              propertyId: prop.property.replace('properties/', ''),
+              displayName: prop.displayName,
+              account: acct.displayName,
+            });
+          }
+        }
+      }
+    } catch (e) { console.warn('[google/properties] GA4 list error:', e.message); }
+
+    // Fetch GSC sites
+    let gscSites = [];
+    try {
+      const gscRes = await fetch('https://www.googleapis.com/webmasters/v3/sites', {
+        headers: { Authorization: 'Bearer ' + accessToken }
+      });
+      if (gscRes.ok) {
+        const data = await gscRes.json();
+        gscSites = (data.siteEntry || []).map(s => ({
+          siteUrl: s.siteUrl,
+          permissionLevel: s.permissionLevel,
+        }));
+      }
+    } catch (e) { console.warn('[google/properties] GSC list error:', e.message); }
+
+    res.json({
+      data: { ga4Properties, gscSites, currentGa4PropertyId: site.ga4_property_id || null },
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() }
+    });
+  } catch (err) {
+    console.error('[google/properties]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/integrations/google/select ---
+router.post('/integrations/google/select', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId, ga4PropertyId, gscSiteUrl } = req.body;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const updates = [];
+    const request = pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId);
+
+    if (ga4PropertyId !== undefined) {
+      request.input('ga4PropertyId', sql.NVarChar(100), ga4PropertyId || null);
+      updates.push('ga4_property_id = @ga4PropertyId');
+    }
+    if (gscSiteUrl !== undefined) {
+      request.input('gscSiteUrl', sql.NVarChar(500), gscSiteUrl || null);
+      updates.push('gsc_site_url = @gscSiteUrl');
+      updates.push('gsc_connected = 1');
+    }
+    updates.push('updated_at = GETUTCDATE()');
+
+    await request.query(`UPDATE arion.site SET ${updates.join(', ')} WHERE tenant_id = @tenantId AND site_id = @siteId`);
+
+    res.json({ data: { ok: true, ga4PropertyId, gscSiteUrl }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    console.error('[google/select]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 export default router;
