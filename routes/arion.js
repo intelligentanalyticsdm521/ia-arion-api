@@ -1886,4 +1886,32 @@ router.get('/analytics', async (req, res) => {
   }
 });
 
+// --- GET /arion/analytics/insights?siteId= ---
+router.get('/analytics/insights', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const result = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .query(`SELECT report_type, period_start, period_end, generated_at, argus_insights, tier_generated
+        FROM arion.insight_reports WHERE tenant_id = @tenantId AND site_id = @siteId
+        ORDER BY generated_at DESC`);
+    const reports = result.recordset.map(r => ({
+      reportType: r.report_type,
+      periodStart: r.period_start,
+      periodEnd: r.period_end,
+      generatedAt: r.generated_at,
+      tierGenerated: r.tier_generated,
+      argusInsights: r.argus_insights ? JSON.parse(r.argus_insights) : null,
+    }));
+    res.json({ data: reports, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    console.error('[analytics/insights]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 export default router;
