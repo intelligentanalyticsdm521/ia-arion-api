@@ -1471,4 +1471,228 @@ router.post('/integrations/google/select', async (req, res) => {
   }
 });
 
+// --- GET /arion/analytics?siteId=&period=&compare= ---
+// GA4 analytics data pipeline — returns sessions, users, channels, devices, top pages
+const analyticsCache = new Map();
+const ANALYTICS_CACHE_TTL = 60 * 60 * 1000; // 60 minutes
+
+router.get('/analytics', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const period = parseInt(req.query.period) || 30;
+  const compare = req.query.compare || 'none';
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    if (!site.gbp_oauth_token_ref || !site.ga4_property_id) {
+      return res.json({ connected: false, error: 'not_connected' });
+    }
+
+    // Cache check
+    const cacheKey = `${siteId}:${period}:${compare}`;
+    const cached = analyticsCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < ANALYTICS_CACHE_TTL) {
+      return res.json(cached.data);
+    }
+
+    // Get access token
+    const { getAccessToken } = await import('../lib/googleBusiness.js');
+    const tokenData = await getAccessToken(site.gbp_oauth_token_ref);
+    if (!tokenData || !tokenData.access_token) {
+      return res.json({ connected: true, error: 'ga4_auth_expired' });
+    }
+    const accessToken = tokenData.access_token;
+    const propertyId = site.ga4_property_id;
+    const propPath = `properties/${propertyId}`;
+    const ga4Url = `https://analyticsdata.googleapis.com/v1beta/${propPath}:runReport`;
+
+    // Date ranges
+    const endDate = 'yesterday';
+    const startDate = `${period}daysAgo`;
+    const dateRanges = [{ startDate, endDate }];
+
+    // Comparison date range
+    if (compare !== 'none') {
+      let compStart, compEnd;
+      if (compare === 'previous_period') {
+        compStart = `${period * 2}daysAgo`;
+        compEnd = `${period + 1}daysAgo`;
+      } else if (compare === 'previous_30d') {
+        compStart = `${period + 30}daysAgo`;
+        compEnd = `${period + 1}daysAgo`;
+      } else if (compare === 'previous_90d') {
+        compStart = `${period + 90}daysAgo`;
+        compEnd = `${period + 1}daysAgo`;
+      }
+      if (compStart) dateRanges.push({ startDate: compStart, endDate: compEnd });
+    }
+
+    async function ga4Fetch(body) {
+      const r = await fetch(ga4Url, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(() => '');
+        throw new Error(`GA4 ${r.status}: ${t.slice(0, 300)}`);
+      }
+      return r.json();
+    }
+
+    // 1. Summary metrics
+    const summaryRes = await ga4Fetch({
+      dateRanges: [dateRanges[0]],
+      metrics: [
+        { name: 'sessions' }, { name: 'activeUsers' }, { name: 'screenPageViews' },
+        { name: 'bounceRate' }, { name: 'averageSessionDuration' },
+      ],
+    });
+    const smv = summaryRes.rows?.[0]?.metricValues || [];
+    const summary = {
+      totalSessions: parseInt(smv[0]?.value || '0'),
+      totalUsers: parseInt(smv[1]?.value || '0'),
+      totalPageviews: parseInt(smv[2]?.value || '0'),
+      bounceRate: parseFloat(smv[3]?.value || '0'),
+      avgSessionDuration: parseFloat(smv[4]?.value || '0'),
+    };
+
+    // 2. Sessions by day
+    const dailyRes = await ga4Fetch({
+      dateRanges: [dateRanges[0]],
+      dimensions: [{ name: 'date' }],
+      metrics: [{ name: 'sessions' }, { name: 'activeUsers' }],
+      orderBys: [{ dimension: { dimensionName: 'date' } }],
+      limit: '366',
+    });
+    const sessionsByDay = (dailyRes.rows || []).map(r => ({
+      date: r.dimensionValues[0].value.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3'),
+      sessions: parseInt(r.metricValues[0].value),
+    }));
+    const usersByDay = (dailyRes.rows || []).map(r => ({
+      date: r.dimensionValues[0].value.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3'),
+      users: parseInt(r.metricValues[1].value),
+    }));
+
+    // 3. Channel breakdown
+    const channelRes = await ga4Fetch({
+      dateRanges: [dateRanges[0]],
+      dimensions: [{ name: 'sessionDefaultChannelGroup' }],
+      metrics: [{ name: 'sessions' }],
+      orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+      limit: '10',
+    });
+    const totalForChannels = summary.totalSessions || 1;
+    const channelBreakdown = (channelRes.rows || []).map(r => ({
+      channel: r.dimensionValues[0].value,
+      sessions: parseInt(r.metricValues[0].value),
+      pct: Math.round((parseInt(r.metricValues[0].value) / totalForChannels) * 100),
+    }));
+
+    // 4. Device split
+    const deviceRes = await ga4Fetch({
+      dateRanges: [dateRanges[0]],
+      dimensions: [{ name: 'deviceCategory' }],
+      metrics: [{ name: 'sessions' }],
+    });
+    const deviceMap = {};
+    let deviceTotal = 0;
+    for (const r of (deviceRes.rows || [])) {
+      const cat = r.dimensionValues[0].value.toLowerCase();
+      const count = parseInt(r.metricValues[0].value);
+      deviceMap[cat] = count;
+      deviceTotal += count;
+    }
+    const deviceSplit = {
+      mobile: deviceTotal ? Math.round((deviceMap.mobile || 0) / deviceTotal * 100) : 0,
+      desktop: deviceTotal ? Math.round((deviceMap.desktop || 0) / deviceTotal * 100) : 0,
+      tablet: deviceTotal ? Math.round((deviceMap.tablet || 0) / deviceTotal * 100) : 0,
+    };
+    // Ensure sums to 100
+    const dSum = deviceSplit.mobile + deviceSplit.desktop + deviceSplit.tablet;
+    if (dSum > 0 && dSum !== 100) deviceSplit.desktop += (100 - dSum);
+
+    // 5. Top pages
+    const pagesRes = await ga4Fetch({
+      dateRanges: [dateRanges[0]],
+      dimensions: [{ name: 'pagePath' }, { name: 'pageTitle' }],
+      metrics: [{ name: 'screenPageViews' }, { name: 'sessions' }, { name: 'bounceRate' }, { name: 'averageSessionDuration' }],
+      orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
+      limit: '10',
+    });
+    const topPages = (pagesRes.rows || []).map(r => ({
+      path: r.dimensionValues[0].value,
+      title: r.dimensionValues[1].value,
+      views: parseInt(r.metricValues[0].value),
+      sessions: parseInt(r.metricValues[1].value),
+      bounceRate: parseFloat(r.metricValues[2].value),
+      avgDuration: parseFloat(r.metricValues[3].value),
+    }));
+
+    // 6. Comparison (if requested)
+    let comparison = null;
+    if (dateRanges.length > 1) {
+      try {
+        const compRes = await ga4Fetch({
+          dateRanges: [dateRanges[1]],
+          metrics: [
+            { name: 'sessions' }, { name: 'activeUsers' }, { name: 'screenPageViews' },
+            { name: 'bounceRate' }, { name: 'averageSessionDuration' },
+          ],
+        });
+        const cmv = compRes.rows?.[0]?.metricValues || [];
+        const compSummary = {
+          totalSessions: parseInt(cmv[0]?.value || '0'),
+          totalUsers: parseInt(cmv[1]?.value || '0'),
+          totalPageviews: parseInt(cmv[2]?.value || '0'),
+          bounceRate: parseFloat(cmv[3]?.value || '0'),
+          avgSessionDuration: parseFloat(cmv[4]?.value || '0'),
+        };
+        comparison = {
+          summary: compSummary,
+          deltas: {
+            sessions: summary.totalSessions - compSummary.totalSessions,
+            sessionsPct: compSummary.totalSessions ? Math.round(((summary.totalSessions - compSummary.totalSessions) / compSummary.totalSessions) * 100) : null,
+            users: summary.totalUsers - compSummary.totalUsers,
+            usersPct: compSummary.totalUsers ? Math.round(((summary.totalUsers - compSummary.totalUsers) / compSummary.totalUsers) * 100) : null,
+            pageviews: summary.totalPageviews - compSummary.totalPageviews,
+          },
+        };
+      } catch (e) { console.warn('[analytics] comparison query failed:', e.message); }
+    }
+
+    // Calculate date range strings
+    const now = new Date();
+    const end = new Date(now);
+    end.setDate(end.getDate() - 1);
+    const start = new Date(now);
+    start.setDate(start.getDate() - period);
+
+    const result = {
+      connected: true,
+      period,
+      dateRange: { start: start.toISOString().split('T')[0], end: end.toISOString().split('T')[0] },
+      summary,
+      sessionsByDay,
+      usersByDay,
+      channelBreakdown,
+      deviceSplit,
+      topPages,
+      comparison,
+    };
+
+    // Cache
+    analyticsCache.set(cacheKey, { data: result, ts: Date.now() });
+
+    res.json(result);
+  } catch (err) {
+    console.error('[arion/analytics]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 export default router;
