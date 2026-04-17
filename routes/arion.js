@@ -1814,15 +1814,18 @@ router.get('/analytics', async (req, res) => {
       }));
     } catch (e) { console.warn('[analytics] dayOfWeekBreakdown failed:', e.message); }
 
-    // 6. Comparison (if requested)
+    // 6. Comparison (if requested) — full breakdowns for comparison period
     let comparison = null;
     if (dateRanges.length > 1) {
       try {
+        // Comparison summary
         const compRes = await ga4Fetch({
           dateRanges: [dateRanges[1]],
           metrics: [
             { name: 'sessions' }, { name: 'activeUsers' }, { name: 'screenPageViews' },
             { name: 'bounceRate' }, { name: 'averageSessionDuration' },
+            { name: 'engagedSessions' }, { name: 'engagementRate' },
+            { name: 'eventsPerSession' }, { name: 'screenPageViewsPerSession' },
           ],
         });
         const cmv = compRes.rows?.[0]?.metricValues || [];
@@ -1832,9 +1835,87 @@ router.get('/analytics', async (req, res) => {
           totalPageviews: parseInt(cmv[2]?.value || '0'),
           bounceRate: parseFloat(cmv[3]?.value || '0'),
           avgSessionDuration: parseFloat(cmv[4]?.value || '0'),
+          engagedSessions: parseInt(cmv[5]?.value || '0'),
+          engagementRate: parseFloat(cmv[6]?.value || '0'),
+          eventsPerSession: parseFloat(cmv[7]?.value || '0'),
+          pageviewsPerSession: parseFloat(cmv[8]?.value || '0'),
         };
+
+        // Comparison daily sessions (for chart overlay)
+        let compSessionsByDay = [];
+        try {
+          const compDaily = await ga4Fetch({
+            dateRanges: [dateRanges[1]],
+            dimensions: [{ name: 'date' }],
+            metrics: [{ name: 'sessions' }],
+            orderBys: [{ dimension: { dimensionName: 'date' } }],
+            limit: '366',
+          });
+          compSessionsByDay = (compDaily.rows || []).map(r => ({
+            date: r.dimensionValues[0].value.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3'),
+            sessions: parseInt(r.metricValues[0].value),
+          }));
+        } catch (e) { /* ignore */ }
+
+        // Comparison channels
+        let compChannels = [];
+        try {
+          const compCh = await ga4Fetch({
+            dateRanges: [dateRanges[1]],
+            dimensions: [{ name: 'sessionDefaultChannelGroup' }],
+            metrics: [{ name: 'sessions' }],
+            orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+            limit: '10',
+          });
+          compChannels = (compCh.rows || []).map(r => ({
+            channel: r.dimensionValues[0].value,
+            sessions: parseInt(r.metricValues[0].value),
+          }));
+        } catch (e) { /* ignore */ }
+
+        // Comparison devices
+        let compDevices = {};
+        try {
+          const compDev = await ga4Fetch({
+            dateRanges: [dateRanges[1]],
+            dimensions: [{ name: 'deviceCategory' }],
+            metrics: [{ name: 'sessions' }],
+          });
+          let devTotal = 0;
+          const devMap = {};
+          for (const r of (compDev.rows || [])) {
+            const c = parseInt(r.metricValues[0].value);
+            devMap[r.dimensionValues[0].value.toLowerCase()] = c;
+            devTotal += c;
+          }
+          compDevices = {
+            mobile: devTotal ? Math.round((devMap.mobile || 0) / devTotal * 100) : 0,
+            desktop: devTotal ? Math.round((devMap.desktop || 0) / devTotal * 100) : 0,
+            tablet: devTotal ? Math.round((devMap.tablet || 0) / devTotal * 100) : 0,
+          };
+        } catch (e) { /* ignore */ }
+
+        // Comparison new vs returning
+        let compNewVsReturning = [];
+        try {
+          const compNvr = await ga4Fetch({
+            dateRanges: [dateRanges[1]],
+            dimensions: [{ name: 'newVsReturning' }],
+            metrics: [{ name: 'sessions' }, { name: 'activeUsers' }],
+          });
+          compNewVsReturning = (compNvr.rows || []).map(r => ({
+            type: r.dimensionValues[0].value,
+            sessions: parseInt(r.metricValues[0].value),
+            users: parseInt(r.metricValues[1].value),
+          }));
+        } catch (e) { /* ignore */ }
+
         comparison = {
           summary: compSummary,
+          sessionsByDay: compSessionsByDay,
+          channelBreakdown: compChannels,
+          deviceSplit: compDevices,
+          newVsReturning: compNewVsReturning,
           deltas: {
             sessions: summary.totalSessions - compSummary.totalSessions,
             sessionsPct: compSummary.totalSessions ? Math.round(((summary.totalSessions - compSummary.totalSessions) / compSummary.totalSessions) * 100) : null,
