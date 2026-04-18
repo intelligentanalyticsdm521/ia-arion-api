@@ -22,7 +22,7 @@ import {
   resolveGbpLocationName,
 } from '../lib/gbpApi.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
-import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats, getUrlInfo as bingGetUrlInfo, verifyKey as bingVerifyKey, getRankAndTrafficStats as bingGetRankAndTrafficStats, getKeywordStats as bingGetKeywordStats } from '../lib/bingWebmaster.js';
+import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats, getUrlInfo as bingGetUrlInfo, verifyKey as bingVerifyKey, getRankAndTrafficStats as bingGetRankAndTrafficStats, getKeywordStats as bingGetKeywordStats, addSite as bingAddSite, getSiteEntry as bingGetSiteEntry, pollUntilVerified as bingPollUntilVerified } from '../lib/bingWebmaster.js';
 import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing, listGoogleSitemaps } from '../lib/sitemapGenerator.js';
 import { getDomainInfo, getDnsRecords, createDnsRecords, deleteDnsRecords, getSslStatus, getWpSiteInfo, getWpPages, getWpPosts, getWpPlugins } from '../lib/hostinger.js';
 import { runPageSpeedTest } from '../lib/pagespeed.js';
@@ -1349,6 +1349,102 @@ router.post('/bing/verify', async (req, res) => {
     });
   } catch (err) {
     console.error('[arion/bing/verify]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/bing/auto-connect?siteId= ---
+// One-click agency-mode flow. Uses the master Bing account's API key (from
+// BING_WMT_API_KEY env) to add the client's site under the master account,
+// then writes a Bing verification CNAME via the Hostinger DNS API, polls until
+// Bing marks the site verified, and persists the connection on the site row.
+// Client-facing: no key paste, no copy-and-paste. Just Connect → Active.
+router.post('/bing/auto-connect', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId || req.body?.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  const masterKey = process.env.BING_WMT_API_KEY;
+  if (!masterKey) return res.status(503).json({ error: { code: 'NOT_CONFIGURED', message: 'Bing master API key not configured', status: 503 } });
+
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain', status: 400 } });
+
+    const siteUrl = 'https://' + site.domain + '/';
+
+    // Step 1: add the site to the master Bing account (idempotent)
+    const addRes = await bingAddSite(masterKey, siteUrl);
+    if (!addRes.ok) {
+      return res.json({ connected: false, stage: 'add_site', error: addRes.error });
+    }
+
+    // Step 2: look up the site entry to get the per-site DnsVerificationCode
+    let entry = await bingGetSiteEntry(masterKey, siteUrl);
+    if (!entry) {
+      // Sometimes Bing takes a moment after AddSite before the entry is visible — retry once
+      await new Promise(r => setTimeout(r, 2000));
+      entry = await bingGetSiteEntry(masterKey, siteUrl);
+    }
+    if (!entry) return res.json({ connected: false, stage: 'lookup', error: 'Site not found in master account after AddSite. Try again in a moment.' });
+
+    // Short-circuit if already verified (re-connect case)
+    if (entry.IsVerified) {
+      await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .input('siteUrl', sql.NVarChar(300), entry.Url || siteUrl)
+        .input('now', sql.DateTime2, new Date())
+        .query(`UPDATE arion.site
+                SET bing_api_key = NULL, bing_site_url = @siteUrl, bing_connected = 1, bing_connected_at = @now
+                WHERE tenant_id = @tenantId AND site_id = @siteId`);
+      return res.json({ connected: true, alreadyVerified: true, siteUrl: entry.Url || siteUrl });
+    }
+
+    // Step 3: parse the DNS verification code. Bing returns it as "<hex>.<domain>".
+    // We split that into { subdomain, host } so Hostinger's DNS API can add the CNAME.
+    const dnsCode = entry.DnsVerificationCode || '';
+    const dotIdx = dnsCode.indexOf('.');
+    const subdomain = dotIdx > 0 ? dnsCode.slice(0, dotIdx) : dnsCode;
+    if (!subdomain) return res.json({ connected: false, stage: 'parse_code', error: 'Bing did not return a DnsVerificationCode' });
+
+    // Step 4: write the CNAME via Hostinger DNS API
+    let dnsResult = null;
+    try {
+      dnsResult = await createDnsRecords(site.domain, [{ type: 'CNAME', name: subdomain, content: 'verify.bing.com' }], false);
+    } catch (e) {
+      return res.json({ connected: false, stage: 'dns_write', error: e.message, dnsRecordNeeded: { type: 'CNAME', name: subdomain, content: 'verify.bing.com' } });
+    }
+    if (!dnsResult) {
+      return res.json({ connected: false, stage: 'dns_write', error: 'Hostinger DNS API returned no result', dnsRecordNeeded: { type: 'CNAME', name: subdomain, content: 'verify.bing.com' } });
+    }
+
+    // Step 5: poll Bing until IsVerified flips (up to ~2 min). Bing itself
+    // handles the verification check periodically; we just watch for the flag.
+    const poll = await bingPollUntilVerified(masterKey, siteUrl, { maxAttempts: 12, delayMs: 10_000 });
+    if (!poll.verified) {
+      return res.json({
+        connected: false,
+        stage: 'verify_timeout',
+        error: 'DNS record written but Bing has not verified yet. It usually finishes within 10-15 minutes — check back and click Connect again, or use the manual option if it does not.',
+        dnsRecordWritten: { type: 'CNAME', name: subdomain, content: 'verify.bing.com' },
+      });
+    }
+
+    // Step 6: persist the connection
+    await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('siteUrl', sql.NVarChar(300), poll.entry?.Url || siteUrl)
+      .input('now', sql.DateTime2, new Date())
+      .query(`UPDATE arion.site
+              SET bing_api_key = NULL, bing_site_url = @siteUrl, bing_connected = 1, bing_connected_at = @now
+              WHERE tenant_id = @tenantId AND site_id = @siteId`);
+
+    res.json({ connected: true, siteUrl: poll.entry?.Url || siteUrl, dnsRecord: { type: 'CNAME', name: subdomain, content: 'verify.bing.com' } });
+  } catch (err) {
+    console.error('[arion/bing/auto-connect]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
