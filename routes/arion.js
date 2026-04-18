@@ -836,12 +836,21 @@ router.post('/search/submit-url', async (req, res) => {
     let bingResult = null;
     let indexNowResult = null;
 
-    // Bing Webmaster Tools — direct URL submission (requires BING_WMT_API_KEY env var, legacy flow)
+    // Bing Webmaster Tools — direct URL submission (requires BING_WMT_API_KEY env var, legacy flow).
+    // The Bing WMT SDK wrapper returns null (not throws) on retry exhaustion, AND the API
+    // sometimes returns HTTP 200 with an error-code body like {"ErrorCode":3,"Message":"..."}.
+    // Both cases must be detected to avoid falsely claiming success.
     const bingKey = process.env.BING_WMT_API_KEY;
     if (bingKey) {
       try {
         const bingApi = await bingSubmitUrl(bingKey, siteUrl, url);
-        bingResult = { submitted: true, response: bingApi };
+        if (bingApi == null) {
+          bingResult = { submitted: false, error: 'Bing Webmaster Tools API key rejected (likely InvalidApiKey). Update BING_WMT_API_KEY in Azure App Service and restart.' };
+        } else if (bingApi && typeof bingApi === 'object' && bingApi.ErrorCode && bingApi.ErrorCode !== 0) {
+          bingResult = { submitted: false, error: `Bing rejected: ${bingApi.Message || 'error code ' + bingApi.ErrorCode}` };
+        } else {
+          bingResult = { submitted: true, response: bingApi };
+        }
       } catch (e) {
         console.warn('[arion/search/submit-url] Bing WMT submit failed:', e.message);
         bingResult = { submitted: false, error: e.message };
