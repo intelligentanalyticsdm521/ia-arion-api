@@ -902,24 +902,36 @@ router.post('/search/submit-url', async (req, res) => {
       bingResult = { submitted: false, error: 'Bing Webmaster Tools is not connected for this environment. Configure BING_WMT_API_KEY or connect Bing in Settings.' };
     }
 
-    // IndexNow — anonymous, protocol-based submission. Requires a key file to be hosted at the
-    // site root. If the tenant has registered an IndexNow key (stored in arion.site_integrations
-    // where provider_code='indexnow'), submit via api.indexnow.org. Otherwise return a clear
-    // "not configured" so the portal can guide the user.
-    let indexNowKey = null;
-    try {
-      const keyRes = await pool.request()
-        .input('tenantId', sql.UniqueIdentifier, tenantId)
-        .input('siteId', sql.UniqueIdentifier, siteId)
-        .query("SELECT TOP 1 config FROM arion.site_integrations WHERE tenant_id = @tenantId AND site_id = @siteId AND provider_code = 'indexnow'");
-      const cfg = keyRes.recordset?.[0]?.config;
-      if (cfg) {
-        const parsed = typeof cfg === 'string' ? JSON.parse(cfg) : cfg;
-        indexNowKey = parsed?.key || null;
-      }
-    } catch { /* table may not have indexnow rows yet */ }
+    // IndexNow — anonymous, protocol-based submission. Reads the per-site key from
+    // arion.site.indexnow_key (set by the /search/indexnow/generate-key endpoint). Also
+    // logs every attempt to arion.indexnow_submission so the portal can show recent submissions.
+    const indexNowKey = site.indexnow_key || null;
+    const indexNowVerified = !!site.indexnow_verified_at;
 
-    if (indexNowKey) {
+    async function logIndexNowSubmission(status, responseCode, responseBody) {
+      try {
+        await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .input('url', sql.NVarChar(500), url)
+          .input('status', sql.NVarChar(20), status)
+          .input('responseCode', sql.Int, responseCode)
+          .input('responseBody', sql.NVarChar(1000), responseBody ? String(responseBody).slice(0, 1000) : null)
+          .query(`INSERT INTO arion.indexnow_submission
+                    (tenant_id, site_id, submitted_url, status, response_code, response_body)
+                  VALUES (@tenantId, @siteId, @url, @status, @responseCode, @responseBody)`);
+      } catch (e) {
+        console.warn('[arion/search/submit-url] indexnow log insert failed:', e.message);
+      }
+    }
+
+    if (!indexNowKey) {
+      indexNowResult = { submitted: false, error: 'IndexNow key not configured. Generate a key on the Bing: IndexNow page to enable anonymous URL submissions to Bing, Yandex, Seznam, and Naver.' };
+      await logIndexNowSubmission('no_key', null, null);
+    } else if (!indexNowVerified) {
+      indexNowResult = { submitted: false, error: `IndexNow key exists but has not been verified. Host ${indexNowKey}.txt at the site root, then click Verify on the IndexNow page.` };
+      await logIndexNowSubmission('error', null, 'unverified key');
+    } else {
       try {
         const host = site.domain;
         const keyLocation = `https://${host}/${indexNowKey}.txt`;
@@ -929,23 +941,197 @@ router.post('/search/submit-url', async (req, res) => {
           headers: { 'Content-Type': 'application/json; charset=utf-8' },
           body: JSON.stringify(body),
         });
-        if (inRes.ok || inRes.status === 202 || inRes.status === 200) {
+        const text = await inRes.text().catch(() => '');
+        if (inRes.status === 200 || inRes.status === 202) {
           indexNowResult = { submitted: true, status: inRes.status, engines: ['Bing', 'Yandex', 'Seznam', 'Naver'] };
+          await logIndexNowSubmission('accepted', inRes.status, text);
         } else {
-          const text = await inRes.text().catch(() => '');
           indexNowResult = { submitted: false, status: inRes.status, error: text.slice(0, 300) || `HTTP ${inRes.status}` };
+          await logIndexNowSubmission('rejected', inRes.status, text);
         }
       } catch (e) {
         console.warn('[arion/search/submit-url] IndexNow submit failed:', e.message);
         indexNowResult = { submitted: false, error: e.message };
+        await logIndexNowSubmission('error', null, e.message);
       }
-    } else {
-      indexNowResult = { submitted: false, error: 'IndexNow key not configured. Generate a key on the Bing: IndexNow page to enable anonymous URL submissions to Bing, Yandex, Seznam, and Naver.' };
     }
 
     res.json({ url, google: googleResult, bing: bingResult, indexNow: indexNowResult });
   } catch (err) {
     console.error('[arion/search/submit-url]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// IndexNow key management
+// ---------------------------------------------------------------------------
+// IndexNow is a protocol that lets site owners notify Bing, Yandex, Seznam, and Naver
+// about URL changes. Flow:
+//   1. Site owner generates a UUID key (we do this on POST /generate-key).
+//   2. Site owner hosts {key}.txt at the site root, containing the key as plain text.
+//   3. Verify — we HEAD/GET {domain}/{key}.txt and confirm the body matches the key.
+//   4. Subsequent URL submissions (via /search/submit-url) use the key and the hosted
+//      file location as proof of ownership.
+
+// --- GET /arion/search/indexnow?siteId= — key status ---
+router.get('/search/indexnow', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const key = site.indexnow_key || null;
+    const generatedAt = site.indexnow_generated_at || null;
+    const verifiedAt = site.indexnow_verified_at || null;
+    const keyLocation = key ? `https://${site.domain}/${key}.txt` : null;
+    res.json({
+      key,
+      generatedAt,
+      verifiedAt,
+      verified: !!verifiedAt,
+      keyLocation,
+      keyFileContents: key,
+      host: site.domain,
+    });
+  } catch (err) {
+    console.error('[arion/search/indexnow GET]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/search/indexnow/generate-key — generate and store a new key ---
+// Any previous key is overwritten (verification resets). The key is a 32-char lowercase
+// hex UUID (IndexNow accepts 8-128 chars from a-z/0-9/-).
+router.post('/search/indexnow/generate-key', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId || req.body?.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const key = crypto.randomUUID().replace(/-/g, '');
+    const now = new Date();
+    await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('key', sql.NVarChar(64), key)
+      .input('now', sql.DateTime2, now)
+      .query(`UPDATE arion.site
+              SET indexnow_key = @key, indexnow_generated_at = @now, indexnow_verified_at = NULL
+              WHERE tenant_id = @tenantId AND site_id = @siteId`);
+    const keyLocation = `https://${site.domain}/${key}.txt`;
+    res.json({ key, keyLocation, keyFileContents: key, host: site.domain, generatedAt: now.toISOString(), verified: false });
+  } catch (err) {
+    console.error('[arion/search/indexnow/generate-key]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/search/indexnow/verify — confirm {key}.txt is hosted at site root ---
+// Fetches https://{domain}/{key}.txt and confirms the response body equals the stored key.
+// Marks indexnow_verified_at on success. Returns the HTTP status and body excerpt on failure.
+router.post('/search/indexnow/verify', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId || req.body?.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const key = site.indexnow_key;
+    if (!key) return res.status(400).json({ error: { code: 'NO_KEY', message: 'No IndexNow key generated for this site yet', status: 400 } });
+    const keyLocation = `https://${site.domain}/${key}.txt`;
+    let status, bodyText = '', verified = false, errorMessage = null;
+    try {
+      const fetchRes = await fetch(keyLocation, { method: 'GET', signal: AbortSignal.timeout(10_000) });
+      status = fetchRes.status;
+      bodyText = (await fetchRes.text().catch(() => '')).trim();
+      if (fetchRes.ok) {
+        if (bodyText === key) {
+          verified = true;
+        } else {
+          errorMessage = `File fetched but content does not match the key. Expected "${key}" but got "${bodyText.slice(0, 100)}".`;
+        }
+      } else {
+        errorMessage = `Key file not reachable — HTTP ${status}. Confirm the file is hosted at ${keyLocation} and publicly accessible.`;
+      }
+    } catch (e) {
+      errorMessage = `Network error while fetching key file: ${e.message}. Confirm ${keyLocation} is reachable.`;
+    }
+    if (verified) {
+      const now = new Date();
+      await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .input('now', sql.DateTime2, now)
+        .query('UPDATE arion.site SET indexnow_verified_at = @now WHERE tenant_id = @tenantId AND site_id = @siteId');
+      res.json({ verified: true, verifiedAt: now.toISOString(), keyLocation, status });
+    } else {
+      res.json({ verified: false, error: errorMessage, keyLocation, status, bodyExcerpt: bodyText.slice(0, 200) });
+    }
+  } catch (err) {
+    console.error('[arion/search/indexnow/verify]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- DELETE /arion/search/indexnow?siteId= — remove the key ---
+router.delete('/search/indexnow', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .query('UPDATE arion.site SET indexnow_key = NULL, indexnow_generated_at = NULL, indexnow_verified_at = NULL WHERE tenant_id = @tenantId AND site_id = @siteId');
+    res.json({ deleted: true });
+  } catch (err) {
+    console.error('[arion/search/indexnow DELETE]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/search/indexnow/submissions?siteId=&limit=20 — recent submission log ---
+router.get('/search/indexnow/submissions', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const limit = Math.min(parseInt(req.query.limit, 10) || 20, 200);
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const r = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('limit', sql.Int, limit)
+      .query(`SELECT TOP (@limit) submission_id, submitted_url, submitted_at, status, response_code
+              FROM arion.indexnow_submission
+              WHERE tenant_id = @tenantId AND site_id = @siteId
+              ORDER BY submitted_at DESC`);
+    res.json({
+      submissions: (r.recordset || []).map(row => ({
+        submissionId: row.submission_id,
+        url: row.submitted_url,
+        submittedAt: row.submitted_at,
+        status: row.status,
+        responseCode: row.response_code,
+      })),
+    });
+  } catch (err) {
+    // If migration 006 hasn't run yet, the table won't exist — return empty list gracefully
+    if (err && String(err.message).includes('Invalid object name')) {
+      return res.json({ submissions: [], migrationPending: true });
+    }
+    console.error('[arion/search/indexnow/submissions]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
