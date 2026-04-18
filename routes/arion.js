@@ -22,7 +22,7 @@ import {
   resolveGbpLocationName,
 } from '../lib/gbpApi.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
-import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats, getUrlInfo as bingGetUrlInfo } from '../lib/bingWebmaster.js';
+import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats, getUrlInfo as bingGetUrlInfo, verifyKey as bingVerifyKey, getRankAndTrafficStats as bingGetRankAndTrafficStats, getKeywordStats as bingGetKeywordStats } from '../lib/bingWebmaster.js';
 import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing, listGoogleSitemaps } from '../lib/sitemapGenerator.js';
 import { getDomainInfo, getDnsRecords, createDnsRecords, deleteDnsRecords, getSslStatus, getWpSiteInfo, getWpPages, getWpPosts, getWpPlugins } from '../lib/hostinger.js';
 import { runPageSpeedTest } from '../lib/pagespeed.js';
@@ -724,9 +724,9 @@ router.get('/search/performance', async (req, res) => {
         .slice(0, 20);
       if (pqData) breakdowns.pageQueries = pqData.slice(0, 50);
     } else if (provider === 'bing') {
-      const bingKey = process.env.BING_WMT_API_KEY;
-      if (!bingKey) return res.json({ provider, period, summary, breakdowns, error: 'Bing not configured' });
-      const siteUrl = 'https://' + site.domain;
+      const bingKey = getBingKeyForSite(site);
+      if (!bingKey) return res.json({ provider, period, summary, breakdowns, error: 'Bing not connected for this site' });
+      const siteUrl = site.bing_site_url || ('https://' + site.domain);
       const [trafficData, pageData] = await Promise.all([
         safeCall(bingGetTrafficData(bingKey, siteUrl, period)),
         safeCall(bingGetPageTrafficData(bingKey, siteUrl)),
@@ -895,11 +895,12 @@ router.post('/search/submit-url', async (req, res) => {
     let bingResult = null;
     let indexNowResult = null;
 
-    // Bing Webmaster Tools — direct URL submission (requires BING_WMT_API_KEY env var, legacy flow).
+    // Bing Webmaster Tools — direct URL submission. Uses per-site key set via
+    // /arion/bing/verify, falls back to global env var for legacy sites.
     // The Bing WMT SDK wrapper returns null (not throws) on retry exhaustion, AND the API
     // sometimes returns HTTP 200 with an error-code body like {"ErrorCode":3,"Message":"..."}.
     // Both cases must be detected to avoid falsely claiming success.
-    const bingKey = process.env.BING_WMT_API_KEY;
+    const bingKey = getBingKeyForSite(site);
     if (bingKey) {
       try {
         const bingApi = await bingSubmitUrl(bingKey, siteUrl, url);
@@ -1275,9 +1276,9 @@ router.get('/search/sitemaps', async (req, res) => {
         console.warn('[arion/search/sitemaps] Google API call failed:', e.message);
       }
     } else if (provider === 'bing') {
-      const bingKey = process.env.BING_WMT_API_KEY;
-      if (!bingKey) return res.json({ provider, sitemaps: [], error: 'Bing not configured' });
-      const siteUrl = 'https://' + site.domain;
+      const bingKey = getBingKeyForSite(site);
+      if (!bingKey) return res.json({ provider, sitemaps: [], error: 'Bing not connected for this site' });
+      const siteUrl = site.bing_site_url || ('https://' + site.domain);
       try {
         const data = await bingGetSitemaps(bingKey, siteUrl);
         if (data && Array.isArray(data)) {
@@ -1300,6 +1301,140 @@ router.get('/search/sitemaps', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Bing Webmaster Tools — Phase 2
+// ---------------------------------------------------------------------------
+// Per-site API key stored in arion.site.bing_api_key (set by POST /arion/bing/verify).
+// All Bing callers prefer the per-site key, falling back to process.env.BING_WMT_API_KEY
+// so existing env-var-based flows keep working when a site hasn't connected yet.
+function getBingKeyForSite(site) {
+  return site?.bing_api_key || process.env.BING_WMT_API_KEY || null;
+}
+
+// --- POST /arion/bing/verify?siteId= — verify a Bing WMT API key and store it ---
+router.post('/bing/verify', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId || req.body?.siteId;
+  const { apiKey, siteUrl } = req.body || {};
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  if (!apiKey || !apiKey.trim()) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'apiKey required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const host = site.domain;
+    const verification = await bingVerifyKey(apiKey.trim(), host);
+    if (!verification.valid) {
+      return res.json({ verified: false, error: verification.error, detail: verification.body || null });
+    }
+    // Decide which Bing siteUrl to store. Prefer the matched one, else the provided siteUrl,
+    // else construct https://<domain>/
+    const resolvedSiteUrl = verification.siteMatches?.Url || verification.siteMatches?.url || siteUrl || ('https://' + host + '/');
+    const matched = !!verification.siteMatches;
+    await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('key', sql.NVarChar(200), apiKey.trim())
+      .input('siteUrl', sql.NVarChar(300), resolvedSiteUrl)
+      .input('now', sql.DateTime2, new Date())
+      .query(`UPDATE arion.site
+              SET bing_api_key = @key, bing_site_url = @siteUrl, bing_connected = 1, bing_connected_at = @now
+              WHERE tenant_id = @tenantId AND site_id = @siteId`);
+    res.json({
+      verified: true,
+      matchedSite: matched,
+      siteUrl: resolvedSiteUrl,
+      siteCount: verification.sites?.length || 0,
+      warning: matched ? null : `Key is valid but none of the ${verification.sites?.length || 0} registered sites match "${host}". Add ${host} in Bing Webmaster Tools before live data will flow.`,
+    });
+  } catch (err) {
+    console.error('[arion/bing/verify]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/bing/status?siteId= ---
+router.get('/bing/status', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    res.json({
+      connected: !!site.bing_connected && !!site.bing_api_key,
+      siteUrl: site.bing_site_url || null,
+      connectedAt: site.bing_connected_at || null,
+      usingFallbackKey: !site.bing_api_key && !!process.env.BING_WMT_API_KEY,
+    });
+  } catch (err) {
+    console.error('[arion/bing/status]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/bing/disconnect?siteId= ---
+router.post('/bing/disconnect', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId || req.body?.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .query(`UPDATE arion.site SET bing_api_key = NULL, bing_site_url = NULL, bing_connected = 0, bing_connected_at = NULL
+              WHERE tenant_id = @tenantId AND site_id = @siteId`);
+    res.json({ disconnected: true });
+  } catch (err) {
+    console.error('[arion/bing/disconnect]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/bing/performance?siteId=&period=30|90 ---
+router.get('/bing/performance', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const period = [30, 90, 365].includes(parseInt(req.query.period, 10)) ? parseInt(req.query.period, 10) : 30;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const key = getBingKeyForSite(site);
+    if (!key) return res.json({ connected: false, period, summary: null, dailyBreakdown: [] });
+    const bingSiteUrl = site.bing_site_url || ('https://' + site.domain);
+    const data = await bingGetRankAndTrafficStats(key, bingSiteUrl, period);
+    if (!data) return res.json({ connected: true, period, error: 'no_data', summary: null, dailyBreakdown: [] });
+    res.json({ connected: true, period, summary: data.summary, dailyBreakdown: data.dailyBreakdown });
+  } catch (err) {
+    console.error('[arion/bing/performance]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/bing/queries?siteId=&period=30|90 ---
+router.get('/bing/queries', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const key = getBingKeyForSite(site);
+    if (!key) return res.json({ connected: false, queries: [] });
+    const bingSiteUrl = site.bing_site_url || ('https://' + site.domain);
+    const queries = await bingGetKeywordStats(key, bingSiteUrl, 25);
+    res.json({ connected: true, queries: queries || [] });
+  } catch (err) {
+    console.error('[arion/bing/queries]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // --- GET /arion/search/bing/stats?siteId= — crawl stats + submission quota ---
 // Surfaces the meaningful Bing data that Google doesn't expose publicly:
 // crawl activity (200s/301s/404s/500s/robots.txt hits) and URL submission quota.
@@ -1311,9 +1446,9 @@ router.get('/search/bing/stats', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    const bingKey = process.env.BING_WMT_API_KEY;
+    const bingKey = getBingKeyForSite(site);
     if (!bingKey) return res.json({ connected: false, error: 'Bing Webmaster Tools not connected' });
-    const siteUrl = 'https://' + site.domain;
+    const siteUrl = site.bing_site_url || ('https://' + site.domain);
     const [crawl, quota] = await Promise.all([
       bingGetCrawlStats(bingKey, siteUrl).catch(() => null),
       bingGetUrlSubmissionQuota(bingKey, siteUrl).catch(() => null),
@@ -1910,8 +2045,8 @@ router.post('/search/generate-sitemap', async (req, res) => {
       console.warn('[arion/search/generate-sitemap] WP REST API crawl failed:', err.message);
     }
 
-    // 5. Submit each sitemap to Google and Bing
-    const bingKey = process.env.BING_WMT_API_KEY;
+    // 5. Submit each sitemap to Google and Bing (Bing: per-site key -> env fallback)
+    const bingKey = getBingKeyForSite(site);
     const results = [];
     const submittedTo = new Set();
 
