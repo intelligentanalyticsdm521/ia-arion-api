@@ -1174,6 +1174,187 @@ router.get('/seo/audit', async (req, res) => {
   }
 });
 
+// --- GET /arion/seo/market-monitor?siteId=&windowDays=30 ---
+// Reads Market Monitor data captured by the arion-func timer jobs:
+//   - Moves:        diffs arion.se_ranking_position_history across the window
+//   - Backlinks:    newest rows from arion.se_ranking_backlink_snapshot
+//   - PageChanges:  newest rows from arion.site_page_change
+//   - JobStatus:    last run per job from arion.market_monitor_job_log
+//
+// All four sub-feeds are returned in a single response so the UI only makes
+// one request. Empty arrays + jobStatus tells the UI to show "awaiting first
+// run" instead of an error.
+router.get('/seo/market-monitor', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const windowDays = Math.max(1, Math.min(180, Number(req.query.windowDays || 30)));
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const tier = (site.seo_addon_tier || '').toLowerCase();
+    if (tier !== 'authority') {
+      return res.json({
+        connected: true,
+        authorityGated: true,
+        tier,
+        message: 'Market Monitor requires the Authority SEO tier.',
+        moves: [], backlinks: { new: [], lost: [], totals: { active: 0, newThisPeriod: 0, lostThisPeriod: 0 } },
+        pageChanges: [],
+        jobStatus: { moves: null, backlinks: null, page_changes: null },
+      });
+    }
+
+    // ── 1. Moves: largest position deltas over the window for tracked competitors.
+    // Compare earliest vs latest position within the window per keyword × competitor.
+    const movesRes = await pool.request()
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('windowDays', sql.Int, windowDays)
+      .query(`
+        WITH windowed AS (
+          SELECT keyword_id, keyword, competitor_domain, site_engine_id,
+                 position, recorded_for,
+                 ROW_NUMBER() OVER (PARTITION BY keyword_id, competitor_domain, site_engine_id ORDER BY recorded_for ASC)  AS rn_first,
+                 ROW_NUMBER() OVER (PARTITION BY keyword_id, competitor_domain, site_engine_id ORDER BY recorded_for DESC) AS rn_last
+          FROM arion.se_ranking_position_history
+          WHERE site_id = @siteId
+            AND recorded_for >= CAST(DATEADD(DAY, -@windowDays, SYSUTCDATETIME()) AS DATE)
+            AND competitor_domain IS NOT NULL
+        )
+        SELECT f.keyword_id, f.keyword, f.competitor_domain, f.site_engine_id,
+               f.position AS first_position, f.recorded_for AS first_date,
+               l.position AS last_position, l.recorded_for AS last_date,
+               ISNULL(f.position, 0) - ISNULL(l.position, 0) AS position_change
+        FROM windowed f
+        JOIN windowed l
+          ON  l.keyword_id = f.keyword_id
+          AND l.competitor_domain = f.competitor_domain
+          AND l.site_engine_id = f.site_engine_id
+          AND l.rn_last = 1
+        WHERE f.rn_first = 1
+          AND ABS(ISNULL(f.position, 0) - ISNULL(l.position, 0)) >= 5
+        ORDER BY ABS(ISNULL(f.position, 0) - ISNULL(l.position, 0)) DESC
+      `);
+
+    const moves = movesRes.recordset.map((r) => ({
+      keywordId: r.keyword_id,
+      keyword: r.keyword,
+      competitorDomain: r.competitor_domain,
+      engineId: r.site_engine_id,
+      firstPosition: r.first_position,
+      lastPosition: r.last_position,
+      positionChange: Number(r.position_change) || 0,
+      direction: Number(r.position_change) > 0 ? 'up' : 'down',
+      firstDate: r.first_date,
+      lastDate: r.last_date,
+    }));
+
+    // ── 2. Backlinks: new + lost within window, plus totals.
+    const backlinksRes = await pool.request()
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('windowDays', sql.Int, windowDays)
+      .query(`
+        SELECT referring_domain, target_url, anchor_text, domain_authority,
+               link_status, first_seen, last_seen, snapshot_date
+        FROM arion.se_ranking_backlink_snapshot
+        WHERE site_id = @siteId
+          AND snapshot_date >= CAST(DATEADD(DAY, -@windowDays, SYSUTCDATETIME()) AS DATE)
+        ORDER BY snapshot_date DESC, referring_domain ASC
+      `);
+
+    const newBacklinks = [];
+    const lostBacklinks = [];
+    const activeDomains = new Set();
+    for (const b of backlinksRes.recordset) {
+      const row = {
+        referringDomain: b.referring_domain,
+        targetUrl: b.target_url,
+        anchorText: b.anchor_text,
+        domainAuthority: b.domain_authority,
+        firstSeen: b.first_seen,
+        lastSeen: b.last_seen,
+        snapshotDate: b.snapshot_date,
+      };
+      if (b.link_status === 'new') newBacklinks.push(row);
+      else if (b.link_status === 'lost') lostBacklinks.push(row);
+      else if (b.link_status === 'active') activeDomains.add(b.referring_domain);
+    }
+
+    // ── 3. Page Changes: most recent diffs within window.
+    const pcRes = await pool.request()
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('windowDays', sql.Int, windowDays)
+      .query(`
+        SELECT TOP 200 page_url, page_type, competitor_domain,
+               change_magnitude, excerpt_prev, excerpt_new,
+               title_prev, title_new, detected_at
+        FROM arion.site_page_change
+        WHERE site_id = @siteId
+          AND detected_at >= DATEADD(DAY, -@windowDays, SYSUTCDATETIME())
+        ORDER BY detected_at DESC
+      `);
+    const pageChanges = pcRes.recordset.map((p) => ({
+      pageUrl: p.page_url,
+      pageType: p.page_type,
+      competitorDomain: p.competitor_domain,
+      changeMagnitude: Number(p.change_magnitude) || 0,
+      excerptPrev: p.excerpt_prev,
+      excerptNew: p.excerpt_new,
+      titlePrev: p.title_prev,
+      titleNew: p.title_new,
+      detectedAt: p.detected_at,
+    }));
+
+    // ── 4. Job status: last run per job
+    const jobStatusRes = await pool.request()
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .query(`
+        SELECT job_name, status, rows_processed, started_at, completed_at
+        FROM (
+          SELECT job_name, status, rows_processed, started_at, completed_at,
+                 ROW_NUMBER() OVER (PARTITION BY job_name ORDER BY started_at DESC) AS rn
+          FROM arion.market_monitor_job_log
+          WHERE site_id = @siteId
+        ) t
+        WHERE rn = 1
+      `);
+    const jobStatus = { moves: null, backlinks: null, page_changes: null };
+    for (const j of jobStatusRes.recordset) {
+      jobStatus[j.job_name] = {
+        status: j.status,
+        rowsProcessed: j.rows_processed,
+        startedAt: j.started_at,
+        completedAt: j.completed_at,
+      };
+    }
+
+    res.json({
+      connected: true,
+      authorityGated: false,
+      tier,
+      windowDays,
+      moves,
+      backlinks: {
+        new: newBacklinks,
+        lost: lostBacklinks,
+        totals: {
+          active: activeDomains.size,
+          newThisPeriod: newBacklinks.length,
+          lostThisPeriod: lostBacklinks.length,
+        },
+      },
+      pageChanges,
+      jobStatus,
+    });
+  } catch (err) {
+    console.error('[arion/seo/market-monitor]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // --- GET /arion/seo/competitors?siteId= ---
 // Dedicated competitors feed — iterates every engine on the SE Ranking project
 // and aggregates "My Competitors" (added) lists. De-duplicates by domain and
