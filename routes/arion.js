@@ -1422,31 +1422,54 @@ router.post('/bing/auto-connect', async (req, res) => {
       });
     }
 
-    // Step 5: poll Bing until IsVerified flips (up to ~2 min). Bing itself
-    // handles the verification check periodically; we just watch for the flag.
-    const poll = await bingPollUntilVerified(masterKey, siteUrl, { maxAttempts: 12, delayMs: 10_000 });
-    if (!poll.verified) {
-      return res.json({
-        connected: false,
-        stage: 'verify_timeout',
-        error: 'DNS record written but Bing has not verified yet. It usually finishes within 10-15 minutes — check back and click Connect again, or use the manual option if it does not.',
-        dnsRecordWritten: { type: 'CNAME', name: subdomain, content: 'verify.bing.com' },
-      });
-    }
+    // Return immediately — we've written the DNS record and Bing will verify
+    // async. Client polls /arion/bing/check-verification to detect completion.
+    // This avoids the portal's 20s request timeout while Bing takes 30s-5min
+    // to propagate DNS and run its verification check.
+    res.json({
+      connected: false,
+      pending: true,
+      stage: 'dns_written',
+      siteUrl,
+      dnsRecord: { type: 'CNAME', name: subdomain, content: 'verify.bing.com.' },
+      message: 'DNS verification record written. Bing is checking now — this usually takes 30-90 seconds.',
+    });
+  } catch (err) {
+    console.error('[arion/bing/auto-connect]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
 
-    // Step 6: persist the connection
+// --- POST /arion/bing/check-verification?siteId= ---
+// Single-shot "is Bing done verifying yet?" check. Designed for client-side
+// polling. Returns quickly so portal fetches don't time out.
+router.post('/bing/check-verification', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId || req.body?.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  const masterKey = process.env.BING_WMT_API_KEY;
+  if (!masterKey) return res.status(503).json({ error: { code: 'NOT_CONFIGURED', message: 'Bing master API key not configured', status: 503 } });
+
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const siteUrl = 'https://' + site.domain + '/';
+    const entry = await bingGetSiteEntry(masterKey, siteUrl);
+    if (!entry) return res.json({ connected: false, pending: true, found: false });
+    if (!entry.IsVerified) return res.json({ connected: false, pending: true, found: true });
+    // Verified — persist and flip the DB flag
     await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('siteId', sql.UniqueIdentifier, siteId)
-      .input('siteUrl', sql.NVarChar(300), poll.entry?.Url || siteUrl)
+      .input('siteUrl', sql.NVarChar(300), entry.Url || siteUrl)
       .input('now', sql.DateTime2, new Date())
       .query(`UPDATE arion.site
               SET bing_api_key = NULL, bing_site_url = @siteUrl, bing_connected = 1, bing_connected_at = @now
               WHERE tenant_id = @tenantId AND site_id = @siteId`);
-
-    res.json({ connected: true, siteUrl: poll.entry?.Url || siteUrl, dnsRecord: { type: 'CNAME', name: subdomain, content: 'verify.bing.com' } });
+    res.json({ connected: true, siteUrl: entry.Url || siteUrl });
   } catch (err) {
-    console.error('[arion/bing/auto-connect]', err);
+    console.error('[arion/bing/check-verification]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
