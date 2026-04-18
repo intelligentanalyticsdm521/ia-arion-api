@@ -814,6 +814,152 @@ router.get('/seo/rankings', async (req, res) => {
   }
 });
 
+// --- GET /arion/seo/overview?siteId=&range=30d ---
+// Expansive SEO overview: rolls up rankings + distribution + movers +
+// period-over-period deltas + per-engine bucket counts for the hero cards.
+// Phase 3.5 landing endpoint.
+router.get('/seo/overview', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const rangeCode = (req.query.range || '30d').toString().toLowerCase();
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.se_ranking_project_id) {
+      return res.json({ connected: false, projectId: null });
+    }
+
+    const projectId = site.se_ranking_project_id;
+    const range = resolveRange(rangeCode);
+
+    const [curRaw, priorRaw] = await Promise.all([
+      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}`),
+      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.prior.start}&date_to=${range.prior.end}`),
+    ]);
+    const curBlocks = Array.isArray(curRaw.data) ? curRaw.data : [];
+    const priorBlocks = Array.isArray(priorRaw.data) ? priorRaw.data : [];
+
+    const engineIds = Array.from(new Set(curBlocks.map((b) => String(b.site_engine_id))));
+    const engineMetaById = await loadEngineMetaForProject(projectId, engineIds).catch(() => ({}));
+
+    const curKeywords = parsePositions(curBlocks, { rangeStart: range.current.start, rangeEnd: range.current.end, engineMetaById });
+    const priorKeywords = parsePositions(priorBlocks, { rangeStart: range.prior.start, rangeEnd: range.prior.end, engineMetaById });
+    const stats = computeAggregateStats(curKeywords);
+    const priorStats = computeAggregateStats(priorKeywords);
+
+    // Per-engine aggregates for hero cards. Group engines by provider label
+    // ("Google" / "Bing") and by AI engine names ("ChatGPT", "Gemini", etc).
+    const byProvider = {};
+    const byAiEngine = {};
+    for (const engineId of engineIds) {
+      const meta = engineMetaById[engineId];
+      const name = (meta?.name || '').toLowerCase();
+      const isAi = ['chatgpt', 'gemini', 'perplexity', 'ai overview', 'ai mode', 'claude'].some((ai) => name.includes(ai));
+      const bucket = isAi ? byAiEngine : byProvider;
+      // Use brand name as bucket key
+      const bucketKey = meta?.name || `Engine ${engineId}`;
+      if (!bucket[bucketKey]) bucket[bucketKey] = { engineIds: [], device: new Set() };
+      bucket[bucketKey].engineIds.push(engineId);
+      if (meta?.device) bucket[bucketKey].device.add(meta.device);
+    }
+    const computeEngineGroupStats = (group) => {
+      const filter = new Set(group.engineIds);
+      const kw = parsePositions(curBlocks, { rangeStart: range.current.start, rangeEnd: range.current.end, engineFilter: filter, engineMetaById });
+      const prior = parsePositions(priorBlocks, { rangeStart: range.prior.start, rangeEnd: range.prior.end, engineFilter: filter, engineMetaById });
+      const cur = computeAggregateStats(kw);
+      const pri = computeAggregateStats(prior);
+      return {
+        engineCount: group.engineIds.length,
+        devices: Array.from(group.device),
+        current: cur,
+        prior: pri,
+        avgPositionDelta: cur.avgPosition != null && pri.avgPosition != null ? Math.round((pri.avgPosition - cur.avgPosition) * 10) / 10 : null,
+        visibilityDelta: cur.visibilityScore - pri.visibilityScore,
+        top10Delta: cur.top10Count - pri.top10Count,
+      };
+    };
+    const providerCards = Object.entries(byProvider).map(([name, group]) => ({ name, ...computeEngineGroupStats(group) }));
+    const aiCards = Object.entries(byAiEngine).map(([name, group]) => ({ name, ...computeEngineGroupStats(group) }));
+
+    // Keyword movers (jumped / dropped) — using position change > 0 means
+    // improved (lower number).
+    const sortedByChange = [...curKeywords].sort((a, b) => Number(b.positionChange || 0) - Number(a.positionChange || 0));
+    const topJumped = sortedByChange.slice(0, 10).filter((k) => k.positionChange > 0).map(toMoverRow);
+    const topDropped = [...sortedByChange].reverse().slice(0, 10).filter((k) => k.positionChange < 0).map(toMoverRow);
+
+    // Daily distribution series for the stacked-area chart on the Overview.
+    const distributionSeries = buildDistributionSeries(curBlocks, range.current.start, range.current.end);
+
+    // Cross-section widgets: audit score, recent backlinks (Data API placeholder)
+    // Audit score just surfaces what's stored on site row (we don't re-call
+    // SE Ranking audit here to keep latency low). Audit page does the full pull.
+    res.json({
+      connected: true,
+      projectId,
+      range: { code: rangeCode, label: range.label, current: range.current, prior: range.prior, days: range.days },
+      engines: { metadata: Object.values(engineMetaById), availableIds: engineIds },
+      heroCards: {
+        providers: providerCards,
+        ai: aiCards,
+      },
+      stats: {
+        current: stats,
+        prior: priorStats,
+        delta: {
+          avgPosition: stats.avgPosition != null && priorStats.avgPosition != null ? Math.round((priorStats.avgPosition - stats.avgPosition) * 10) / 10 : null,
+          visibilityScore: Math.round((stats.visibilityScore - priorStats.visibilityScore) * 10) / 10,
+          top10Count: stats.top10Count - priorStats.top10Count,
+          trafficForecast: stats.trafficForecast - priorStats.trafficForecast,
+          totalKeywords: stats.totalKeywords - priorStats.totalKeywords,
+          rankingKeywords: stats.rankingKeywords - priorStats.rankingKeywords,
+        },
+      },
+      movers: { jumped: topJumped, dropped: topDropped, unchanged: stats.movers.unchanged },
+      distributionSeries,
+    });
+  } catch (err) {
+    console.error('[arion/seo/overview]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+function toMoverRow(k) {
+  return {
+    keywordId: k.keywordId,
+    keyword: k.keyword,
+    currentPosition: k.currentPosition,
+    previousPosition: k.previousPosition,
+    positionChange: k.positionChange,
+    searchVolume: k.searchVolume,
+  };
+}
+
+function buildDistributionSeries(engineBlocks, startDate, endDate) {
+  // For each date in range, count keywords in each position bucket across engines.
+  const byDate = {};
+  for (const engine of engineBlocks || []) {
+    for (const kw of engine.keywords || []) {
+      for (const p of kw.positions || []) {
+        if (!p?.date) continue;
+        if (startDate && p.date < startDate) continue;
+        if (endDate && p.date > endDate) continue;
+        if (!byDate[p.date]) byDate[p.date] = { date: p.date, top1: 0, top2_3: 0, top4_5: 0, top6_10: 0, top11_30: 0, top31_100: 0, notRanking: 0 };
+        const pos = Number(p.pos || 0);
+        if (pos === 0) byDate[p.date].notRanking++;
+        else if (pos === 1) byDate[p.date].top1++;
+        else if (pos <= 3) byDate[p.date].top2_3++;
+        else if (pos <= 5) byDate[p.date].top4_5++;
+        else if (pos <= 10) byDate[p.date].top6_10++;
+        else if (pos <= 30) byDate[p.date].top11_30++;
+        else byDate[p.date].top31_100++;
+      }
+    }
+  }
+  return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+}
+
 // --- GET /arion/seo/keyword/:keywordId?siteId=&range=90d ---
 // Returns the full per-engine time series + metadata for a single keyword,
 // used by the Keyword Rankings detail modal.
