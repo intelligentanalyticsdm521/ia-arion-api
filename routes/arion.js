@@ -1265,6 +1265,25 @@ router.get('/seo/diagnostic', async (req, res) => {
       }
     }
 
+    // Probe for the audit-issues detail endpoint so Phase 3.5 Site Audit can
+    // populate the "issues by category" table. /audit/{projectId} returns
+    // only the top-level counts; detail probably lives at a sub-path.
+    if (projectId) {
+      const auditIssueProbes = [
+        `/audit/${encodeURIComponent(projectId)}/issues`,
+        `/audit/${encodeURIComponent(projectId)}/report`,
+        `/audit/${encodeURIComponent(projectId)}/sections`,
+        `/audit/${encodeURIComponent(projectId)}/categories`,
+        `/audit/${encodeURIComponent(projectId)}/pages`,
+        `/audit/${encodeURIComponent(projectId)}/urls`,
+        `/audit/${encodeURIComponent(projectId)}/resources`,
+        `/audit/${encodeURIComponent(projectId)}/links`,
+      ];
+      for (const p of auditIssueProbes) {
+        results[`audit_issues_${p.replace(/[^a-z0-9]/gi, '_')}`] = summarize(`GET ${p}`, await seRankingRaw('GET', p));
+      }
+    }
+
     if (auditId) {
       results.audit = summarize(`GET /site-audit/audits/${auditId}`, await seRankingRaw('GET', `/site-audit/audits/${encodeURIComponent(auditId)}`));
     }
