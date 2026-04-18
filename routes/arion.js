@@ -1042,10 +1042,13 @@ router.get('/seo/audit', async (req, res) => {
     let audit = null;
     let auditRaw = null;
 
-    if (auditId && !force) {
-      auditRaw = await seRankingRaw('GET', `/site-audit/audits/${encodeURIComponent(auditId)}`);
-      if (auditRaw.ok) audit = auditRaw.data;
-    }
+    // Confirmed via diagnostic 2026-04-18: the real path is /audit/{projectId}
+    // (NOT /site-audit/audits/{auditId}). Audit is keyed by project, not a
+    // separate audit id. Response shape:
+    //   { total_pages, total_warnings, total_errors, total_passed,
+    //     status: "finished"|..., start_time, audit_time }
+    auditRaw = await seRankingRaw('GET', `/audit/${encodeURIComponent(projectId)}`);
+    if (auditRaw.ok) audit = auditRaw.data;
 
     // No audit on file, stored id invalid, or force=true — start a new one.
     if (!audit) {
@@ -1083,35 +1086,30 @@ router.get('/seo/audit', async (req, res) => {
       return res.json({
         connected: true,
         status: 'running',
-        auditId,
+        projectId,
         message: 'Audit in progress — check back in 60 seconds',
       });
     }
 
-    const issues = {
-      errors: Number(audit.total_errors ?? 0),
-      warnings: Number(audit.total_warnings ?? 0),
-      notices: Number(audit.total_notices ?? 0),
-      passed: Number(audit.total_passed ?? 0),
-    };
-    const issuesByCategory = Array.isArray(audit.sections)
-      ? audit.sections.map(s => ({
-          category: s.name || s.section || 'Other',
-          errors: Number(s.errors ?? 0),
-          warnings: Number(s.warnings ?? 0),
-          notices: Number(s.notices ?? 0),
-        }))
-      : [];
+    const errors = Number(audit.total_errors ?? 0);
+    const warnings = Number(audit.total_warnings ?? 0);
+    const passed = Number(audit.total_passed ?? 0);
+    const total = errors + warnings + passed;
+    const issues = { errors, warnings, notices: 0, passed };
+    // Health score computed as % of passed checks (no severity weight — the
+    // raw /audit endpoint doesn't expose one. Phase 4 can fetch /audit/{id}/
+    // issues for category breakdown + per-severity scoring).
+    const healthScore = total > 0 ? Math.round((passed / total) * 100) : 0;
 
     res.json({
       connected: true,
       status: 'complete',
-      auditId,
-      healthScore: Number(audit.score_percent ?? audit.score ?? 0),
+      projectId,
+      healthScore,
       pagesCrawled: Number(audit.total_pages ?? 0),
-      lastAuditDate: audit.finished_at || audit.updated_at || audit.created_at || null,
+      lastAuditDate: audit.audit_time || audit.start_time || null,
       issues,
-      issuesByCategory,
+      issuesByCategory: [], // populated by /audit/{id}/issues in Phase 4 Site Audit build
     });
   } catch (err) {
     console.error('[arion/seo/audit]', err);
@@ -1206,9 +1204,9 @@ router.get('/seo/diagnostic', async (req, res) => {
       results.positions = summarize(`GET /sites/${projectId}/positions`, await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions`));
 
       // Engine metadata probes — SE Ranking docs vary on the exact path.
-      // Try the most likely candidates so Phase 3.5 can light up Desktop/Mobile
-      // labels correctly. The first one that returns 200 with an array becomes
-      // our engine-id → {name, region, device} lookup.
+      // /system/search-engines is confirmed 200 with 4263 rows (global catalog).
+      // What we still need is the site_engine_id → base engine + device + city
+      // mapping. Site-engine ids (46877, etc) are per-project instances.
       const engineProbes = [
         '/system/search-engines',
         '/system/engines',
@@ -1218,6 +1216,23 @@ router.get('/seo/diagnostic', async (req, res) => {
       ];
       for (const p of engineProbes) {
         results[`engines_${p.replace(/[^a-z0-9]/gi, '_')}`] = summarize(`GET ${p}`, await seRankingRaw('GET', p));
+      }
+
+      // Per-site-engine probes: try to resolve one of the actual ids the
+      // project uses (picked from /positions). Multiple URL shapes — one
+      // of them is probably the right lookup.
+      const firstSiteEngineId = results.positions.sample?.[0]?.site_engine_id;
+      if (firstSiteEngineId != null) {
+        const siteEngineProbes = [
+          `/site-engines/${firstSiteEngineId}`,
+          `/sites/${encodeURIComponent(projectId)}/se/${firstSiteEngineId}`,
+          `/sites/${encodeURIComponent(projectId)}/site-engines/${firstSiteEngineId}`,
+          `/sites/${encodeURIComponent(projectId)}/engines/${firstSiteEngineId}`,
+          `/system/search-engines/${firstSiteEngineId}`,
+        ];
+        for (const p of siteEngineProbes) {
+          results[`site_engine_${p.replace(/[^a-z0-9]/gi, '_')}`] = summarize(`GET ${p}`, await seRankingRaw('GET', p));
+        }
       }
 
       // Competitors with se_id derived from first positions engine.
