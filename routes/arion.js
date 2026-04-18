@@ -27,7 +27,8 @@ import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing, li
 import { getDomainInfo, getDnsRecords, createDnsRecords, deleteDnsRecords, getSslStatus, getWpSiteInfo, getWpPages, getWpPosts, getWpPlugins } from '../lib/hostinger.js';
 import { runPageSpeedTest } from '../lib/pagespeed.js';
 import { meetsMinTier } from '../lib/tierCheck.js';
-import { getKeywordPositions, getProjectCompetitors, getAuditSummary } from '../lib/seranking.js';
+import { getKeywordPositions, getProjectCompetitors, getAuditSummary, getProjectKeywords, getSiteOverview, getPositionsHistory, startSiteAudit, addCompetitor as seRankingAddCompetitor } from '../lib/seranking.js';
+import { getKeywordData as seRankingKeywordData } from '../lib/serankingData.js';
 import formsRouter from './arion/forms.js';
 import bookingsRouter from './arion/bookings.js';
 import gbpRouter from './arion/gbp.js';
@@ -488,30 +489,94 @@ router.get('/seo', async (req, res) => {
 
     // Enrich breakdowns with real SE Ranking data
     if (site.se_ranking_project_id) {
-      const [rankings, competitors] = await Promise.all([
+      // Fetch all three in parallel: positions (current rank), keywords (names + metadata),
+      // competitors, and project overview (visibility score).
+      const [rankings, keywordMeta, competitors, projectOverview] = await Promise.all([
         getKeywordPositions(site.se_ranking_project_id, tenantId).catch(() => []),
+        getProjectKeywords(site.se_ranking_project_id, tenantId).catch(() => []),
         getProjectCompetitors(site.se_ranking_project_id, tenantId).catch(() => []),
+        getSiteOverview(site.se_ranking_project_id, tenantId).catch(() => null),
       ]);
 
-      // Aggregate across engines: group by keyword name, average positions
-      const byKeyword = {};
-      for (const r of rankings) {
-        const name = r.name || r.keyword || '';
-        if (!byKeyword[name]) byKeyword[name] = { keyword: name, positions: [], volume: r.volume || 0, serp_features: r.serp_features || [] };
-        if (r.pos != null) byKeyword[name].positions.push(r.pos);
+      // Build keyword_id → metadata map from /keywords (has real keyword text).
+      const metaById = {};
+      for (const m of keywordMeta || []) {
+        const id = m.id ?? m.keyword_id;
+        if (id != null) metaById[String(id)] = {
+          keyword: m.name || m.keyword || '',
+          volume: Number(m.volume ?? m.search_volume ?? 0),
+          difficulty: m.difficulty ?? m.kei ?? null,
+          group_id: m.group_id ?? null,
+        };
       }
-      const aggregatedRankings = Object.values(byKeyword).map(kw => ({
-        keyword: kw.keyword,
-        position: kw.positions.length ? Math.round(kw.positions.reduce((a, b) => a + b, 0) / kw.positions.length) : null,
-        change: null,
-        volume: kw.volume,
-        serp_features: kw.serp_features,
-      }));
 
-      // Compute opportunities: keywords at positions 11-20
+      // Aggregate across engines per keyword_id; prefer /keywords.name over /positions.name.
+      const byKey = {};
+      for (const r of rankings || []) {
+        const id = r.keyword_id ?? r.id;
+        const fromMeta = id != null ? metaById[String(id)] : null;
+        const name = (fromMeta && fromMeta.keyword) || r.name || r.keyword || '';
+        const keyKey = String(id ?? name);
+        if (!byKey[keyKey]) byKey[keyKey] = {
+          keywordId: id ?? null,
+          keyword: name,
+          positions: [],
+          changes: [],
+          volume: fromMeta ? fromMeta.volume : Number(r.volume ?? 0),
+          difficulty: fromMeta ? fromMeta.difficulty : (r.difficulty ?? null),
+          serp_features: r.serp_features || [],
+          url: r.url || r.landing_url || null,
+          engines: new Set(),
+        };
+        if (r.pos != null) byKey[keyKey].positions.push(Number(r.pos));
+        if (r.change != null) byKey[keyKey].changes.push(Number(r.change));
+        if (r.engine_id != null) byKey[keyKey].engines.add(String(r.engine_id));
+      }
+      // Any keywords tracked but without a position row yet — still include them with null pos.
+      for (const [id, meta] of Object.entries(metaById)) {
+        if (!byKey[id]) byKey[id] = {
+          keywordId: Number(id),
+          keyword: meta.keyword,
+          positions: [], changes: [], volume: meta.volume, difficulty: meta.difficulty,
+          serp_features: [], url: null, engines: new Set(),
+        };
+      }
+
+      const aggregatedRankings = Object.values(byKey).map(kw => {
+        const pos = kw.positions.length ? Math.round((kw.positions.reduce((a, b) => a + b, 0) / kw.positions.length) * 10) / 10 : null;
+        const change = kw.changes.length ? Math.round(kw.changes.reduce((a, b) => a + b, 0) / kw.changes.length) : null;
+        return {
+          keywordId: kw.keywordId,
+          keyword: kw.keyword,
+          position: pos,
+          change,
+          volume: kw.volume,
+          difficulty: kw.difficulty,
+          serp_features: kw.serp_features,
+          url: kw.url,
+          engines: Array.from(kw.engines),
+        };
+      });
+
+      // Avg position + visibility + top mover extraction for Overview.
+      const positionsOnly = aggregatedRankings.map(k => k.position).filter(p => typeof p === 'number' && p > 0);
+      const avgPosition = positionsOnly.length ? Math.round((positionsOnly.reduce((a, b) => a + b, 0) / positionsOnly.length) * 10) / 10 : null;
+      const visibilityScore = projectOverview ? (projectOverview.visibility ?? projectOverview.visibility_score ?? null) : null;
+      snapshot.avgPosition = avgPosition;
+      snapshot.searchVisibility = visibilityScore;
+      snapshot.top10Count = aggregatedRankings.filter(k => typeof k.position === 'number' && k.position <= 10).length;
+
+      // Opportunities: positions 11-20, sorted by volume desc.
       const opportunities = aggregatedRankings
-        .filter(k => k.position >= 11 && k.position <= 20)
-        .map(k => ({ keyword: k.keyword, position: k.position, volume: k.volume, estimated_gain: Math.round(k.volume * 0.05) }));
+        .filter(k => typeof k.position === 'number' && k.position >= 11 && k.position <= 20)
+        .sort((a, b) => (b.volume || 0) - (a.volume || 0))
+        .map(k => ({
+          keyword: k.keyword,
+          position: k.position,
+          volume: k.volume,
+          difficulty: k.difficulty,
+          estimatedMonthlyClicks: Math.round((k.volume || 0) * 0.28), // ~CTR of top-10 position
+        }));
 
       breakdowns = { rankings: aggregatedRankings, competitors, opportunities };
 
@@ -639,6 +704,307 @@ router.post('/seo/project/link', async (req, res) => {
     res.json({ integration: { siteIntegrationId: integrationId, providerCode: 'se_ranking', status: 'active', config: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, snapshot: null });
   } catch (err) {
     console.error('[arion/seo/project/link]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3 — SE Ranking expanded routes
+// ---------------------------------------------------------------------------
+
+// --- GET /arion/seo/rankings?siteId=&engine=google|bing|all ---
+// Normalized keyword ranking list with REAL keyword names (joins
+// /positions with /keywords so blank name fields don't come through).
+router.get('/seo/rankings', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const engineFilter = (req.query.engine || 'all').toString().toLowerCase();
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.se_ranking_project_id) {
+      return res.json({ connected: false, keywords: [], projectId: null });
+    }
+
+    const projectId = site.se_ranking_project_id;
+    const [positions, keywordMeta, projectOverview] = await Promise.all([
+      getKeywordPositions(projectId, tenantId).catch(() => []),
+      getProjectKeywords(projectId, tenantId).catch(() => []),
+      getSiteOverview(projectId, tenantId).catch(() => null),
+    ]);
+
+    const metaById = {};
+    for (const m of keywordMeta || []) {
+      const id = m.id ?? m.keyword_id;
+      if (id != null) metaById[String(id)] = {
+        keyword: m.name || m.keyword || '',
+        volume: Number(m.volume ?? m.search_volume ?? 0),
+        difficulty: m.difficulty ?? m.kei ?? null,
+        group_id: m.group_id ?? null,
+      };
+    }
+
+    // Group by keyword_id; aggregate across engines unless filtered.
+    const byKey = {};
+    for (const r of positions || []) {
+      if (engineFilter !== 'all' && String(r.engine_id) !== engineFilter) continue;
+      const id = r.keyword_id ?? r.id;
+      const fromMeta = id != null ? metaById[String(id)] : null;
+      const keyword = (fromMeta && fromMeta.keyword) || r.name || r.keyword || '';
+      const k = String(id ?? keyword);
+      if (!byKey[k]) byKey[k] = {
+        keywordId: id ?? null,
+        keyword,
+        positions: [],
+        changes: [],
+        volume: fromMeta ? fromMeta.volume : Number(r.volume ?? 0),
+        difficulty: fromMeta ? fromMeta.difficulty : (r.difficulty ?? null),
+        url: r.url || r.landing_url || null,
+        serpFeatures: r.serp_features || [],
+        engines: new Set(),
+      };
+      if (r.pos != null) byKey[k].positions.push(Number(r.pos));
+      if (r.change != null) byKey[k].changes.push(Number(r.change));
+      if (r.engine_id != null) byKey[k].engines.add(String(r.engine_id));
+    }
+
+    // Include tracked keywords that have no position rows yet.
+    if (engineFilter === 'all') {
+      for (const [id, meta] of Object.entries(metaById)) {
+        if (!byKey[id]) byKey[id] = {
+          keywordId: Number(id),
+          keyword: meta.keyword,
+          positions: [], changes: [], volume: meta.volume, difficulty: meta.difficulty,
+          url: null, serpFeatures: [], engines: new Set(),
+        };
+      }
+    }
+
+    const keywords = Object.values(byKey).map(k => {
+      const cur = k.positions.length ? Math.round((k.positions.reduce((a, b) => a + b, 0) / k.positions.length) * 10) / 10 : null;
+      const change = k.changes.length ? Math.round(k.changes.reduce((a, b) => a + b, 0) / k.changes.length) : 0;
+      const prev = cur != null && change ? Math.round((cur + change) * 10) / 10 : cur;
+      return {
+        keywordId: k.keywordId,
+        keyword: k.keyword,
+        currentPosition: cur,
+        previousPosition: prev,
+        positionChange: change,
+        searchVolume: k.volume,
+        difficulty: k.difficulty,
+        url: k.url,
+        serpFeatures: k.serpFeatures,
+        engines: Array.from(k.engines),
+      };
+    }).sort((a, b) => (a.currentPosition ?? 999) - (b.currentPosition ?? 999));
+
+    const visibilityScore = projectOverview ? (projectOverview.visibility ?? projectOverview.visibility_score ?? null) : null;
+    const positionsOnly = keywords.map(k => k.currentPosition).filter(p => typeof p === 'number' && p > 0);
+    const avgPosition = positionsOnly.length ? Math.round((positionsOnly.reduce((a, b) => a + b, 0) / positionsOnly.length) * 10) / 10 : null;
+
+    res.json({
+      connected: true,
+      projectId,
+      engine: engineFilter,
+      visibilityScore,
+      avgPosition,
+      top10Count: keywords.filter(k => typeof k.currentPosition === 'number' && k.currentPosition <= 10).length,
+      keywords,
+    });
+  } catch (err) {
+    console.error('[arion/seo/rankings]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/seo/audit?siteId= ---
+// Auto-starts an audit if none exists for the project. Returns either:
+//   { status: 'running', message } — audit in progress, retry in ~60s
+//   { status: 'complete', healthScore, pagesCrawled, issues: {...}, issuesByCategory: [...] }
+router.get('/seo/audit', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.se_ranking_project_id) {
+      return res.json({ connected: false, status: 'not_connected' });
+    }
+
+    let auditId = site.se_ranking_audit_id || null;
+    let audit = null;
+
+    if (auditId) {
+      audit = await getAuditSummary(auditId, tenantId).catch(() => null);
+    }
+
+    // No audit on file, or previous audit id is invalid — start a new one.
+    if (!audit) {
+      const started = await startSiteAudit(site.se_ranking_project_id, tenantId);
+      if (started && (started.id || started.audit_id)) {
+        auditId = String(started.id || started.audit_id);
+        try {
+          await pool.request()
+            .input('tenantId', sql.UniqueIdentifier, tenantId)
+            .input('siteId', sql.UniqueIdentifier, siteId)
+            .input('auditId', sql.NVarChar(50), auditId)
+            .query('UPDATE arion.site SET se_ranking_audit_id = @auditId, updated_at = SYSDATETIMEOFFSET() WHERE tenant_id = @tenantId AND site_id = @siteId');
+        } catch (e) { console.warn('[arion/seo/audit] could not persist audit id:', e.message); }
+        return res.json({
+          connected: true,
+          status: 'running',
+          auditId,
+          message: 'Audit in progress — check back in 60 seconds',
+        });
+      }
+      return res.json({
+        connected: true,
+        status: 'unavailable',
+        message: 'Unable to start audit. Please try again in a few minutes.',
+      });
+    }
+
+    // Audit may still be running per SE Ranking's state machine.
+    if (audit.status && String(audit.status).toLowerCase() !== 'finished' && String(audit.status).toLowerCase() !== 'complete' && String(audit.status).toLowerCase() !== 'done') {
+      return res.json({
+        connected: true,
+        status: 'running',
+        auditId,
+        message: 'Audit in progress — check back in 60 seconds',
+      });
+    }
+
+    const issues = {
+      errors: Number(audit.total_errors ?? 0),
+      warnings: Number(audit.total_warnings ?? 0),
+      notices: Number(audit.total_notices ?? 0),
+      passed: Number(audit.total_passed ?? 0),
+    };
+    const issuesByCategory = Array.isArray(audit.sections)
+      ? audit.sections.map(s => ({
+          category: s.name || s.section || 'Other',
+          errors: Number(s.errors ?? 0),
+          warnings: Number(s.warnings ?? 0),
+          notices: Number(s.notices ?? 0),
+        }))
+      : [];
+
+    res.json({
+      connected: true,
+      status: 'complete',
+      auditId,
+      healthScore: Number(audit.score_percent ?? audit.score ?? 0),
+      pagesCrawled: Number(audit.total_pages ?? 0),
+      lastAuditDate: audit.finished_at || audit.updated_at || audit.created_at || null,
+      issues,
+      issuesByCategory,
+    });
+  } catch (err) {
+    console.error('[arion/seo/audit]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/seo/competitors/add ---
+// Body: { siteId, domain }
+router.post('/seo/competitors/add', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId, domain } = req.body || {};
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  const cleanDomain = typeof domain === 'string' ? domain.trim().replace(/^https?:\/\//i, '').replace(/\/$/, '') : '';
+  if (!cleanDomain) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'domain required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.se_ranking_project_id) return res.status(400).json({ error: { code: 'NOT_CONNECTED', message: 'SE Ranking project not configured for this site', status: 400 } });
+
+    const result = await seRankingAddCompetitor(site.se_ranking_project_id, cleanDomain, tenantId);
+    if (!result) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: 'SE Ranking did not accept the competitor', status: 502 } });
+
+    res.json({
+      ok: true,
+      competitor: {
+        id: result.id ?? null,
+        domain: result.domain || cleanDomain,
+        visibility: result.visibility ?? null,
+      },
+    });
+  } catch (err) {
+    console.error('[arion/seo/competitors/add]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/seo/decay?siteId= ---
+// Content decay detection: pages that dropped 3+ positions vs ~30 days ago.
+router.get('/seo/decay', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.se_ranking_project_id) return res.json({ connected: false, decaying: [] });
+
+    const today = new Date();
+    const monthAgo = new Date(today.getTime() - 30 * 24 * 3600 * 1000);
+    const fmt = (d) => d.toISOString().slice(0, 10);
+
+    const [current, prior, keywordMeta] = await Promise.all([
+      getPositionsHistory(site.se_ranking_project_id, fmt(monthAgo), fmt(today), tenantId).catch(() => []),
+      getPositionsHistory(site.se_ranking_project_id, fmt(new Date(monthAgo.getTime() - 30 * 24 * 3600 * 1000)), fmt(monthAgo), tenantId).catch(() => []),
+      getProjectKeywords(site.se_ranking_project_id, tenantId).catch(() => []),
+    ]);
+    const metaById = {};
+    for (const m of keywordMeta || []) {
+      const id = m.id ?? m.keyword_id;
+      if (id != null) metaById[String(id)] = { keyword: m.name || m.keyword || '', volume: Number(m.volume ?? 0) };
+    }
+
+    // Group by keyword_id, take the best (lowest) position per period.
+    const bestByPeriod = (rows) => {
+      const m = {};
+      for (const r of rows || []) {
+        const id = String(r.keyword_id ?? r.id ?? '');
+        if (!id) continue;
+        const pos = Number(r.pos ?? r.position ?? 0);
+        if (!pos) continue;
+        if (m[id] == null || pos < m[id].pos) m[id] = { pos, url: r.url || r.landing_url || null };
+      }
+      return m;
+    };
+    const curMap = bestByPeriod(current);
+    const priorMap = bestByPeriod(prior);
+
+    const decaying = [];
+    for (const [id, cur] of Object.entries(curMap)) {
+      const p = priorMap[id];
+      if (!p) continue;
+      const delta = cur.pos - p.pos; // positive delta = rank got worse (further from #1)
+      if (delta >= 3) {
+        const meta = metaById[id] || {};
+        decaying.push({
+          keywordId: Number(id),
+          keyword: meta.keyword || '',
+          url: cur.url || null,
+          priorPosition: p.pos,
+          currentPosition: cur.pos,
+          change: delta,
+          searchVolume: meta.volume || 0,
+        });
+      }
+    }
+    decaying.sort((a, b) => b.change - a.change);
+
+    res.json({ connected: true, decaying });
+  } catch (err) {
+    console.error('[arion/seo/decay]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
