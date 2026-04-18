@@ -1516,6 +1516,11 @@ router.post('/bing/disconnect', async (req, res) => {
 });
 
 // --- GET /arion/bing/performance?siteId=&period=30|90 ---
+// Gates on arion.site.bing_connected — the DB flag flipped by /bing/auto-connect
+// when Bing finishes verifying ownership. This keeps the Settings "Not connected"
+// state and IA Insights observations in sync: IA Insights will say "Connect Bing"
+// until the user connects AND Bing verifies, and will light up automatically the
+// next time IAInsightsReports re-fetches after bing_connected=1 is persisted.
 router.get('/bing/performance', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId;
@@ -1525,6 +1530,7 @@ router.get('/bing/performance', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.bing_connected) return res.json({ connected: false, period, summary: null, dailyBreakdown: [] });
     const key = getBingKeyForSite(site);
     if (!key) return res.json({ connected: false, period, summary: null, dailyBreakdown: [] });
     const bingSiteUrl = site.bing_site_url || ('https://' + site.domain);
@@ -1546,6 +1552,7 @@ router.get('/bing/queries', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.bing_connected) return res.json({ connected: false, queries: [] });
     const key = getBingKeyForSite(site);
     if (!key) return res.json({ connected: false, queries: [] });
     const bingSiteUrl = site.bing_site_url || ('https://' + site.domain);
