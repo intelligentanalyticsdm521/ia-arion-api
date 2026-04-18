@@ -27,7 +27,7 @@ import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing, li
 import { getDomainInfo, getDnsRecords, createDnsRecords, deleteDnsRecords, getSslStatus, getWpSiteInfo, getWpPages, getWpPosts, getWpPlugins } from '../lib/hostinger.js';
 import { runPageSpeedTest } from '../lib/pagespeed.js';
 import { meetsMinTier } from '../lib/tierCheck.js';
-import { getKeywordPositions, getProjectCompetitors, getAuditSummary, getProjectKeywords, getSiteOverview, getPositionsHistory, startSiteAudit, addCompetitor as seRankingAddCompetitor } from '../lib/seranking.js';
+import { getKeywordPositions, getProjectCompetitors, getAuditSummary, getProjectKeywords, getSiteOverview, getPositionsHistory, startSiteAudit, addCompetitor as seRankingAddCompetitor, rawRequest as seRankingRaw } from '../lib/seranking.js';
 import { getKeywordData as seRankingKeywordData } from '../lib/serankingData.js';
 import formsRouter from './arion/forms.js';
 import bookingsRouter from './arion/bookings.js';
@@ -729,11 +729,26 @@ router.get('/seo/rankings', async (req, res) => {
     }
 
     const projectId = site.se_ranking_project_id;
-    const [positions, keywordMeta, projectOverview] = await Promise.all([
-      getKeywordPositions(projectId, tenantId).catch(() => []),
-      getProjectKeywords(projectId, tenantId).catch(() => []),
-      getSiteOverview(projectId, tenantId).catch(() => null),
+    // Use rawRequest on the primary calls so we can surface upstream
+    // HTTP errors explicitly (401/404/etc) instead of silently returning
+    // an empty keyword list that the UI interprets as "no data yet".
+    const [positionsRaw, keywordsRaw, overviewRaw] = await Promise.all([
+      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions`),
+      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/keywords`),
+      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}`),
     ]);
+    const positions = Array.isArray(positionsRaw.data) ? positionsRaw.data : [];
+    const keywordMeta = Array.isArray(keywordsRaw.data) ? keywordsRaw.data : [];
+    const projectOverview = overviewRaw.ok ? overviewRaw.data : null;
+
+    const upstreamError = !positionsRaw.ok || !keywordsRaw.ok || !overviewRaw.ok
+      ? {
+          positions: positionsRaw.ok ? null : `HTTP ${positionsRaw.status}: ${positionsRaw.errorText || 'unknown'}`,
+          keywords: keywordsRaw.ok ? null : `HTTP ${keywordsRaw.status}: ${keywordsRaw.errorText || 'unknown'}`,
+          project: overviewRaw.ok ? null : `HTTP ${overviewRaw.status}: ${overviewRaw.errorText || 'unknown'}`,
+          keyConfigured: positionsRaw.keyConfigured,
+        }
+      : null;
 
     const metaById = {};
     for (const m of keywordMeta || []) {
@@ -812,6 +827,7 @@ router.get('/seo/rankings', async (req, res) => {
       avgPosition,
       top10Count: keywords.filter(k => typeof k.currentPosition === 'number' && k.currentPosition <= 10).length,
       keywords,
+      upstreamError, // null when all SE Ranking calls succeeded; object when any failed
     });
   } catch (err) {
     console.error('[arion/seo/rankings]', err);
@@ -819,13 +835,14 @@ router.get('/seo/rankings', async (req, res) => {
   }
 });
 
-// --- GET /arion/seo/audit?siteId= ---
+// --- GET /arion/seo/audit?siteId=&force=true ---
 // Auto-starts an audit if none exists for the project. Returns either:
 //   { status: 'running', message } — audit in progress, retry in ~60s
 //   { status: 'complete', healthScore, pagesCrawled, issues: {...}, issuesByCategory: [...] }
 router.get('/seo/audit', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId;
+  const force = String(req.query.force || '').toLowerCase() === 'true';
   if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
   try {
     const pool = await getServicesPool();
@@ -835,16 +852,37 @@ router.get('/seo/audit', async (req, res) => {
       return res.json({ connected: false, status: 'not_connected' });
     }
 
+    const projectId = site.se_ranking_project_id;
     let auditId = site.se_ranking_audit_id || null;
-    let audit = null;
 
-    if (auditId) {
-      audit = await getAuditSummary(auditId, tenantId).catch(() => null);
+    // Always fetch project detail so we can pick up SE Ranking's own .audit_id
+    // if one exists there but isn't mirrored on our site row yet.
+    const projectDetailRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}`);
+    if (projectDetailRaw.ok && projectDetailRaw.data) {
+      const detailAuditId = projectDetailRaw.data.audit_id || projectDetailRaw.data.site_audit_id || null;
+      if (detailAuditId && String(detailAuditId) !== String(auditId)) {
+        auditId = String(detailAuditId);
+        try {
+          await pool.request()
+            .input('tenantId', sql.UniqueIdentifier, tenantId)
+            .input('siteId', sql.UniqueIdentifier, siteId)
+            .input('auditId', sql.NVarChar(50), auditId)
+            .query('UPDATE arion.site SET se_ranking_audit_id = @auditId, updated_at = SYSDATETIMEOFFSET() WHERE tenant_id = @tenantId AND site_id = @siteId');
+        } catch (e) { console.warn('[arion/seo/audit] could not persist audit id:', e.message); }
+      }
     }
 
-    // No audit on file, or previous audit id is invalid — start a new one.
+    let audit = null;
+    let auditRaw = null;
+
+    if (auditId && !force) {
+      auditRaw = await seRankingRaw('GET', `/site-audit/audits/${encodeURIComponent(auditId)}`);
+      if (auditRaw.ok) audit = auditRaw.data;
+    }
+
+    // No audit on file, stored id invalid, or force=true — start a new one.
     if (!audit) {
-      const started = await startSiteAudit(site.se_ranking_project_id, tenantId);
+      const started = await startSiteAudit(projectId, tenantId);
       if (started && (started.id || started.audit_id)) {
         auditId = String(started.id || started.audit_id);
         try {
@@ -865,6 +903,11 @@ router.get('/seo/audit', async (req, res) => {
         connected: true,
         status: 'unavailable',
         message: 'Unable to start audit. Please try again in a few minutes.',
+        upstreamError: {
+          projectDetail: projectDetailRaw.ok ? null : `HTTP ${projectDetailRaw.status}: ${projectDetailRaw.errorText || 'unknown'}`,
+          auditFetch: auditRaw && !auditRaw.ok ? `HTTP ${auditRaw.status}: ${auditRaw.errorText || 'unknown'}` : null,
+          keyConfigured: projectDetailRaw.keyConfigured,
+        },
       });
     }
 
@@ -936,6 +979,75 @@ router.post('/seo/competitors/add', async (req, res) => {
     });
   } catch (err) {
     console.error('[arion/seo/competitors/add]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/seo/diagnostic?siteId= ---
+// Hits every SE Ranking Project API surface we use and returns raw upstream
+// status + payload shape so we can see exactly what's failing when the UI
+// shows "no data". Exposes env-key presence, upstream HTTP codes, response
+// shapes, and error bodies.
+router.get('/seo/diagnostic', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const projectId = site.se_ranking_project_id;
+    const auditId = site.se_ranking_audit_id || null;
+
+    const envKeyPresent = Boolean(String(process.env.SERANKING_API_SYSTEM_KEY || '').trim());
+    const dataKeyPresent = Boolean(String(process.env.SERANKING_DATA_API_KEY || '').trim());
+
+    const summarize = (label, r) => ({
+      label,
+      url: r.url,
+      keyConfigured: r.keyConfigured,
+      ok: r.ok,
+      httpStatus: r.status,
+      errorText: r.errorText,
+      dataType: Array.isArray(r.data) ? 'array' : (r.data === null ? 'null' : typeof r.data),
+      count: Array.isArray(r.data) ? r.data.length : undefined,
+      sample: Array.isArray(r.data) ? r.data.slice(0, 2) : r.data,
+    });
+
+    // Call each endpoint. Even if projectId is missing we still surface the
+    // /sites call so the user can see whether the API key works at all.
+    const results = {};
+    results.listProjects = summarize('GET /sites', await seRankingRaw('GET', '/sites'));
+
+    if (projectId) {
+      results.project = summarize(`GET /sites/${projectId}`, await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}`));
+      results.keywords = summarize(`GET /sites/${projectId}/keywords`, await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/keywords`));
+      results.positions = summarize(`GET /sites/${projectId}/positions`, await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions`));
+      results.competitors = summarize(`GET /sites/${projectId}/competitors`, await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/competitors`));
+    }
+
+    if (auditId) {
+      results.audit = summarize(`GET /site-audit/audits/${auditId}`, await seRankingRaw('GET', `/site-audit/audits/${encodeURIComponent(auditId)}`));
+    }
+
+    res.json({
+      site: {
+        siteId: site.site_id,
+        domain: site.domain,
+        seRankingProjectId: projectId,
+        seRankingAuditId: auditId,
+        seoAddonTier: site.seo_addon_tier,
+      },
+      env: {
+        SERANKING_API_SYSTEM_KEY: envKeyPresent ? 'set' : 'MISSING',
+        SERANKING_DATA_API_KEY: dataKeyPresent ? 'set' : 'MISSING',
+        base: process.env.SERANKING_API_BASE || 'https://api4.seranking.com',
+      },
+      results,
+    });
+  } catch (err) {
+    console.error('[arion/seo/diagnostic]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
