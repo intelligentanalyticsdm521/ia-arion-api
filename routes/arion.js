@@ -1409,15 +1409,17 @@ router.post('/bing/auto-connect', async (req, res) => {
     const subdomain = dotIdx > 0 ? dnsCode.slice(0, dotIdx) : dnsCode;
     if (!subdomain) return res.json({ connected: false, stage: 'parse_code', error: 'Bing did not return a DnsVerificationCode' });
 
-    // Step 4: write the CNAME via Hostinger DNS API
-    let dnsResult = null;
-    try {
-      dnsResult = await createDnsRecords(site.domain, [{ type: 'CNAME', name: subdomain, content: 'verify.bing.com' }], false);
-    } catch (e) {
-      return res.json({ connected: false, stage: 'dns_write', error: e.message, dnsRecordNeeded: { type: 'CNAME', name: subdomain, content: 'verify.bing.com' } });
-    }
-    if (!dnsResult) {
-      return res.json({ connected: false, stage: 'dns_write', error: 'Hostinger DNS API returned no result', dnsRecordNeeded: { type: 'CNAME', name: subdomain, content: 'verify.bing.com' } });
+    // Step 4: write the CNAME via Hostinger DNS API. Hostinger expects the content
+    // with a trailing dot for canonical DNS form — stored records normalize to that anyway.
+    const dnsResult = await createDnsRecords(site.domain, [{ type: 'CNAME', name: subdomain, content: 'verify.bing.com.', ttl: 300 }], false);
+    if (!dnsResult.ok) {
+      return res.json({
+        connected: false,
+        stage: 'dns_write',
+        error: dnsResult.error || 'Hostinger DNS write failed',
+        hostingerStatus: dnsResult.status || null,
+        dnsRecordNeeded: { type: 'CNAME', name: subdomain, content: 'verify.bing.com.' },
+      });
     }
 
     // Step 5: poll Bing until IsVerified flips (up to ~2 min). Bing itself
@@ -2233,9 +2235,10 @@ router.post('/hosting/dns', async (req, res) => {
     if (!site.domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
 
     const result = await createDnsRecords(site.domain, records, false);
-    if (!result) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: 'Failed to create DNS records', status: 502 } });
-
-    res.json({ domain: site.domain, result });
+    if (!result.ok) {
+      return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: result.error || 'Failed to create DNS records', status: 502, hostingerStatus: result.status || null, hostingerBody: result.body || null } });
+    }
+    res.json({ domain: site.domain, result: result.data });
   } catch (err) {
     console.error('[arion/hosting/dns POST]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
@@ -2261,9 +2264,10 @@ router.delete('/hosting/dns', async (req, res) => {
     if (!site.domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
 
     const result = await deleteDnsRecords(site.domain, records);
-    if (!result) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: 'Failed to delete DNS records', status: 502 } });
-
-    res.json({ domain: site.domain, result });
+    if (!result.ok) {
+      return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: result.error || 'Failed to delete DNS records', status: 502, hostingerStatus: result.status || null, hostingerBody: result.body || null } });
+    }
+    res.json({ domain: site.domain, result: result.data });
   } catch (err) {
     console.error('[arion/hosting/dns DELETE]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
