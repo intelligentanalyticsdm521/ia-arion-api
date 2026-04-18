@@ -822,7 +822,7 @@ router.get('/search/url-inspection', async (req, res) => {
 // Google by API. Honest response + real Bing + IndexNow attempts.
 router.post('/search/submit-url', async (req, res) => {
   const tenantId = req.tenant.tenantId;
-  const siteId = req.query.siteId;
+  const siteId = req.query.siteId || req.body?.siteId;
   const { url } = req.body || {};
   if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
   if (!url) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'url is required in body', status: 400 } });
@@ -1250,8 +1250,21 @@ router.post('/search/generate-sitemap', async (req, res) => {
       }
       if (bingKey) {
         const b = await submitToBing(bingKey, siteUrl, sm);
-        perMap.bing = b.submitted ? b : { submitted: false, error: (b.error || '').replace(/^HTTP \d+:\s*/, '').slice(0, 240) || 'Bing sitemap submission failed' };
-        if (perMap.bing.submitted) submittedTo.add('bing');
+        if (b.submitted) {
+          perMap.bing = b;
+          submittedTo.add('bing');
+        } else {
+          // Translate common Bing WMT errors to plain English
+          const raw = (b.error || '').replace(/^HTTP \d+:\s*/, '');
+          let friendly;
+          if (/InvalidApiKey/i.test(raw)) friendly = 'Bing Webmaster Tools API key is invalid. Update BING_WMT_API_KEY in Azure App Service and restart, or reconnect Bing in Settings → Connected Accounts once the Bing connection flow ships.';
+          else if (/NotFound|SiteNotFound/i.test(raw)) friendly = 'Site is not registered in Bing Webmaster Tools. Add the site in the Bing Webmaster dashboard first.';
+          else if (/Unauthorized/i.test(raw)) friendly = 'Bing rejected the request as unauthorized. Verify the API key has permission for this site.';
+          else {
+            try { friendly = JSON.parse(raw)?.Message || raw.slice(0, 240); } catch { friendly = raw.slice(0, 240); }
+          }
+          perMap.bing = { submitted: false, error: friendly || 'Bing sitemap submission failed' };
+        }
       } else {
         perMap.bing = { submitted: false, error: 'Bing Webmaster Tools not connected' };
       }
