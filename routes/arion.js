@@ -1102,26 +1102,174 @@ router.get('/seo/audit', async (req, res) => {
 
     const errors = Number(audit.total_errors ?? 0);
     const warnings = Number(audit.total_warnings ?? 0);
+    const notices = Number(audit.total_notices ?? 0);
     const passed = Number(audit.total_passed ?? 0);
-    const total = errors + warnings + passed;
-    const issues = { errors, warnings, notices: 0, passed };
-    // Health score computed as % of passed checks (no severity weight — the
-    // raw /audit endpoint doesn't expose one. Phase 4 can fetch /audit/{id}/
-    // issues for category breakdown + per-severity scoring).
-    const healthScore = total > 0 ? Math.round((passed / total) * 100) : 0;
+    const pagesCrawled = Number(audit.total_pages ?? 0);
+    const issues = { errors, warnings, notices, passed };
+
+    // Health score resolution — PREFER SE Ranking's own score. The /audit/{projectId}
+    // overview may or may not include a score field depending on API version. If it
+    // doesn't, fall back to the deeper /site-audit/audits/{auditId} summary which
+    // consistently returns score_percent. Only compute our own severity-weighted
+    // approximation if SE Ranking supplies no score at all.
+    const candidateScoreFields = ['score_percent', 'audit_score', 'health_score', 'overall_score', 'score', 'audit_score_percent'];
+    const readScore = (obj) => {
+      if (!obj || typeof obj !== 'object') return null;
+      for (const f of candidateScoreFields) {
+        const v = obj[f];
+        if (typeof v === 'number' && Number.isFinite(v)) return Math.round(v);
+        if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return Math.round(Number(v));
+      }
+      return null;
+    };
+
+    let healthScore = readScore(audit);
+    let healthScoreSource = healthScore != null ? 'se_ranking_audit_overview' : null;
+    let auditDetailRaw = null;
+
+    if (healthScore == null && auditId) {
+      // Try the fuller summary endpoint — SE Ranking's own UI score is sourced here.
+      auditDetailRaw = await seRankingRaw('GET', `/site-audit/audits/${encodeURIComponent(auditId)}`).catch(() => null);
+      if (auditDetailRaw && auditDetailRaw.ok) {
+        const d = auditDetailRaw.data || {};
+        const detailScore = readScore(d);
+        if (detailScore != null) {
+          healthScore = detailScore;
+          healthScoreSource = 'se_ranking_audit_detail';
+        }
+      }
+    }
+
+    if (healthScore == null) {
+      // Severity-weighted fallback (NOT a pass ratio). Errors count ~10× more than
+      // warnings in SE Ranking's own scoring. We normalize against total checks
+      // (errors + warnings + notices + passed), not against pages, because the
+      // raw /audit overview aggregates per-check not per-page.
+      const totalChecks = errors + warnings + notices + passed;
+      if (totalChecks > 0) {
+        const weightedDeduction = (errors * 10 + warnings * 2 + notices * 0.5);
+        const maxDeduction = totalChecks * 10; // all checks were errors → 0
+        healthScore = Math.max(0, Math.min(100, Math.round((1 - weightedDeduction / maxDeduction) * 100)));
+      } else {
+        healthScore = 0;
+      }
+      healthScoreSource = 'ia_weighted_approximation';
+    }
 
     res.json({
       connected: true,
       status: 'complete',
       projectId,
+      auditId: auditId || null,
       healthScore,
-      pagesCrawled: Number(audit.total_pages ?? 0),
+      healthScoreSource,
+      pagesCrawled,
       lastAuditDate: audit.audit_time || audit.start_time || null,
       issues,
       issuesByCategory: [], // populated by /audit/{id}/issues in Phase 4 Site Audit build
     });
   } catch (err) {
     console.error('[arion/seo/audit]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/seo/competitors?siteId= ---
+// Dedicated competitors feed — iterates every engine on the SE Ranking project
+// and aggregates "My Competitors" (added) lists. De-duplicates by domain and
+// surfaces visibility / overlap fields when present.
+//
+// Why this exists separately from the legacy /arion/seo breakdown: that path
+// only returns competitors for ONE engine (the first one it sees in positions
+// for the current date range). If positions for that range/engine are empty,
+// firstEngineId comes back undefined and competitors drops to []. This endpoint
+// walks all engines and merges, so it matches what SE Ranking's own UI shows.
+router.get('/seo/competitors', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.se_ranking_project_id) return res.json({ connected: false, competitors: [] });
+
+    const projectId = site.se_ranking_project_id;
+
+    // Pull positions WITHOUT a date filter so we always get the full engine
+    // list for the project — not just engines that had results in some
+    // arbitrary range.
+    const positionsRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions`);
+    const engineBlocks = Array.isArray(positionsRaw.data) ? positionsRaw.data : [];
+    const engineIds = Array.from(new Set(engineBlocks.map((b) => String(b.site_engine_id)).filter(Boolean)));
+
+    const upstreamErrors = [];
+    const byDomain = new Map();
+
+    // Fetch competitors for each engine in parallel and merge.
+    const results = await Promise.all(
+      engineIds.map((seId) =>
+        seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/competitors?se_id=${encodeURIComponent(seId)}`)
+          .then((r) => ({ seId, r }))
+          .catch((err) => ({ seId, r: { ok: false, status: 0, errorText: err.message } }))
+      )
+    );
+
+    for (const { seId, r } of results) {
+      if (!r.ok) {
+        upstreamErrors.push({ seId, status: r.status, errorText: r.errorText || null });
+        continue;
+      }
+      if (!Array.isArray(r.data)) continue;
+      for (const c of r.data) {
+        const domainKey = String(c.url || c.domain || c.competitor || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+        if (!domainKey) continue;
+        const existing = byDomain.get(domainKey);
+        // Merge per-engine rows so the returned record carries the best
+        // (most-populated) visibility/keyword-count numbers across engines.
+        const merged = {
+          id: c.id ?? existing?.id ?? null,
+          domain: domainKey,
+          competitor: c.url || c.domain || c.competitor || domainKey,
+          url: c.url || existing?.url || null,
+          engines: [...new Set([...(existing?.engines || []), seId])],
+          visibility: typeof c.visibility === 'number' ? c.visibility : (existing?.visibility ?? null),
+          visibility_score: typeof c.visibility_score === 'number' ? c.visibility_score : (existing?.visibility_score ?? null),
+          keywords: c.keywords ?? c.keywords_count ?? c.total_keywords ?? existing?.keywords ?? null,
+          overlap: c.overlap ?? c.overlap_percent ?? c.keyword_overlap ?? existing?.overlap ?? null,
+          added_at: c.added_at ?? c.created_at ?? existing?.added_at ?? null,
+          raw: c,
+        };
+        byDomain.set(domainKey, merged);
+      }
+    }
+
+    // Legacy fallback — if positions returned no engines (fresh project with
+    // no keyword history), we still try a no-engine GET which some SE Ranking
+    // accounts accept.
+    if (engineIds.length === 0) {
+      const bareRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/competitors`);
+      if (bareRaw.ok && Array.isArray(bareRaw.data)) {
+        for (const c of bareRaw.data) {
+          const domainKey = String(c.url || c.domain || c.competitor || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+          if (!domainKey || byDomain.has(domainKey)) continue;
+          byDomain.set(domainKey, { id: c.id ?? null, domain: domainKey, competitor: c.url || c.domain || domainKey, url: c.url || null, engines: [], visibility: null, keywords: null, overlap: null, added_at: c.added_at ?? null, raw: c });
+        }
+      } else if (!bareRaw.ok) {
+        upstreamErrors.push({ seId: 'bare', status: bareRaw.status, errorText: bareRaw.errorText || null });
+      }
+    }
+
+    const competitors = Array.from(byDomain.values());
+    res.json({
+      connected: true,
+      projectId,
+      engineCount: engineIds.length,
+      competitors,
+      upstreamErrors: upstreamErrors.length ? upstreamErrors : undefined,
+    });
+  } catch (err) {
+    console.error('[arion/seo/competitors]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
