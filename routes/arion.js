@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { getServicesPool } from '../db/servicesPool.js';
 import { firePlatformEvent } from '../lib/platformEvents.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
-import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries, getSearchConsoleDates, getSearchConsolePageQuery, getAnalyticsData } from '../lib/googleServices.js';
+import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries, getSearchConsoleDates, getSearchConsolePageQuery, getAnalyticsData, resolveGscProperty } from '../lib/googleServices.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
 import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats } from '../lib/bingWebmaster.js';
 import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing, listGoogleSitemaps } from '../lib/sitemapGenerator.js';
@@ -777,7 +777,10 @@ router.get('/search/url-inspection', async (req, res) => {
     const tokenData = await getAccessToken(refreshToken).catch(() => null);
     if (!tokenData) return res.json({ inspection: null, error: 'Google access token refresh failed — reconnect Google Search Console.' });
 
-    const siteUrl = 'https://' + site.domain;
+    // Resolve the exact verified property — property may be registered as sc-domain:..., or
+    // as https://domain/ or https://www.domain/. URL Inspection is strict about this.
+    const siteUrl = await resolveGscProperty(tokenData.access_token, site.domain);
+
     let inspection = null;
     let errorMessage = null;
     try {
@@ -791,12 +794,14 @@ router.get('/search/url-inspection', async (req, res) => {
       } else {
         const text = await apiRes.text().catch(() => '');
         console.warn('[arion/search/url-inspection] GSC API error:', apiRes.status, text.slice(0, 300));
-        // Parse Google's structured error if present so the portal can show it
-        try {
-          const parsed = JSON.parse(text);
-          errorMessage = parsed?.error?.message || `GSC API error ${apiRes.status}`;
-        } catch {
-          errorMessage = `GSC API error ${apiRes.status}${text ? ': ' + text.slice(0, 200) : ''}`;
+        let parsedMsg = null;
+        try { parsedMsg = JSON.parse(text)?.error?.message; } catch { /* ignore */ }
+        if (apiRes.status === 403 && /insufficient authentication scopes|insufficient permission/i.test(text)) {
+          errorMessage = 'Google Search Console is connected with read-only scope. Reconnect it in Settings → Connected Accounts and grant full Search Console access to enable URL Inspection and sitemap submission.';
+        } else if (apiRes.status === 403 && /not part of this property|do not own this site/i.test(text)) {
+          errorMessage = `The URL you inspected is not part of the verified Search Console property (${siteUrl}). Verify the URL belongs to this site, or add the correct property in Google Search Console.`;
+        } else {
+          errorMessage = parsedMsg || `GSC API error ${apiRes.status}${text ? ': ' + text.slice(0, 200) : ''}`;
         }
       }
     } catch (e) {
@@ -911,7 +916,8 @@ router.get('/search/sitemaps', async (req, res) => {
       if (!refreshToken) return res.json({ provider, sitemaps: [], error: 'Google not connected' });
       const tokenData = await getAccessToken(refreshToken).catch(() => null);
       if (!tokenData) return res.json({ provider, sitemaps: [], error: 'Failed to get access token' });
-      const siteUrl = encodeURIComponent('https://' + site.domain);
+      const resolvedProperty = await resolveGscProperty(tokenData.access_token, site.domain);
+      const siteUrl = encodeURIComponent(resolvedProperty);
       try {
         const apiRes = await fetch('https://www.googleapis.com/webmasters/v3/sites/' + siteUrl + '/sitemaps', {
           headers: { Authorization: 'Bearer ' + tokenData.access_token },
@@ -1178,10 +1184,15 @@ router.post('/search/generate-sitemap', async (req, res) => {
     const domain = site.domain;
     if (!domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
 
-    const siteUrl = 'https://' + domain;
     const refreshToken = site.gbp_oauth_token_ref;
     let tokenData = null;
     if (refreshToken) tokenData = await getAccessToken(refreshToken).catch(() => null);
+
+    // Resolve the exact verified property (sc-domain: or https://.../) so submit-sitemap
+    // doesn't fail with "not part of this property"
+    const siteUrl = tokenData?.access_token
+      ? await resolveGscProperty(tokenData.access_token, domain)
+      : 'https://' + domain;
 
     // 1. Existing GSC-registered sitemaps (authoritative — these are the URLs the client already submitted)
     let gscSitemapUrls = [];
@@ -1209,16 +1220,37 @@ router.post('/search/generate-sitemap', async (req, res) => {
     const results = [];
     const submittedTo = new Set();
 
+    // Helper: humanize a raw submitToGoogle error message
+    const humanizeGoogleError = (raw) => {
+      if (!raw) return 'Google sitemap submission failed';
+      if (/insufficient authentication scopes|insufficient permission/i.test(raw)) {
+        return 'Google is connected with read-only scope. Reconnect Google Search Console in Settings → Connected Accounts to grant sitemap-write permission.';
+      }
+      if (/not part of this property|do not own this site/i.test(raw)) {
+        return `The sitemap URL is not inside the verified Search Console property (${siteUrl}). Add the correct property in GSC or use the matching sitemap URL.`;
+      }
+      // Strip the long stack prefix ("HTTP 403: {...}") down to the core message
+      const cleaned = raw.replace(/^HTTP \d+:\s*/, '');
+      try {
+        const parsed = JSON.parse(cleaned);
+        return parsed?.error?.message || cleaned.slice(0, 240);
+      } catch {
+        return cleaned.slice(0, 240);
+      }
+    };
+
     for (const sm of allSitemaps) {
       const perMap = { sitemapUrl: sm, google: null, bing: null };
       if (tokenData?.access_token) {
-        perMap.google = await submitToGoogle(tokenData.access_token, siteUrl, sm);
+        const g = await submitToGoogle(tokenData.access_token, siteUrl, sm);
+        perMap.google = g.submitted ? g : { submitted: false, error: humanizeGoogleError(g.error) };
         if (perMap.google.submitted) submittedTo.add('google');
       } else {
         perMap.google = { submitted: false, error: 'Google Search Console not connected for this site' };
       }
       if (bingKey) {
-        perMap.bing = await submitToBing(bingKey, siteUrl, sm);
+        const b = await submitToBing(bingKey, siteUrl, sm);
+        perMap.bing = b.submitted ? b : { submitted: false, error: (b.error || '').replace(/^HTTP \d+:\s*/, '').slice(0, 240) || 'Bing sitemap submission failed' };
         if (perMap.bing.submitted) submittedTo.add('bing');
       } else {
         perMap.bing = { submitted: false, error: 'Bing Webmaster Tools not connected' };
