@@ -1436,6 +1436,10 @@ async function getGbpContext(pool, tenantId, siteId) {
       }
     } catch (e) {
       console.warn('[gbp] resolveGbpLocationName failed:', e.message);
+      // Surface quota / disabled errors specifically — these are operator actions,
+      // not a missing-location issue
+      if (e.code === 'gbp_quota_exceeded') return { error: 'gbp_quota_exceeded', site };
+      if (e.code === 'gbp_api_disabled') return { error: 'gbp_api_disabled', site };
     }
     if (!locationName) return { error: 'location_not_found', site };
   }
