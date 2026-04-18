@@ -1355,6 +1355,387 @@ router.get('/seo/market-monitor', async (req, res) => {
   }
 });
 
+// ──────────────────────────────────────────────────────────────────────
+// Market Monitor — Watchlist management + suggestions
+// ──────────────────────────────────────────────────────────────────────
+const MM_LIMITS = { own: 10, competitorPool: 20 };
+
+// GET /arion/seo/market-monitor/watchlist?siteId=
+// Returns the current watchlist + usage vs limits.
+router.get('/seo/market-monitor/watchlist', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const tier = (site.seo_addon_tier || '').toLowerCase();
+    if (tier !== 'authority') {
+      return res.json({ connected: true, authorityGated: true, tier, ownPages: [], competitorPages: [], usage: { own: 0, competitor: 0, limits: MM_LIMITS } });
+    }
+
+    const r = await pool.request()
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .query(`
+        SELECT watch_id, page_url, page_type, competitor_domain,
+               last_content_hash, last_checked_at, last_title, enabled, created_at
+        FROM arion.site_page_watch
+        WHERE site_id = @siteId
+        ORDER BY page_type, competitor_domain, created_at
+      `);
+
+    const ownPages = r.recordset.filter((w) => w.page_type === 'own_site');
+    const competitorPages = r.recordset.filter((w) => w.page_type === 'competitor');
+
+    res.json({
+      connected: true,
+      authorityGated: false,
+      tier,
+      ownPages: ownPages.map(mapWatchRow),
+      competitorPages: competitorPages.map(mapWatchRow),
+      usage: {
+        own: ownPages.length,
+        competitor: competitorPages.length,
+        limits: MM_LIMITS,
+      },
+    });
+  } catch (err) {
+    console.error('[arion/seo/market-monitor/watchlist GET]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+function mapWatchRow(w) {
+  return {
+    watchId: String(w.watch_id),
+    pageUrl: w.page_url,
+    pageType: w.page_type,
+    competitorDomain: w.competitor_domain,
+    lastTitle: w.last_title,
+    lastCheckedAt: w.last_checked_at,
+    enabled: !!w.enabled,
+    createdAt: w.created_at,
+  };
+}
+
+// POST /arion/seo/market-monitor/watchlist
+// Body: { siteId, pages: [{ pageUrl, pageType, competitorDomain? }] }
+// Replaces the full watchlist atomically. Enforces tier limits and rejects
+// over-limit submissions with { code: 'LIMIT_EXCEEDED' } so the UI can show
+// the consulting escalation CTA.
+router.post('/seo/market-monitor/watchlist', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId, pages } = req.body || {};
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  if (!Array.isArray(pages)) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'pages must be an array', status: 400 } });
+
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const tier = (site.seo_addon_tier || '').toLowerCase();
+    if (tier !== 'authority') {
+      return res.status(403).json({ error: { code: 'AUTHORITY_REQUIRED', message: 'Market Monitor watchlist requires the Authority SEO tier.', status: 403 } });
+    }
+
+    // Normalize + validate + dedupe
+    const normalized = [];
+    const seen = new Set();
+    for (const p of pages) {
+      const pageUrl = typeof p?.pageUrl === 'string' ? p.pageUrl.trim() : '';
+      const pageType = p?.pageType === 'competitor' ? 'competitor' : p?.pageType === 'own_site' ? 'own_site' : null;
+      if (!pageUrl || !pageType) continue;
+      if (!/^https?:\/\//i.test(pageUrl)) continue;
+      if (pageUrl.length > 999) continue;
+      if (seen.has(pageUrl)) continue;
+      seen.add(pageUrl);
+
+      const competitorDomain = pageType === 'competitor'
+        ? String(p.competitorDomain || '').toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '').slice(0, 299) || null
+        : null;
+      normalized.push({ pageUrl: pageUrl.slice(0, 999), pageType, competitorDomain });
+    }
+
+    const ownCount = normalized.filter((n) => n.pageType === 'own_site').length;
+    const compCount = normalized.filter((n) => n.pageType === 'competitor').length;
+
+    if (ownCount > MM_LIMITS.own || compCount > MM_LIMITS.competitorPool) {
+      return res.status(422).json({
+        error: {
+          code: 'LIMIT_EXCEEDED',
+          message: `Limit exceeded — Authority tier allows up to ${MM_LIMITS.own} own-site pages and ${MM_LIMITS.competitorPool} competitor pages. For larger watchlists, contact IA Consulting or request an Enterprise plan.`,
+          status: 422,
+          details: {
+            submitted: { own: ownCount, competitor: compCount },
+            limits: MM_LIMITS,
+            escalation: {
+              consultingServiceType: 'SEO Strategy',
+              consultingTriggerPage: 'seo-market-monitor-watchlist',
+              supportsEnterpriseInquiry: true,
+            },
+          },
+        },
+      });
+    }
+
+    // Replace watchlist atomically — delete + insert inside a transaction so
+    // a failure doesn't leave the client with a half-saved watchlist.
+    const tx = new sql.Transaction(pool);
+    await tx.begin();
+    try {
+      await new sql.Request(tx)
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .query(`DELETE FROM arion.site_page_watch WHERE site_id = @siteId`);
+
+      for (const n of normalized) {
+        await new sql.Request(tx)
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .input('pageUrl', sql.NVarChar(1000), n.pageUrl)
+          .input('pageType', sql.NVarChar(40), n.pageType)
+          .input('compDomain', sql.NVarChar(300), n.competitorDomain)
+          .query(`
+            INSERT INTO arion.site_page_watch
+              (tenant_id, site_id, page_url, page_type, competitor_domain, enabled)
+            VALUES (@tenantId, @siteId, @pageUrl, @pageType, @compDomain, 1)
+          `);
+      }
+
+      await tx.commit();
+    } catch (txErr) {
+      await tx.rollback();
+      throw txErr;
+    }
+
+    res.json({
+      ok: true,
+      saved: normalized.length,
+      usage: {
+        own: ownCount,
+        competitor: compCount,
+        limits: MM_LIMITS,
+      },
+    });
+  } catch (err) {
+    console.error('[arion/seo/market-monitor/watchlist POST]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// DELETE /arion/seo/market-monitor/watchlist/:watchId?siteId=
+// Single-row removal. Kept separate from bulk POST so the UI can surgically
+// remove one watched page without sending the full list.
+router.delete('/seo/market-monitor/watchlist/:watchId', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const watchId = req.params.watchId;
+  if (!siteId || !watchId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId + watchId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const r = await pool.request()
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('watchId', sql.BigInt, watchId)
+      .query(`
+        DELETE FROM arion.site_page_watch
+        WHERE site_id = @siteId AND watch_id = @watchId
+      `);
+    res.json({ ok: true, deleted: r.rowsAffected?.[0] || 0 });
+  } catch (err) {
+    console.error('[arion/seo/market-monitor/watchlist DELETE]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// GET /arion/seo/market-monitor/suggestions?siteId=
+// Returns suggested pages to watch — own-site from GSC top clicks, competitor
+// pages from SE Ranking Data API /domain/overview for each tracked competitor.
+// The UI renders these as a checklist the user approves.
+router.get('/seo/market-monitor/suggestions', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const tier = (site.seo_addon_tier || '').toLowerCase();
+    if (tier !== 'authority') {
+      return res.json({ connected: true, authorityGated: true, tier, ownPageSuggestions: [], competitorSuggestions: [] });
+    }
+
+    const domain = (site.domain || '').toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const ownOrigin = `https://${domain}`;
+
+    // ── Own-site suggestions: top pages from our gsc_page_performance table
+    // if present, otherwise fall back to a simple homepage suggestion.
+    let ownPageSuggestions = [];
+    try {
+      const ownRes = await pool.request()
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .query(`
+          SELECT TOP 15 page, SUM(clicks) AS clicks, SUM(impressions) AS impressions
+          FROM arion.gsc_page_performance
+          WHERE site_id = @siteId
+            AND date_recorded >= DATEADD(DAY, -90, CAST(GETUTCDATE() AS DATE))
+          GROUP BY page
+          ORDER BY SUM(clicks) DESC
+        `);
+      ownPageSuggestions = ownRes.recordset
+        .filter((r) => typeof r.page === 'string' && r.page.startsWith('http'))
+        .map((r) => ({
+          pageUrl: r.page,
+          pageType: 'own_site',
+          reason: `${r.clicks ?? 0} clicks · ${r.impressions ?? 0} impressions (last 90d)`,
+          priority: Number(r.clicks || 0),
+        }));
+    } catch (e) {
+      // gsc_page_performance may not exist on every deploy — fall back gracefully
+      console.warn('[mm/suggestions] own-site GSC lookup failed:', e.message);
+    }
+
+    // Always include homepage as a baseline suggestion (user can uncheck)
+    if (!ownPageSuggestions.some((s) => s.pageUrl === ownOrigin || s.pageUrl === `${ownOrigin}/`)) {
+      ownPageSuggestions.unshift({
+        pageUrl: `${ownOrigin}/`,
+        pageType: 'own_site',
+        reason: 'Homepage (baseline recommendation)',
+        priority: Number.MAX_SAFE_INTEGER,
+      });
+    }
+
+    // ── Competitor suggestions: list tracked competitors, then for each call
+    // SE Ranking Data API for their top pages + add homepage + /blog/.
+    let competitorSuggestions = [];
+    if (site.se_ranking_project_id) {
+      try {
+        const projectId = site.se_ranking_project_id;
+        const positionsRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions`);
+        const engineBlocks = Array.isArray(positionsRaw.data) ? positionsRaw.data : [];
+        const firstEngineId = engineBlocks[0]?.site_engine_id;
+        const compsRaw = firstEngineId
+          ? await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/competitors?se_id=${encodeURIComponent(firstEngineId)}`)
+          : { ok: false };
+        const competitors = compsRaw.ok && Array.isArray(compsRaw.data) ? compsRaw.data : [];
+
+        for (const c of competitors) {
+          const compDomain = String(c.url || c.domain || '').toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+          if (!compDomain) continue;
+          const compOrigin = `https://${compDomain}`;
+
+          // Start with homepage
+          const perCompetitor = [{
+            pageUrl: `${compOrigin}/`,
+            pageType: 'competitor',
+            competitorDomain: compDomain,
+            reason: 'Competitor homepage (baseline)',
+            priority: 100,
+          }];
+
+          // SE Ranking Data API — /domain/overview top-pages. Endpoint shape
+          // varies per plan; we try the common path and gracefully no-op.
+          try {
+            const dataKey = process.env.SERANKING_DATA_API_KEY || process.env.SE_RANKING_DATA_API_KEY;
+            if (dataKey) {
+              const resp = await fetch(`https://api.seranking.com/v1/domain/overview?domain=${encodeURIComponent(compDomain)}`, {
+                headers: { 'Authorization': `Token ${dataKey}` },
+              });
+              if (resp.ok) {
+                const body = await resp.json().catch(() => null);
+                const topPages = Array.isArray(body?.top_pages) ? body.top_pages
+                               : Array.isArray(body?.pages) ? body.pages
+                               : [];
+                for (const tp of topPages.slice(0, 3)) {
+                  const u = String(tp.url || tp.page || '').trim();
+                  if (!u || !/^https?:/.test(u)) continue;
+                  perCompetitor.push({
+                    pageUrl: u,
+                    pageType: 'competitor',
+                    competitorDomain: compDomain,
+                    reason: `Top traffic page${tp.traffic ? ` (~${tp.traffic} monthly visits)` : ''}`,
+                    priority: 90 - perCompetitor.length,
+                  });
+                }
+              }
+            }
+          } catch (e) {
+            console.warn(`[mm/suggestions] Data API failed for ${compDomain}:`, e.message);
+          }
+
+          // Detect /blog/ or /resources/ by probing homepage HTML for links
+          try {
+            const homeResp = await fetch(compOrigin, {
+              headers: { 'User-Agent': 'IADM-ARION-Suggestions/1.0' },
+              signal: AbortSignal.timeout(8000),
+            });
+            if (homeResp.ok) {
+              const html = await homeResp.text();
+              const blogMatch = html.match(/href=["']([^"']*\/(?:blog|resources|insights|news)\/?)["']/i);
+              if (blogMatch) {
+                let blogHref = blogMatch[1];
+                if (blogHref.startsWith('/')) blogHref = compOrigin + blogHref;
+                if (!perCompetitor.some((p) => p.pageUrl === blogHref)) {
+                  perCompetitor.push({
+                    pageUrl: blogHref,
+                    pageType: 'competitor',
+                    competitorDomain: compDomain,
+                    reason: 'Content hub (change = new content published)',
+                    priority: 80,
+                  });
+                }
+              }
+            }
+          } catch {
+            // homepage probe timeout is fine, skip
+          }
+
+          competitorSuggestions = competitorSuggestions.concat(perCompetitor);
+        }
+      } catch (e) {
+        console.warn('[mm/suggestions] competitor lookup failed:', e.message);
+      }
+    }
+
+    // Propose default allocation across competitors (7-5-3-3-2 pattern) so the
+    // UI can pre-check the right set of boxes.
+    const byCompetitor = new Map();
+    for (const s of competitorSuggestions) {
+      if (!byCompetitor.has(s.competitorDomain)) byCompetitor.set(s.competitorDomain, []);
+      byCompetitor.get(s.competitorDomain).push(s);
+    }
+    const ALLOCATION = [7, 5, 3, 3, 2]; // sums to 20
+    let allocIdx = 0;
+    const preChecked = new Set();
+    for (const [, list] of byCompetitor) {
+      const slots = ALLOCATION[allocIdx] ?? 2;
+      allocIdx++;
+      list.sort((a, b) => b.priority - a.priority);
+      list.slice(0, slots).forEach((item) => preChecked.add(item.pageUrl));
+    }
+
+    res.json({
+      connected: true,
+      authorityGated: false,
+      tier,
+      limits: MM_LIMITS,
+      ownPageSuggestions: ownPageSuggestions
+        .sort((a, b) => b.priority - a.priority)
+        .slice(0, 15)
+        .map((s) => ({ ...s, preChecked: true })),
+      competitorSuggestions: competitorSuggestions.map((s) => ({
+        ...s,
+        preChecked: preChecked.has(s.pageUrl),
+      })),
+    });
+  } catch (err) {
+    console.error('[arion/seo/market-monitor/suggestions]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // --- GET /arion/seo/competitors?siteId= ---
 // Dedicated competitors feed — iterates every engine on the SE Ranking project
 // and aggregates "My Competitors" (added) lists. De-duplicates by domain and
