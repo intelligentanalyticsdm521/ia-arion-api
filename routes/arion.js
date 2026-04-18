@@ -817,9 +817,11 @@ router.get('/search/url-inspection', async (req, res) => {
 });
 
 // --- POST /arion/search/submit-url?siteId= ---
-// Request indexing of a single URL. Google's public Indexing API only accepts
-// JobPosting and BroadcastEvent content, so we cannot submit arbitrary URLs to
-// Google by API. Honest response + real Bing + IndexNow attempts.
+// "Request re-indexing" for a URL. Google's public Indexing API only accepts
+// JobPosting/BroadcastEvent, so for arbitrary URLs the supported path is
+// sitemap resubmission (which forces Google to re-fetch the sitemap and
+// re-discover URLs). We do this automatically. Bing and IndexNow submit
+// the URL directly.
 router.post('/search/submit-url', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId || req.body?.siteId;
@@ -831,8 +833,49 @@ router.post('/search/submit-url', async (req, res) => {
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
 
-    const siteUrl = 'https://' + site.domain;
-    let googleResult = { submitted: false, error: 'Google does not accept arbitrary URL submissions via public API. Use the URL Inspection tool to check crawl status, or resubmit the sitemap to trigger re-discovery.' };
+    const refreshToken = site.gbp_oauth_token_ref;
+    const tokenData = refreshToken ? await getAccessToken(refreshToken).catch(() => null) : null;
+    const siteUrl = tokenData?.access_token ? await resolveGscProperty(tokenData.access_token, site.domain) : 'https://' + site.domain;
+
+    // Humanize common GSC/Bing error payloads (shared with generate-sitemap)
+    const humanizeGoogleError = (raw) => {
+      if (!raw) return 'Google sitemap submission failed';
+      if (/insufficient authentication scopes|insufficient permission/i.test(raw)) return 'Google is connected with read-only scope. Reconnect Google Search Console to grant sitemap-write permission.';
+      if (/not part of this property|do not own this site/i.test(raw)) return `The sitemap URL is not inside the verified Search Console property (${siteUrl}).`;
+      const cleaned = raw.replace(/^HTTP \d+:\s*/, '');
+      try { return JSON.parse(cleaned)?.error?.message || cleaned.slice(0, 240); } catch { return cleaned.slice(0, 240); }
+    };
+    const humanizeBingError = (raw) => {
+      if (!raw) return 'Bing submission failed';
+      const cleaned = raw.replace(/^HTTP \d+:\s*/, '').trim();
+      if (cleaned.startsWith('<')) return 'Bing returned an HTML error page — the site may not be registered in Bing Webmaster Tools for this API key, or the endpoint is refusing the request.';
+      if (/InvalidApiKey/i.test(cleaned)) return 'Bing Webmaster Tools API key is invalid.';
+      if (/NotFound|SiteNotFound/i.test(cleaned)) return 'Site is not registered in Bing Webmaster Tools.';
+      if (/Unauthorized/i.test(cleaned)) return 'Bing rejected the request as unauthorized.';
+      try { return JSON.parse(cleaned)?.Message || cleaned.slice(0, 240); } catch { return cleaned.slice(0, 240); }
+    };
+
+    // Google: resubmit registered sitemaps to trigger re-discovery of this URL
+    let googleResult;
+    if (!tokenData?.access_token) {
+      googleResult = { submitted: false, error: 'Google Search Console is not connected for this site.' };
+    } else {
+      const existing = await listGoogleSitemaps(tokenData.access_token, siteUrl);
+      const sitemapUrls = existing.map(s => s.path).filter(Boolean);
+      if (sitemapUrls.length === 0) {
+        googleResult = { submitted: false, method: 'sitemap-resubmit', error: 'No sitemaps are registered in Google Search Console for this property. Add a sitemap to GSC first, then retry.' };
+      } else {
+        const perMap = await Promise.all(sitemapUrls.map(async (sm) => {
+          const r = await submitToGoogle(tokenData.access_token, siteUrl, sm);
+          return { sitemapUrl: sm, submitted: r.submitted, error: r.submitted ? null : humanizeGoogleError(r.error) };
+        }));
+        const anyOk = perMap.some(p => p.submitted);
+        googleResult = anyOk
+          ? { submitted: true, method: 'sitemap-resubmit', message: `Triggered Google re-discovery by resubmitting ${perMap.filter(p => p.submitted).length} of ${perMap.length} registered sitemap(s). Google will re-fetch each sitemap and re-crawl URLs it contains, including this one if it's listed.`, sitemaps: perMap }
+          : { submitted: false, method: 'sitemap-resubmit', error: perMap[0]?.error || 'Sitemap resubmit failed', sitemaps: perMap };
+      }
+    }
+
     let bingResult = null;
     let indexNowResult = null;
 
@@ -845,7 +888,7 @@ router.post('/search/submit-url', async (req, res) => {
       try {
         const bingApi = await bingSubmitUrl(bingKey, siteUrl, url);
         if (bingApi == null) {
-          bingResult = { submitted: false, error: 'Bing Webmaster Tools API key rejected (likely InvalidApiKey). Update BING_WMT_API_KEY in Azure App Service and restart.' };
+          bingResult = { submitted: false, error: 'Bing Webmaster Tools API key rejected or the API returned no response. Verify the key and that the site is registered in Bing Webmaster Tools.' };
         } else if (bingApi && typeof bingApi === 'object' && bingApi.ErrorCode && bingApi.ErrorCode !== 0) {
           bingResult = { submitted: false, error: `Bing rejected: ${bingApi.Message || 'error code ' + bingApi.ErrorCode}` };
         } else {
@@ -853,7 +896,7 @@ router.post('/search/submit-url', async (req, res) => {
         }
       } catch (e) {
         console.warn('[arion/search/submit-url] Bing WMT submit failed:', e.message);
-        bingResult = { submitted: false, error: e.message };
+        bingResult = { submitted: false, error: humanizeBingError(e.message) };
       }
     } else {
       bingResult = { submitted: false, error: 'Bing Webmaster Tools is not connected for this environment. Configure BING_WMT_API_KEY or connect Bing in Settings.' };
@@ -1263,10 +1306,11 @@ router.post('/search/generate-sitemap', async (req, res) => {
           perMap.bing = b;
           submittedTo.add('bing');
         } else {
-          // Translate common Bing WMT errors to plain English
-          const raw = (b.error || '').replace(/^HTTP \d+:\s*/, '');
+          // Translate common Bing WMT errors (incl. HTML error pages) to plain English
+          const raw = (b.error || '').replace(/^HTTP \d+:\s*/, '').trim();
           let friendly;
-          if (/InvalidApiKey/i.test(raw)) friendly = 'Bing Webmaster Tools API key is invalid. Update BING_WMT_API_KEY in Azure App Service and restart, or reconnect Bing in Settings → Connected Accounts once the Bing connection flow ships.';
+          if (raw.startsWith('<')) friendly = 'Bing returned an HTML error page — the site may not be registered in Bing Webmaster Tools for this API key, or the endpoint is refusing the request from this IP.';
+          else if (/InvalidApiKey/i.test(raw)) friendly = 'Bing Webmaster Tools API key is invalid. Update BING_WMT_API_KEY in Azure App Service and restart, or reconnect Bing in Settings → Connected Accounts once the Bing connection flow ships.';
           else if (/NotFound|SiteNotFound/i.test(raw)) friendly = 'Site is not registered in Bing Webmaster Tools. Add the site in the Bing Webmaster dashboard first.';
           else if (/Unauthorized/i.test(raw)) friendly = 'Bing rejected the request as unauthorized. Verify the API key has permission for this site.';
           else {
