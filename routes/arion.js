@@ -7,7 +7,7 @@ import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
 import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries, getSearchConsoleDates, getSearchConsolePageQuery, getAnalyticsData } from '../lib/googleServices.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
 import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats } from '../lib/bingWebmaster.js';
-import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing } from '../lib/sitemapGenerator.js';
+import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing, listGoogleSitemaps } from '../lib/sitemapGenerator.js';
 import { getDomainInfo, getDnsRecords, createDnsRecords, deleteDnsRecords, getSslStatus, getWpSiteInfo, getWpPages, getWpPosts, getWpPlugins } from '../lib/hostinger.js';
 import { runPageSpeedTest } from '../lib/pagespeed.js';
 import { meetsMinTier } from '../lib/tierCheck.js';
@@ -772,13 +772,14 @@ router.get('/search/url-inspection', async (req, res) => {
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
 
     const refreshToken = site.gbp_oauth_token_ref;
-    if (!refreshToken) return res.json({ inspection: null, error: 'Google not connected' });
+    if (!refreshToken) return res.json({ inspection: null, error: 'Google Search Console is not connected for this site. Connect it in Settings → Connected Accounts.' });
 
     const tokenData = await getAccessToken(refreshToken).catch(() => null);
-    if (!tokenData) return res.json({ inspection: null, error: 'Failed to get access token' });
+    if (!tokenData) return res.json({ inspection: null, error: 'Google access token refresh failed — reconnect Google Search Console.' });
 
     const siteUrl = 'https://' + site.domain;
     let inspection = null;
+    let errorMessage = null;
     try {
       const apiRes = await fetch('https://searchconsole.googleapis.com/v1/urlInspection/index:inspect', {
         method: 'POST',
@@ -789,13 +790,21 @@ router.get('/search/url-inspection', async (req, res) => {
         inspection = await apiRes.json();
       } else {
         const text = await apiRes.text().catch(() => '');
-        console.warn('[arion/search/url-inspection] GSC API error:', apiRes.status, text.slice(0, 200));
+        console.warn('[arion/search/url-inspection] GSC API error:', apiRes.status, text.slice(0, 300));
+        // Parse Google's structured error if present so the portal can show it
+        try {
+          const parsed = JSON.parse(text);
+          errorMessage = parsed?.error?.message || `GSC API error ${apiRes.status}`;
+        } catch {
+          errorMessage = `GSC API error ${apiRes.status}${text ? ': ' + text.slice(0, 200) : ''}`;
+        }
       }
     } catch (e) {
       console.warn('[arion/search/url-inspection] API call failed:', e.message);
+      errorMessage = 'Network error while calling GSC: ' + e.message;
     }
 
-    res.json({ inspection });
+    res.json({ inspection, error: errorMessage, siteUrl });
   } catch (err) {
     console.error('[arion/search/url-inspection]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
@@ -803,6 +812,9 @@ router.get('/search/url-inspection', async (req, res) => {
 });
 
 // --- POST /arion/search/submit-url?siteId= ---
+// Request indexing of a single URL. Google's public Indexing API only accepts
+// JobPosting and BroadcastEvent content, so we cannot submit arbitrary URLs to
+// Google by API. Honest response + real Bing + IndexNow attempts.
 router.post('/search/submit-url', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId;
@@ -815,24 +827,66 @@ router.post('/search/submit-url', async (req, res) => {
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
 
     const siteUrl = 'https://' + site.domain;
-    let googleResult = null;
+    let googleResult = { submitted: false, error: 'Google does not accept arbitrary URL submissions via public API. Use the URL Inspection tool to check crawl status, or resubmit the sitemap to trigger re-discovery.' };
     let bingResult = null;
+    let indexNowResult = null;
 
-    // Google Indexing API (placeholder — requires separate service account setup)
-    googleResult = { submitted: false, message: 'Google Indexing API not yet configured' };
-
-    // Bing URL submission
+    // Bing Webmaster Tools — direct URL submission (requires BING_WMT_API_KEY env var, legacy flow)
     const bingKey = process.env.BING_WMT_API_KEY;
     if (bingKey) {
       try {
-        bingResult = await bingSubmitUrl(bingKey, siteUrl, url);
+        const bingApi = await bingSubmitUrl(bingKey, siteUrl, url);
+        bingResult = { submitted: true, response: bingApi };
       } catch (e) {
-        console.warn('[arion/search/submit-url] Bing submit failed:', e.message);
-        bingResult = null;
+        console.warn('[arion/search/submit-url] Bing WMT submit failed:', e.message);
+        bingResult = { submitted: false, error: e.message };
       }
+    } else {
+      bingResult = { submitted: false, error: 'Bing Webmaster Tools is not connected for this environment. Configure BING_WMT_API_KEY or connect Bing in Settings.' };
     }
 
-    res.json({ url, google: googleResult, bing: bingResult });
+    // IndexNow — anonymous, protocol-based submission. Requires a key file to be hosted at the
+    // site root. If the tenant has registered an IndexNow key (stored in arion.site_integrations
+    // where provider_code='indexnow'), submit via api.indexnow.org. Otherwise return a clear
+    // "not configured" so the portal can guide the user.
+    let indexNowKey = null;
+    try {
+      const keyRes = await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .query("SELECT TOP 1 config FROM arion.site_integrations WHERE tenant_id = @tenantId AND site_id = @siteId AND provider_code = 'indexnow'");
+      const cfg = keyRes.recordset?.[0]?.config;
+      if (cfg) {
+        const parsed = typeof cfg === 'string' ? JSON.parse(cfg) : cfg;
+        indexNowKey = parsed?.key || null;
+      }
+    } catch { /* table may not have indexnow rows yet */ }
+
+    if (indexNowKey) {
+      try {
+        const host = site.domain;
+        const keyLocation = `https://${host}/${indexNowKey}.txt`;
+        const body = { host, key: indexNowKey, keyLocation, urlList: [url] };
+        const inRes = await fetch('https://api.indexnow.org/indexnow', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: JSON.stringify(body),
+        });
+        if (inRes.ok || inRes.status === 202 || inRes.status === 200) {
+          indexNowResult = { submitted: true, status: inRes.status, engines: ['Bing', 'Yandex', 'Seznam', 'Naver'] };
+        } else {
+          const text = await inRes.text().catch(() => '');
+          indexNowResult = { submitted: false, status: inRes.status, error: text.slice(0, 300) || `HTTP ${inRes.status}` };
+        }
+      } catch (e) {
+        console.warn('[arion/search/submit-url] IndexNow submit failed:', e.message);
+        indexNowResult = { submitted: false, error: e.message };
+      }
+    } else {
+      indexNowResult = { submitted: false, error: 'IndexNow key not configured. Generate a key on the Bing: IndexNow page to enable anonymous URL submissions to Bing, Yandex, Seznam, and Naver.' };
+    }
+
+    res.json({ url, google: googleResult, bing: bingResult, indexNow: indexNowResult });
   } catch (err) {
     console.error('[arion/search/submit-url]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
@@ -1105,6 +1159,13 @@ router.get('/analytics/report', async (req, res) => {
 });
 
 // --- POST /arion/search/generate-sitemap ---
+// Best-effort sitemap (re)submission. Strategy:
+//   1. Ask GSC which sitemaps it already knows about for the verified property.
+//   2. Auto-detect standard WP sitemap locations (sitemap_index.xml, sitemap.xml,
+//      wp-sitemap.xml) with HEAD-then-GET fallback (Cloudflare blocks HEAD).
+//   3. Union the two lists. Submit every URL in the union to Google (if connected)
+//      and Bing (if key configured). Each per-URL result is returned so the UI can
+//      show exactly what happened for each sitemap.
 router.post('/search/generate-sitemap', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId || req.body?.siteId;
@@ -1117,10 +1178,25 @@ router.post('/search/generate-sitemap', async (req, res) => {
     const domain = site.domain;
     if (!domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
 
-    // 1. Detect existing sitemap URL
-    const sitemapUrl = await detectSitemapUrl(domain);
+    const siteUrl = 'https://' + domain;
+    const refreshToken = site.gbp_oauth_token_ref;
+    let tokenData = null;
+    if (refreshToken) tokenData = await getAccessToken(refreshToken).catch(() => null);
 
-    // 2. Crawl WP REST API for page/post count
+    // 1. Existing GSC-registered sitemaps (authoritative — these are the URLs the client already submitted)
+    let gscSitemapUrls = [];
+    if (tokenData?.access_token) {
+      const existing = await listGoogleSitemaps(tokenData.access_token, siteUrl);
+      gscSitemapUrls = existing.map(s => s.path).filter(Boolean);
+    }
+
+    // 2. Auto-detect standard locations
+    const detectedUrl = await detectSitemapUrl(domain);
+
+    // 3. Union + dedupe
+    const allSitemaps = [...new Set([...(gscSitemapUrls || []), ...(detectedUrl ? [detectedUrl] : [])])];
+
+    // 4. WP URL count (informational)
     let wpUrls = [];
     try {
       wpUrls = await fetchWordPressPages(domain);
@@ -1128,39 +1204,37 @@ router.post('/search/generate-sitemap', async (req, res) => {
       console.warn('[arion/search/generate-sitemap] WP REST API crawl failed:', err.message);
     }
 
-    // 3. Submit to Google if connected
-    const submittedTo = [];
-    let googleResult = null;
-    let bingResult = null;
+    // 5. Submit each sitemap to Google and Bing
+    const bingKey = process.env.BING_WMT_API_KEY;
+    const results = [];
+    const submittedTo = new Set();
 
-    if (sitemapUrl) {
-      const siteUrl = 'https://' + domain;
-      const refreshToken = site.gbp_oauth_token_ref;
-
-      // Google
-      if (refreshToken) {
-        const tokenData = await getAccessToken(refreshToken).catch(() => null);
-        if (tokenData?.access_token) {
-          googleResult = await submitToGoogle(tokenData.access_token, siteUrl, sitemapUrl);
-          if (googleResult.submitted) submittedTo.push('google');
-        }
+    for (const sm of allSitemaps) {
+      const perMap = { sitemapUrl: sm, google: null, bing: null };
+      if (tokenData?.access_token) {
+        perMap.google = await submitToGoogle(tokenData.access_token, siteUrl, sm);
+        if (perMap.google.submitted) submittedTo.add('google');
+      } else {
+        perMap.google = { submitted: false, error: 'Google Search Console not connected for this site' };
       }
-
-      // Bing
-      const bingKey = process.env.BING_WMT_API_KEY;
       if (bingKey) {
-        bingResult = await submitToBing(bingKey, siteUrl, sitemapUrl);
-        if (bingResult.submitted) submittedTo.push('bing');
+        perMap.bing = await submitToBing(bingKey, siteUrl, sm);
+        if (perMap.bing.submitted) submittedTo.add('bing');
+      } else {
+        perMap.bing = { submitted: false, error: 'Bing Webmaster Tools not connected' };
       }
+      results.push(perMap);
     }
 
     res.json({
       urls: wpUrls.length,
-      sitemapUrl: sitemapUrl || null,
-      sitemapDetected: !!sitemapUrl,
-      submittedTo,
-      google: googleResult,
-      bing: bingResult,
+      sitemapUrl: detectedUrl || null,
+      sitemapDetected: !!detectedUrl,
+      sitemaps: allSitemaps,
+      results,
+      submittedTo: Array.from(submittedTo),
+      googleConnected: !!tokenData?.access_token,
+      bingConnected: !!bingKey,
     });
   } catch (err) {
     console.error('[arion/search/generate-sitemap]', err);
