@@ -684,30 +684,39 @@ async function loadEngineMetaForProject(projectId, site_engine_ids) {
   const cached = ENGINE_META_CACHE.get(String(projectId));
   if (cached && Date.now() - cached.ts < ENGINE_META_TTL_MS) return cached.map;
 
-  // Probe the likely endpoint candidates. First one that returns an array with
-  // our site_engine_ids represented wins. Without the endpoint discovery we
-  // label engines as "Engine {id}" — UI still functions, just less polished.
-  const probes = [
-    '/system/search-engines',
-    '/system/engines',
-    '/engines',
-    `/sites/${encodeURIComponent(projectId)}/site-engines`,
-    `/sites/${encodeURIComponent(projectId)}/engines`,
+  // Diagnostic 2026-04-18 confirmed SE Ranking has NO public API path that
+  // resolves site_engine_id (e.g. 46877) to {brand, region, city, device}.
+  // That mapping lives only behind SE Ranking's web UI. Until onboarding
+  // provides an admin-entered label map, we fall back to canonical labeling:
+  // assume the project tracks Google + optional Bing across Desktop + Mobile
+  // in a deterministic order, and label the engines generically. This is the
+  // same assumption the tier-matrix was sold on (Authority = 4 engines:
+  // Google+Bing × Desktop+Mobile).
+  const ids = (site_engine_ids || []).map(String);
+  const map = {};
+  const canonicalLabels = [
+    { name: 'Google', device: 'desktop', label: 'Google · Desktop' },
+    { name: 'Google', device: 'mobile', label: 'Google · Mobile' },
+    { name: 'Bing', device: 'desktop', label: 'Bing · Desktop' },
+    { name: 'Bing', device: 'mobile', label: 'Bing · Mobile' },
   ];
-  const needed = new Set((site_engine_ids || []).map(String));
-  let map = {};
-  for (const p of probes) {
-    const r = await seRankingRaw('GET', p);
-    if (r.ok && Array.isArray(r.data) && r.data.length) {
-      const candidate = buildEngineMetaMap(r.data);
-      // Match check — does this response actually contain our engine ids?
-      const hits = Object.keys(candidate).filter((id) => needed.has(id)).length;
-      if (hits > 0 || needed.size === 0) {
-        map = candidate;
-        break;
-      }
-    }
-  }
+  // IDs arrive from /positions in SE Ranking's configured order; we assume the
+  // onboarding wizard adds Google first (Desktop then Mobile), Bing second.
+  // If the project has fewer than 4 engines (lower tiers), we fill in the
+  // most likely subset (e.g. Starter = 2 = Google Desktop + Mobile).
+  ids.forEach((id, i) => {
+    const canonical = canonicalLabels[i] || null;
+    map[id] = {
+      id,
+      name: canonical?.name || null,
+      region: null,
+      city: null,
+      device: canonical?.device || null,
+      lang: null,
+      label: canonical?.label || `Engine ${id}`,
+      canonical: Boolean(canonical),   // flag so UI can show "confirm in onboarding" tooltip
+    };
+  });
   ENGINE_META_CACHE.set(String(projectId), { ts: Date.now(), map });
   return map;
 }
