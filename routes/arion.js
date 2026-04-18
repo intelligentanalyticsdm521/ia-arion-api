@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { getServicesPool } from '../db/servicesPool.js';
 import { firePlatformEvent } from '../lib/platformEvents.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
-import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries, getAnalyticsData } from '../lib/googleServices.js';
+import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries, getSearchConsoleDates, getSearchConsolePageQuery, getAnalyticsData } from '../lib/googleServices.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
 import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats } from '../lib/bingWebmaster.js';
 import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing } from '../lib/sitemapGenerator.js';
@@ -421,9 +421,17 @@ router.get('/console/:provider', async (req, res) => {
           safeQ(pool.request().input('tenantId', sql.UniqueIdentifier, tenantId).input('siteId', sql.UniqueIdentifier, siteId)
             .query('SELECT TOP 20 page, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS avgPosition FROM arion.gsc_data WHERE tenant_id = @tenantId AND site_id = @siteId AND report_date >= DATEADD(day, -28, GETUTCDATE()) AND page IS NOT NULL GROUP BY page ORDER BY SUM(impressions) DESC'))
         ]);
-        if (summaryRes) { const s = summaryRes.recordset[0]; summary = { clicks: s?.clicks ?? null, impressions: s?.impressions ?? null, ctr: s?.ctr ?? null, avgPosition: s?.avgPosition ?? null }; }
-        if (queriesRes) breakdowns.queries = queriesRes.recordset.map(r => ({ query: r.query, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, avgPosition: r.avgPosition }));
-        if (pagesRes) breakdowns.pages = pagesRes.recordset.map(r => ({ page: r.page, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, avgPosition: r.avgPosition }));
+        // Normalize CTR from raw decimal (DB) to percentage number, e.g. 0.006641 -> 0.66
+        const toCtrPct = (raw) => {
+          if (raw == null) return null;
+          const n = Number(raw);
+          if (!isFinite(n)) return null;
+          return Number(((n < 1 ? n : n / 100) * 100).toFixed(2));
+        };
+        const toPos = (raw) => raw == null ? null : Number(Number(raw).toFixed(2));
+        if (summaryRes) { const s = summaryRes.recordset[0]; summary = { clicks: s?.clicks ?? null, impressions: s?.impressions ?? null, ctr: toCtrPct(s?.ctr), avgPosition: toPos(s?.avgPosition) }; }
+        if (queriesRes) breakdowns.queries = queriesRes.recordset.map(r => ({ query: r.query, clicks: r.clicks, impressions: r.impressions, ctr: toCtrPct(r.ctr), position: toPos(r.avgPosition), avgPosition: toPos(r.avgPosition) }));
+        if (pagesRes) breakdowns.pages = pagesRes.recordset.map(r => ({ page: r.page, clicks: r.clicks, impressions: r.impressions, ctr: toCtrPct(r.ctr), position: toPos(r.avgPosition), avgPosition: toPos(r.avgPosition) }));
       } catch (e) { console.warn('[arion/console] gsc queries failed:', e.message); }
     }
 
@@ -623,12 +631,21 @@ router.post('/seo/project/link', async (req, res) => {
 // Search Routes
 // ---------------------------------------------------------------------------
 
-// --- GET /arion/search/performance?siteId=&provider=google|bing&days=28 ---
+// --- GET /arion/search/performance?siteId=&provider=google|bing&period=30|90|365&groupBy=all|date|device|country|page_query|queries|pages ---
+// Notes:
+//  - Every ctr value in the response is a NUMBER in percentage units (0.66 means 0.66%), not a raw decimal.
+//  - `period` (30|90|365) is the primary date-range parameter. `days` is accepted for backward compatibility.
+//  - `groupBy=all` (default) returns all breakdowns in one response. Specific groupBy returns only that slice
+//    (plus summary) for smaller payloads.
 router.get('/search/performance', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId;
   const provider = (req.query.provider || 'google').toLowerCase();
-  const days = parseInt(req.query.days, 10) || 28;
+  const groupBy = (req.query.groupBy || 'all').toLowerCase();
+  // Accept period OR days; period takes precedence
+  const periodRaw = req.query.period != null ? parseInt(req.query.period, 10) : null;
+  const daysRaw = req.query.days != null ? parseInt(req.query.days, 10) : null;
+  const period = [30, 90, 365].includes(periodRaw) ? periodRaw : (daysRaw || 28);
   if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
   try {
     const pool = await getServicesPool();
@@ -637,44 +654,105 @@ router.get('/search/performance', async (req, res) => {
 
     const safeCall = (promise) => promise.catch(e => { console.warn('[arion/search/performance] API call failed:', e.message); return null; });
     let summary = { clicks: null, impressions: null, ctr: null, avgPosition: null };
-    let breakdowns = { queries: [], pages: [] };
+    let breakdowns = { queries: [], pages: [], dates: [], devices: [], countries: [], pageQueries: [] };
 
     if (provider === 'google') {
       const refreshToken = site.gbp_oauth_token_ref;
-      if (!refreshToken) return res.json({ provider, summary, breakdowns, error: 'Google not connected' });
+      if (!refreshToken) return res.json({ provider, period, summary, breakdowns, error: 'Google not connected' });
       const siteUrl = 'https://' + site.domain;
-      const [queryData, pageData] = await Promise.all([
-        safeCall(getSearchConsoleData(refreshToken, siteUrl, days)),
-        safeCall(getSearchConsolePages(refreshToken, siteUrl, days)),
-      ]);
+
+      // Fetch based on groupBy — default 'all' fetches everything in parallel
+      const tasks = [];
+      const wantQueries = groupBy === 'all' || groupBy === 'queries';
+      const wantPages = groupBy === 'all' || groupBy === 'pages';
+      const wantDates = groupBy === 'all' || groupBy === 'date' || groupBy === 'dates';
+      const wantDevices = groupBy === 'all' || groupBy === 'device' || groupBy === 'devices';
+      const wantCountries = groupBy === 'all' || groupBy === 'country' || groupBy === 'countries';
+      const wantPageQuery = groupBy === 'all' || groupBy === 'page_query' || groupBy === 'pagequery';
+
+      const queryIdx = wantQueries ? tasks.push(safeCall(getSearchConsoleData(refreshToken, siteUrl, period))) - 1 : -1;
+      const pageIdx = wantPages ? tasks.push(safeCall(getSearchConsolePages(refreshToken, siteUrl, period))) - 1 : -1;
+      const dateIdx = wantDates ? tasks.push(safeCall(getSearchConsoleDates(refreshToken, siteUrl, period))) - 1 : -1;
+      const deviceIdx = wantDevices ? tasks.push(safeCall(getSearchConsoleDevices(refreshToken, siteUrl, period))) - 1 : -1;
+      const countryIdx = wantCountries ? tasks.push(safeCall(getSearchConsoleCountries(refreshToken, siteUrl, period))) - 1 : -1;
+      const pqIdx = wantPageQuery ? tasks.push(safeCall(getSearchConsolePageQuery(refreshToken, siteUrl, period, 50))) - 1 : -1;
+
+      const results = await Promise.all(tasks);
+      const queryData = queryIdx >= 0 ? results[queryIdx] : null;
+      const pageData = pageIdx >= 0 ? results[pageIdx] : null;
+      const dateData = dateIdx >= 0 ? results[dateIdx] : null;
+      const deviceData = deviceIdx >= 0 ? results[deviceIdx] : null;
+      const countryData = countryIdx >= 0 ? results[countryIdx] : null;
+      const pqData = pqIdx >= 0 ? results[pqIdx] : null;
+
       if (queryData) {
-        summary = { clicks: queryData.summary.clicks, impressions: queryData.summary.impressions, ctr: queryData.summary.ctr, avgPosition: queryData.summary.position };
+        // queryData.summary.ctr is already percentage-number; position already rounded
+        summary = {
+          clicks: queryData.summary.clicks,
+          impressions: queryData.summary.impressions,
+          ctr: queryData.summary.ctr,
+          avgPosition: queryData.summary.position,
+        };
         breakdowns.queries = queryData.queries || [];
       }
-      if (pageData) {
-        breakdowns.pages = pageData || [];
-      }
+      if (pageData) breakdowns.pages = pageData;
+      if (dateData) breakdowns.dates = dateData.map(d => ({
+        date: d.date, clicks: d.clicks, impressions: d.impressions, ctr: d.ctr, position: d.position,
+      })).sort((a, b) => a.date.localeCompare(b.date));
+      if (deviceData) breakdowns.devices = deviceData.map(d => ({
+        device: (d.device || '').toUpperCase(), clicks: d.clicks, impressions: d.impressions, ctr: d.ctr, position: d.position,
+      }));
+      if (countryData) breakdowns.countries = countryData
+        .map(c => ({ country: (c.country || '').toUpperCase(), clicks: c.clicks, impressions: c.impressions, ctr: c.ctr, position: c.position }))
+        .sort((a, b) => b.clicks - a.clicks)
+        .slice(0, 20);
+      if (pqData) breakdowns.pageQueries = pqData.slice(0, 50);
     } else if (provider === 'bing') {
       const bingKey = process.env.BING_WMT_API_KEY;
-      if (!bingKey) return res.json({ provider, summary, breakdowns, error: 'Bing not configured' });
+      if (!bingKey) return res.json({ provider, period, summary, breakdowns, error: 'Bing not configured' });
       const siteUrl = 'https://' + site.domain;
       const [trafficData, pageData] = await Promise.all([
-        safeCall(bingGetTrafficData(bingKey, siteUrl, days)),
+        safeCall(bingGetTrafficData(bingKey, siteUrl, period)),
         safeCall(bingGetPageTrafficData(bingKey, siteUrl)),
       ]);
       if (trafficData && Array.isArray(trafficData)) {
         const totals = trafficData.reduce((acc, r) => { acc.clicks += r.Clicks || 0; acc.impressions += r.Impressions || 0; return acc; }, { clicks: 0, impressions: 0 });
-        summary = { clicks: totals.clicks, impressions: totals.impressions, ctr: totals.impressions > 0 ? totals.clicks / totals.impressions : 0, avgPosition: null };
-        breakdowns.queries = trafficData.map(r => ({ query: r.Query || '', clicks: r.Clicks || 0, impressions: r.Impressions || 0, ctr: r.Impressions > 0 ? (r.Clicks || 0) / r.Impressions : 0, position: r.AvgPosition ?? null }));
+        summary = {
+          clicks: totals.clicks,
+          impressions: totals.impressions,
+          ctr: totals.impressions > 0 ? Number(((totals.clicks / totals.impressions) * 100).toFixed(2)) : 0,
+          avgPosition: null,
+        };
+        breakdowns.queries = trafficData.map(r => {
+          const imp = r.Impressions || 0;
+          const clk = r.Clicks || 0;
+          return {
+            query: r.Query || '',
+            clicks: clk,
+            impressions: imp,
+            ctr: imp > 0 ? Number(((clk / imp) * 100).toFixed(2)) : 0,
+            position: r.AvgPosition != null ? Number(Number(r.AvgPosition).toFixed(2)) : null,
+          };
+        });
       }
       if (pageData && Array.isArray(pageData)) {
-        breakdowns.pages = pageData.map(r => ({ page: r.Url || r.Page || '', clicks: r.Clicks || 0, impressions: r.Impressions || 0, ctr: r.Impressions > 0 ? (r.Clicks || 0) / r.Impressions : 0, position: r.AvgPosition ?? null }));
+        breakdowns.pages = pageData.map(r => {
+          const imp = r.Impressions || 0;
+          const clk = r.Clicks || 0;
+          return {
+            page: r.Url || r.Page || '',
+            clicks: clk,
+            impressions: imp,
+            ctr: imp > 0 ? Number(((clk / imp) * 100).toFixed(2)) : 0,
+            position: r.AvgPosition != null ? Number(Number(r.AvgPosition).toFixed(2)) : null,
+          };
+        });
       }
     } else {
       return res.status(400).json({ error: { code: 'INVALID_PROVIDER', message: 'provider must be google or bing', status: 400 } });
     }
 
-    res.json({ provider, summary, breakdowns });
+    res.json({ provider, period, groupBy, summary, breakdowns });
   } catch (err) {
     console.error('[arion/search/performance]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
