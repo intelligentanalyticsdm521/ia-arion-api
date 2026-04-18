@@ -29,6 +29,7 @@ import { runPageSpeedTest } from '../lib/pagespeed.js';
 import { meetsMinTier } from '../lib/tierCheck.js';
 import { getKeywordPositions, getProjectCompetitors, getAuditSummary, getProjectKeywords, getSiteOverview, getPositionsHistory, startSiteAudit, addCompetitor as seRankingAddCompetitor, rawRequest as seRankingRaw } from '../lib/seranking.js';
 import { getKeywordData as seRankingKeywordData } from '../lib/serankingData.js';
+import { parsePositions, computeAggregateStats, resolveRange, buildEngineMetaMap } from '../lib/serankingParse.js';
 import formsRouter from './arion/forms.js';
 import bookingsRouter from './arion/bookings.js';
 import gbpRouter from './arion/gbp.js';
@@ -487,86 +488,52 @@ router.get('/seo', async (req, res) => {
       } catch (e) { console.warn('[arion/seo] se_ranking_summary query failed:', e.message); }
     }
 
-    // Enrich breakdowns with real SE Ranking data
+    // Enrich breakdowns with real SE Ranking data (Phase 3.5 parser).
     if (site.se_ranking_project_id) {
-      // Use the same parser as /arion/seo/rankings (nested engine → keywords →
-      // positions[] time series). See that route for the shape details.
-      const positionsRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(site.se_ranking_project_id)}/positions`);
+      const projectId = site.se_ranking_project_id;
+      const range = resolveRange('30d');
+      const positionsRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}`);
       const engineBlocks = Array.isArray(positionsRaw.data) ? positionsRaw.data : [];
+      const engineIds = Array.from(new Set(engineBlocks.map((b) => String(b.site_engine_id))));
+      const engineMetaById = await loadEngineMetaForProject(projectId, engineIds).catch(() => ({}));
 
-      const byKey = {};
-      for (const engine of engineBlocks) {
-        const engineId = String(engine.site_engine_id ?? '');
-        for (const kw of engine.keywords || []) {
-          const id = String(kw.id ?? '');
-          if (!id) continue;
-          const series = Array.isArray(kw.positions) ? kw.positions : [];
-          const sorted = [...series].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-          const latest = sorted[0] || null;
-          const prev = sorted.find((p, i) => i > 0 && Number(p.pos || 0) > 0) || sorted[1] || null;
-          const curPos = latest ? Number(latest.pos || 0) : 0;
-          const prevPos = prev ? Number(prev.pos || 0) : 0;
-          const posChange = latest ? Number(latest.change || 0) : 0;
-
-          if (!byKey[id]) byKey[id] = {
-            keywordId: Number(id),
-            keyword: kw.name || '',
-            volume: Number(kw.volume || 0),
-            difficulty: null,
-            cpc: Number(kw.cpc || 0),
-            engineReadings: [],
-            engines: new Set(),
-          };
-          byKey[id].engines.add(engineId);
-          byKey[id].engineReadings.push({ engineId, currentPosition: curPos > 0 ? curPos : null, previousPosition: prevPos > 0 ? prevPos : null, positionChange: posChange });
-        }
-      }
-
-      const aggregatedRankings = Object.values(byKey).map(k => {
-        const ranking = k.engineReadings.filter(e => e.currentPosition != null);
-        const best = ranking.length ? ranking.reduce((a, b) => (b.currentPosition < a.currentPosition ? b : a)) : null;
-        return {
-          keywordId: k.keywordId,
-          keyword: k.keyword,
-          position: best ? best.currentPosition : null,
-          change: best ? best.positionChange : null,
-          volume: k.volume,
-          difficulty: k.difficulty,
-          serp_features: [],
-          url: null,
-          engines: Array.from(k.engines),
-        };
+      const keywordsNormalized = parsePositions(engineBlocks, {
+        rangeStart: range.current.start,
+        rangeEnd: range.current.end,
+        engineMetaById,
       });
+      const stats = computeAggregateStats(keywordsNormalized);
 
-      const positionsOnly = aggregatedRankings.map(k => k.position).filter(p => typeof p === 'number' && p > 0);
-      const avgPosition = positionsOnly.length ? Math.round((positionsOnly.reduce((a, b) => a + b, 0) / positionsOnly.length) * 10) / 10 : null;
-      // Visibility derived from CTR-weighted position distribution (see /seo/rankings).
-      const ctrWeight = (p) => {
-        if (!p || p > 30) return 0.005;
-        const table = [0.27, 0.15, 0.11, 0.08, 0.07, 0.05, 0.04, 0.03, 0.025, 0.02];
-        if (p <= 10) return table[p - 1];
-        return Math.max(0.005, 0.02 - (p - 10) * 0.001);
-      };
-      const visibilityScore = aggregatedRankings.length
-        ? Math.round((aggregatedRankings.reduce((sum, k) => sum + ctrWeight(k.position || 0), 0) / aggregatedRankings.length) * 100 * 10) / 10
-        : 0;
-      snapshot.avgPosition = avgPosition;
-      snapshot.searchVisibility = visibilityScore;
-      snapshot.top10Count = aggregatedRankings.filter(k => typeof k.position === 'number' && k.position <= 10).length;
+      // Legacy-compat shape for SeoOverview page (still using old field names
+      // until Phase 3.5 frontend rebuild lands).
+      const aggregatedRankings = keywordsNormalized.map((k) => ({
+        keywordId: k.keywordId,
+        keyword: k.keyword,
+        position: k.currentPosition,
+        change: k.positionChange,
+        volume: k.searchVolume,
+        difficulty: k.difficulty,
+        serp_features: [],
+        url: null,
+        engines: k.perEngine.map((e) => e.engineId),
+      }));
 
-      // Pick an engine id for competitors scoping (SE Ranking /competitors
-      // requires ?se_id=). Use the first observed engine on the project.
-      const firstEngineId = engineBlocks[0]?.site_engine_id;
+      snapshot.avgPosition = stats.avgPosition;
+      snapshot.searchVisibility = stats.visibilityScore;
+      snapshot.top10Count = stats.top10Count;
+      snapshot.trafficForecast = stats.trafficForecast;
+
+      const firstEngineId = engineIds[0];
       let competitors = [];
-      if (firstEngineId != null) {
-        const compRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(site.se_ranking_project_id)}/competitors?se_id=${encodeURIComponent(firstEngineId)}`);
+      if (firstEngineId) {
+        const compRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/competitors?se_id=${encodeURIComponent(firstEngineId)}`);
         if (compRaw.ok && Array.isArray(compRaw.data)) competitors = compRaw.data;
       }
 
       const opportunities = aggregatedRankings
-        .filter(k => typeof k.position === 'number' && k.position >= 11 && k.position <= 20)
+        .filter((k) => typeof k.position === 'number' && k.position >= 11 && k.position <= 20)
         .sort((a, b) => (b.volume || 0) - (a.volume || 0))
-        .map(k => ({
+        .map((k) => ({
           keyword: k.keyword,
           position: k.position,
           volume: k.volume,
@@ -705,16 +672,55 @@ router.post('/seo/project/link', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 3 — SE Ranking expanded routes
+// Phase 3.5 — SE Ranking expanded routes
 // ---------------------------------------------------------------------------
 
-// --- GET /arion/seo/rankings?siteId=&engine=google|bing|all ---
+// Engine-metadata cache keyed by projectId. Lives in process memory — SE Ranking
+// engine ids don't churn mid-session, so a 6h TTL is plenty.
+const ENGINE_META_CACHE = new Map();
+const ENGINE_META_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function loadEngineMetaForProject(projectId, site_engine_ids) {
+  const cached = ENGINE_META_CACHE.get(String(projectId));
+  if (cached && Date.now() - cached.ts < ENGINE_META_TTL_MS) return cached.map;
+
+  // Probe the likely endpoint candidates. First one that returns an array with
+  // our site_engine_ids represented wins. Without the endpoint discovery we
+  // label engines as "Engine {id}" — UI still functions, just less polished.
+  const probes = [
+    '/system/search-engines',
+    '/system/engines',
+    '/engines',
+    `/sites/${encodeURIComponent(projectId)}/site-engines`,
+    `/sites/${encodeURIComponent(projectId)}/engines`,
+  ];
+  const needed = new Set((site_engine_ids || []).map(String));
+  let map = {};
+  for (const p of probes) {
+    const r = await seRankingRaw('GET', p);
+    if (r.ok && Array.isArray(r.data) && r.data.length) {
+      const candidate = buildEngineMetaMap(r.data);
+      // Match check — does this response actually contain our engine ids?
+      const hits = Object.keys(candidate).filter((id) => needed.has(id)).length;
+      if (hits > 0 || needed.size === 0) {
+        map = candidate;
+        break;
+      }
+    }
+  }
+  ENGINE_META_CACHE.set(String(projectId), { ts: Date.now(), map });
+  return map;
+}
+
+// --- GET /arion/seo/rankings?siteId=&range=30d&provider=all|google|bing&device=all|desktop|mobile ---
 // Normalized keyword ranking list with REAL keyword names (joins
 // /positions with /keywords so blank name fields don't come through).
 router.get('/seo/rankings', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId;
-  const engineFilter = (req.query.engine || 'all').toString().toLowerCase();
+  const rangeCode = (req.query.range || '30d').toString().toLowerCase();
+  const providerFilter = (req.query.provider || 'all').toString().toLowerCase();
+  const deviceFilter = (req.query.device || 'all').toString().toLowerCase();
   if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
   try {
     const pool = await getServicesPool();
@@ -725,114 +731,127 @@ router.get('/seo/rankings', async (req, res) => {
     }
 
     const projectId = site.se_ranking_project_id;
-    // SE Ranking's actual /positions shape (confirmed via diagnostic):
-    //   [{ site_engine_id, keywords: [{ id, name, volume, cpc, competition,
-    //                                   positions: [{ date, pos, change, ... }] }]}]
-    // Each engine has its own block; each keyword has a daily time series.
-    // pos: 0 means "not ranking in top N" (N = depth=100 here).
-    const positionsRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions`);
-    const engineBlocks = Array.isArray(positionsRaw.data) ? positionsRaw.data : [];
+    const range = resolveRange(rangeCode);
 
-    const upstreamError = !positionsRaw.ok
-      ? {
-          positions: `HTTP ${positionsRaw.status}: ${positionsRaw.errorText || 'unknown'}`,
-          keyConfigured: positionsRaw.keyConfigured,
-        }
+    // Fetch both current-period and prior-period positions so we can compute
+    // period-over-period stat deltas without a second deploy cycle.
+    const [curRaw, priorRaw] = await Promise.all([
+      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}`),
+      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.prior.start}&date_to=${range.prior.end}`),
+    ]);
+    const curBlocks = Array.isArray(curRaw.data) ? curRaw.data : [];
+    const priorBlocks = Array.isArray(priorRaw.data) ? priorRaw.data : [];
+
+    const upstreamError = !curRaw.ok
+      ? { positions: `HTTP ${curRaw.status}: ${curRaw.errorText || 'unknown'}`, keyConfigured: curRaw.keyConfigured }
       : null;
 
-    // Aggregate: for each keyword_id, pick the best non-zero current rank
-    // across engines, plus change vs previous day from that engine's series.
-    const byKey = {};
-    for (const engine of engineBlocks) {
-      const engineId = String(engine.site_engine_id ?? '');
-      // Filter by engine if requested. site_engine_id values map to specific
-      // (engine × region) combos on the project — we treat them opaquely.
-      if (engineFilter !== 'all' && engineFilter !== engineId) continue;
+    // Load engine metadata (cached per-project). Without this, engines fall
+    // back to "Engine {id}" labels but the data model still works.
+    const engineIds = Array.from(new Set(curBlocks.map((b) => String(b.site_engine_id))));
+    const engineMetaById = await loadEngineMetaForProject(projectId, engineIds).catch(() => ({}));
 
-      for (const kw of engine.keywords || []) {
-        const id = String(kw.id ?? '');
-        if (!id) continue;
-        const series = Array.isArray(kw.positions) ? kw.positions : [];
-        // Most recent first. SE Ranking returns in ascending date order.
-        const sorted = [...series].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-        const latest = sorted[0] || null;
-        const prev = sorted.find((p, i) => i > 0 && Number(p.pos || 0) > 0) || sorted[1] || null;
-
-        const curPos = latest ? Number(latest.pos || 0) : 0;
-        const prevPos = prev ? Number(prev.pos || 0) : 0;
-        const posChange = latest ? Number(latest.change || 0) : 0;
-
-        if (!byKey[id]) byKey[id] = {
-          keywordId: Number(id),
-          keyword: kw.name || '',
-          volume: Number(kw.volume || 0),
-          difficulty: null, // SE Ranking Project API doesn't expose this
-          cpc: Number(kw.cpc || 0),
-          competition: Number(kw.competition || 0),
-          engineReadings: [], // per-engine latest position
-          engines: new Set(),
-        };
-        byKey[id].engines.add(engineId);
-        byKey[id].engineReadings.push({
-          engineId,
-          currentPosition: curPos > 0 ? curPos : null,
-          previousPosition: prevPos > 0 ? prevPos : null,
-          positionChange: posChange,
-        });
-      }
+    // Build engine-id filter from provider/device query params + metadata map.
+    const engineFilter = new Set();
+    for (const id of engineIds) {
+      const meta = engineMetaById[id];
+      const matchesProvider = providerFilter === 'all'
+        || (meta?.name && meta.name.toLowerCase().includes(providerFilter));
+      const matchesDevice = deviceFilter === 'all'
+        || (meta?.device && meta.device.toLowerCase() === deviceFilter);
+      if (matchesProvider && matchesDevice) engineFilter.add(id);
     }
+    // Safety: if engineFilter is empty (metadata not yet resolved), fall back to all.
+    const effectiveFilter = engineFilter.size ? engineFilter : null;
 
-    // Reduce to one row per keyword: best non-zero rank wins "current".
-    const keywords = Object.values(byKey).map(k => {
-      const ranking = k.engineReadings.filter(e => e.currentPosition != null);
-      const best = ranking.length
-        ? ranking.reduce((a, b) => (b.currentPosition < a.currentPosition ? b : a))
-        : null;
-      return {
-        keywordId: k.keywordId,
-        keyword: k.keyword,
-        currentPosition: best ? best.currentPosition : null,
-        previousPosition: best ? best.previousPosition : null,
-        positionChange: best ? best.positionChange : 0,
-        searchVolume: k.volume,
-        difficulty: k.difficulty,
-        cpc: k.cpc,
-        competition: k.competition,
-        url: null,
-        serpFeatures: [],
-        engines: Array.from(k.engines),
-      };
-    }).sort((a, b) => (a.currentPosition ?? 999) - (b.currentPosition ?? 999));
+    const keywords = parsePositions(curBlocks, {
+      rangeStart: range.current.start,
+      rangeEnd: range.current.end,
+      engineFilter: effectiveFilter,
+      engineMetaById,
+    }).sort((a, b) => (a.currentPosition ?? 9999) - (b.currentPosition ?? 9999));
 
-    const positionsOnly = keywords.map(k => k.currentPosition).filter(p => typeof p === 'number' && p > 0);
-    const avgPosition = positionsOnly.length ? Math.round((positionsOnly.reduce((a, b) => a + b, 0) / positionsOnly.length) * 10) / 10 : null;
-    const top10Count = keywords.filter(k => typeof k.currentPosition === 'number' && k.currentPosition <= 10).length;
-    // Derive visibility as: sum of position-weighted CTR share, normalized to %
-    // (rank 1 ≈ 27% share, rank 10 ≈ 2%, rank 11+ ≈ 0.5%). Good enough proxy
-    // for a project-wide visibility percentage without needing the SE Ranking
-    // analytics endpoint.
-    const ctrWeight = (p) => {
-      if (!p || p > 30) return 0.005;
-      const table = [0.27, 0.15, 0.11, 0.08, 0.07, 0.05, 0.04, 0.03, 0.025, 0.02];
-      if (p <= 10) return table[p - 1];
-      return Math.max(0.005, 0.02 - (p - 10) * 0.001);
-    };
-    const visibilityScore = keywords.length
-      ? Math.round((keywords.reduce((sum, k) => sum + ctrWeight(k.currentPosition || 0), 0) / keywords.length) * 100 * 10) / 10
-      : 0;
+    const priorKeywords = parsePositions(priorBlocks, {
+      rangeStart: range.prior.start,
+      rangeEnd: range.prior.end,
+      engineFilter: effectiveFilter,
+      engineMetaById,
+    });
+
+    const stats = computeAggregateStats(keywords);
+    const priorStats = computeAggregateStats(priorKeywords);
+
+    const delta = (cur, prev) => (cur == null || prev == null ? null : Math.round((cur - prev) * 10) / 10);
 
     res.json({
       connected: true,
       projectId,
-      engine: engineFilter,
-      visibilityScore,
-      avgPosition,
-      top10Count,
+      range: { code: rangeCode, label: range.label, current: range.current, prior: range.prior, days: range.days },
+      filters: { provider: providerFilter, device: deviceFilter },
+      engines: {
+        metadata: Object.values(engineMetaById),
+        availableIds: engineIds,
+        filteredIds: Array.from(effectiveFilter || engineIds),
+      },
+      stats: {
+        current: stats,
+        prior: priorStats,
+        delta: {
+          avgPosition: delta(stats.avgPosition, priorStats.avgPosition),
+          visibilityScore: delta(stats.visibilityScore, priorStats.visibilityScore),
+          top10Count: delta(stats.top10Count, priorStats.top10Count),
+          trafficForecast: delta(stats.trafficForecast, priorStats.trafficForecast),
+          totalKeywords: delta(stats.totalKeywords, priorStats.totalKeywords),
+          rankingKeywords: delta(stats.rankingKeywords, priorStats.rankingKeywords),
+        },
+      },
       keywords,
       upstreamError,
     });
   } catch (err) {
     console.error('[arion/seo/rankings]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/seo/keyword/:keywordId?siteId=&range=90d ---
+// Returns the full per-engine time series + metadata for a single keyword,
+// used by the Keyword Rankings detail modal.
+router.get('/seo/keyword/:keywordId', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const keywordId = String(req.params.keywordId || '');
+  const rangeCode = (req.query.range || '90d').toString().toLowerCase();
+  if (!siteId || !keywordId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId and keywordId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.se_ranking_project_id) return res.json({ connected: false });
+
+    const projectId = site.se_ranking_project_id;
+    const range = resolveRange(rangeCode);
+    const posRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}`);
+    const blocks = Array.isArray(posRaw.data) ? posRaw.data : [];
+    const engineIds = Array.from(new Set(blocks.map((b) => String(b.site_engine_id))));
+    const engineMetaById = await loadEngineMetaForProject(projectId, engineIds).catch(() => ({}));
+
+    const parsed = parsePositions(blocks, {
+      rangeStart: range.current.start,
+      rangeEnd: range.current.end,
+      engineMetaById,
+    });
+    const record = parsed.find((k) => String(k.keywordId) === keywordId);
+    if (!record) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Keyword not in project', status: 404 } });
+
+    res.json({
+      connected: true,
+      projectId,
+      range: { code: rangeCode, label: range.label, current: range.current, days: range.days },
+      keyword: record,
+    });
+  } catch (err) {
+    console.error('[arion/seo/keyword]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
@@ -1039,7 +1058,41 @@ router.get('/seo/diagnostic', async (req, res) => {
       results.project = summarize(`GET /sites/${projectId}`, await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}`));
       results.keywords = summarize(`GET /sites/${projectId}/keywords`, await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/keywords`));
       results.positions = summarize(`GET /sites/${projectId}/positions`, await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions`));
-      results.competitors = summarize(`GET /sites/${projectId}/competitors`, await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/competitors`));
+
+      // Engine metadata probes — SE Ranking docs vary on the exact path.
+      // Try the most likely candidates so Phase 3.5 can light up Desktop/Mobile
+      // labels correctly. The first one that returns 200 with an array becomes
+      // our engine-id → {name, region, device} lookup.
+      const engineProbes = [
+        '/system/search-engines',
+        '/system/engines',
+        '/engines',
+        `/sites/${encodeURIComponent(projectId)}/site-engines`,
+        `/sites/${encodeURIComponent(projectId)}/engines`,
+      ];
+      for (const p of engineProbes) {
+        results[`engines_${p.replace(/[^a-z0-9]/gi, '_')}`] = summarize(`GET ${p}`, await seRankingRaw('GET', p));
+      }
+
+      // Competitors with se_id derived from first positions engine.
+      const firstEngineId = results.positions.sample?.[0]?.site_engine_id;
+      if (firstEngineId != null) {
+        results.competitorsWithEngine = summarize(`GET /sites/${projectId}/competitors?se_id=${firstEngineId}`, await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/competitors?se_id=${encodeURIComponent(firstEngineId)}`));
+      }
+
+      // Site-audit endpoint probes. The docs are ambiguous on which path
+      // is current — try several to find what actually returns a real audit.
+      const auditProbes = [
+        `/audit/sites/${projectId}`,
+        `/audit/${projectId}`,
+        `/sites/${projectId}/audit`,
+        `/audit/reports?site_id=${projectId}`,
+        `/site-audit/reports?site_id=${projectId}`,
+        '/site-audit/audits',
+      ];
+      for (const p of auditProbes) {
+        results[`audit_probe_${p.replace(/[^a-z0-9]/gi, '_')}`] = summarize(`GET ${p}`, await seRankingRaw('GET', p));
+      }
     }
 
     if (auditId) {
