@@ -6,7 +6,7 @@ import { firePlatformEvent } from '../lib/platformEvents.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
 import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries, getSearchConsoleDates, getSearchConsolePageQuery, getAnalyticsData, resolveGscProperty } from '../lib/googleServices.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
-import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats } from '../lib/bingWebmaster.js';
+import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats, getUrlInfo as bingGetUrlInfo } from '../lib/bingWebmaster.js';
 import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing, listGoogleSitemaps } from '../lib/sitemapGenerator.js';
 import { getDomainInfo, getDnsRecords, createDnsRecords, deleteDnsRecords, getSslStatus, getWpSiteInfo, getWpPages, getWpPosts, getWpPlugins } from '../lib/hostinger.js';
 import { runPageSpeedTest } from '../lib/pagespeed.js';
@@ -1002,9 +1002,11 @@ router.get('/search/indexnow', async (req, res) => {
   }
 });
 
-// --- POST /arion/search/indexnow/generate-key — generate and store a new key ---
-// Any previous key is overwritten (verification resets). The key is a 32-char lowercase
-// hex UUID (IndexNow accepts 8-128 chars from a-z/0-9/-).
+// --- POST /arion/search/indexnow/generate-key — generate, install, verify in one shot ---
+// End-to-end enablement: generates a key, stores it, installs it on the WP site via the IA
+// Plugin's /indexnow-key endpoint (admin Basic auth using wp_app_password_ref), then fetches
+// {domain}/{key}.txt to confirm hosting and marks the site verified. The client just clicks
+// one button — no file upload or manual config required.
 router.post('/search/indexnow/generate-key', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId || req.body?.siteId;
@@ -1015,6 +1017,9 @@ router.post('/search/indexnow/generate-key', async (req, res) => {
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
     const key = crypto.randomUUID().replace(/-/g, '');
     const now = new Date();
+    const keyLocation = `https://${site.domain}/${key}.txt`;
+
+    // 1. Store in DB (verified=false initially)
     await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('siteId', sql.UniqueIdentifier, siteId)
@@ -1023,8 +1028,79 @@ router.post('/search/indexnow/generate-key', async (req, res) => {
       .query(`UPDATE arion.site
               SET indexnow_key = @key, indexnow_generated_at = @now, indexnow_verified_at = NULL
               WHERE tenant_id = @tenantId AND site_id = @siteId`);
-    const keyLocation = `https://${site.domain}/${key}.txt`;
-    res.json({ key, keyLocation, keyFileContents: key, host: site.domain, generatedAt: now.toISOString(), verified: false });
+
+    // 2. Auto-install via IA Plugin (if app password is configured)
+    let installed = false;
+    let installError = null;
+    const appPwRef = site.wp_app_password_ref;
+    if (appPwRef) {
+      try {
+        const pluginRes = await fetch(`https://${site.domain}/wp-json/intelligent-analytics/v1/indexnow-key`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Basic ' + Buffer.from(appPwRef).toString('base64'),
+          },
+          body: JSON.stringify({ key }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (pluginRes.ok) {
+          installed = true;
+        } else {
+          const text = await pluginRes.text().catch(() => '');
+          installError = `Plugin install returned ${pluginRes.status}: ${text.slice(0, 200)}`;
+        }
+      } catch (e) {
+        installError = `Plugin install failed: ${e.message}`;
+      }
+    } else {
+      installError = 'WP application password not configured for this site';
+    }
+
+    // 3. Auto-verify by fetching the key file
+    let verified = false;
+    let verifyError = null;
+    let verifyStatus = null;
+    if (installed) {
+      try {
+        // Small delay for any caching to settle
+        await new Promise(r => setTimeout(r, 1000));
+        const vr = await fetch(keyLocation, { method: 'GET', signal: AbortSignal.timeout(10_000) });
+        verifyStatus = vr.status;
+        const body = (await vr.text().catch(() => '')).trim();
+        if (vr.ok && body === key) {
+          verified = true;
+          await pool.request()
+            .input('tenantId', sql.UniqueIdentifier, tenantId)
+            .input('siteId', sql.UniqueIdentifier, siteId)
+            .input('now', sql.DateTime2, new Date())
+            .query('UPDATE arion.site SET indexnow_verified_at = @now WHERE tenant_id = @tenantId AND site_id = @siteId');
+        } else {
+          verifyError = vr.ok
+            ? `Key file served, but content did not match. Got "${body.slice(0, 60)}".`
+            : `Key file not reachable: HTTP ${vr.status}`;
+        }
+      } catch (e) {
+        verifyError = `Verification fetch failed: ${e.message}`;
+      }
+    }
+
+    res.json({
+      key,
+      keyLocation,
+      keyFileContents: key,
+      host: site.domain,
+      generatedAt: now.toISOString(),
+      installed,
+      installError,
+      verified,
+      verifiedAt: verified ? new Date().toISOString() : null,
+      verifyError,
+      verifyStatus,
+      // If install+verify both succeeded, the client is fully enabled and the UI can
+      // show a single "Active" state. If either failed, fall back to manual instructions.
+      autoEnabled: installed && verified,
+    });
   } catch (err) {
     console.error('[arion/search/indexnow/generate-key]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
@@ -1088,6 +1164,15 @@ router.delete('/search/indexnow', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    // Best-effort: ask the plugin to stop serving the key file too
+    const appPwRef = site.wp_app_password_ref;
+    if (appPwRef) {
+      fetch(`https://${site.domain}/wp-json/intelligent-analytics/v1/indexnow-key`, {
+        method: 'DELETE',
+        headers: { Authorization: 'Basic ' + Buffer.from(appPwRef).toString('base64') },
+        signal: AbortSignal.timeout(10_000),
+      }).catch(e => console.warn('[arion/search/indexnow DELETE] plugin cleanup failed:', e.message));
+    }
     await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('siteId', sql.UniqueIdentifier, siteId)
@@ -1195,6 +1280,66 @@ router.get('/search/sitemaps', async (req, res) => {
     res.json({ provider, sitemaps });
   } catch (err) {
     console.error('[arion/search/sitemaps]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/search/bing/stats?siteId= — crawl stats + submission quota ---
+// Surfaces the meaningful Bing data that Google doesn't expose publicly:
+// crawl activity (200s/301s/404s/500s/robots.txt hits) and URL submission quota.
+router.get('/search/bing/stats', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const bingKey = process.env.BING_WMT_API_KEY;
+    if (!bingKey) return res.json({ connected: false, error: 'Bing Webmaster Tools not connected' });
+    const siteUrl = 'https://' + site.domain;
+    const [crawl, quota] = await Promise.all([
+      bingGetCrawlStats(bingKey, siteUrl).catch(() => null),
+      bingGetUrlSubmissionQuota(bingKey, siteUrl).catch(() => null),
+    ]);
+
+    // Crawl stats: Bing returns an array of daily rows. Sum recent activity for summary.
+    let crawlSummary = null;
+    const crawlRows = crawl?.d || crawl || [];
+    if (Array.isArray(crawlRows) && crawlRows.length > 0) {
+      const recent = crawlRows.slice(0, 30);
+      crawlSummary = {
+        days: recent.length,
+        totalCrawled: recent.reduce((s, r) => s + (r.CrawledPages || r.Total || 0), 0),
+        http2xx: recent.reduce((s, r) => s + (r.Http2xx || 0), 0),
+        http301: recent.reduce((s, r) => s + (r.Http301 || 0), 0),
+        http404: recent.reduce((s, r) => s + (r.Http404 || 0), 0),
+        http5xx: recent.reduce((s, r) => s + (r.Http5xx || 0), 0),
+        robotsDenied: recent.reduce((s, r) => s + (r.RobotsTxtHits || 0), 0),
+        malwareDetected: recent.reduce((s, r) => s + (r.Malware || 0), 0),
+        dailySeries: recent.map(r => ({
+          date: r.Date || r.date || null,
+          crawled: r.CrawledPages || r.Total || 0,
+          http2xx: r.Http2xx || 0,
+          http404: r.Http404 || 0,
+          http5xx: r.Http5xx || 0,
+        })),
+      };
+    }
+
+    // Quota: Bing returns counts of remaining daily/monthly URL submissions
+    let quotaSummary = null;
+    const quotaData = quota?.d || quota || null;
+    if (quotaData && typeof quotaData === 'object') {
+      quotaSummary = {
+        dailyRemaining: quotaData.DailyQuota ?? null,
+        monthlyRemaining: quotaData.MonthlyQuota ?? null,
+      };
+    }
+
+    res.json({ connected: true, crawl: crawlSummary, quota: quotaSummary });
+  } catch (err) {
+    console.error('[arion/search/bing/stats]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
