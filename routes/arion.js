@@ -1409,9 +1409,10 @@ router.post('/bing/auto-connect', async (req, res) => {
     const subdomain = dotIdx > 0 ? dnsCode.slice(0, dotIdx) : dnsCode;
     if (!subdomain) return res.json({ connected: false, stage: 'parse_code', error: 'Bing did not return a DnsVerificationCode' });
 
-    // Step 4: write the CNAME via Hostinger DNS API. Hostinger expects the content
-    // with a trailing dot for canonical DNS form — stored records normalize to that anyway.
-    const dnsResult = await createDnsRecords(site.domain, [{ type: 'CNAME', name: subdomain, content: 'verify.bing.com.', ttl: 300 }], false);
+    // Step 4: write the CNAME via Hostinger DNS API. Use overwrite=true so a re-click
+    // after a previous successful write is idempotent — Hostinger would otherwise
+    // reject with 4008 (record already exists).
+    const dnsResult = await createDnsRecords(site.domain, [{ type: 'CNAME', name: subdomain, content: 'verify.bing.com.', ttl: 300 }], true);
     if (!dnsResult.ok) {
       return res.json({
         connected: false,
@@ -2244,7 +2245,7 @@ router.post('/hosting/dns', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId;
   if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId query param required', status: 400 } });
-  const { records } = req.body;
+  const { records, overwrite } = req.body;
   if (!records || !Array.isArray(records) || records.length === 0) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'records array is required', status: 400 } });
   }
@@ -2257,7 +2258,7 @@ router.post('/hosting/dns', async (req, res) => {
     }
     if (!site.domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
 
-    const result = await createDnsRecords(site.domain, records, false);
+    const result = await createDnsRecords(site.domain, records, !!overwrite);
     if (!result.ok) {
       return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: result.error || 'Failed to create DNS records', status: 502, hostingerStatus: result.status || null, hostingerBody: result.body || null } });
     }
