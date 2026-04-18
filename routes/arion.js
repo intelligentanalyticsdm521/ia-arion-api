@@ -5,6 +5,22 @@ import { getServicesPool } from '../db/servicesPool.js';
 import { firePlatformEvent } from '../lib/platformEvents.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
 import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries, getSearchConsoleDates, getSearchConsolePageQuery, getAnalyticsData, resolveGscProperty } from '../lib/googleServices.js';
+import {
+  fetchBusinessInfo as gbpFetchInfo,
+  patchBusinessInfo as gbpPatchInfo,
+  fetchPerformance as gbpFetchPerformance,
+  summarizePerformance as gbpSummarizePerf,
+  formatAddress as gbpFormatAddress,
+  fetchReviews as gbpFetchReviews,
+  replyToReview as gbpReplyToReview,
+  deleteReviewReply as gbpDeleteReviewReply,
+  fetchLocalPosts as gbpFetchLocalPosts,
+  createLocalPost as gbpCreateLocalPost,
+  deleteLocalPost as gbpDeleteLocalPost,
+  fetchQuestions as gbpFetchQuestions,
+  answerQuestion as gbpAnswerQuestion,
+  resolveGbpLocationName,
+} from '../lib/gbpApi.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
 import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats, getUrlInfo as bingGetUrlInfo } from '../lib/bingWebmaster.js';
 import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing, listGoogleSitemaps } from '../lib/sitemapGenerator.js';
@@ -1393,8 +1409,306 @@ router.get('/search/core-web-vitals', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Business Routes
+// Business Routes — Google Business Profile (Phase 1)
 // ---------------------------------------------------------------------------
+
+// Helper: get the site row + resolved GBP location name. Persists the resolved
+// name to arion.site.gbp_location_name on first resolution so subsequent calls skip
+// the accounts→locations discovery round-trip.
+async function getGbpContext(pool, tenantId, siteId) {
+  const site = await getSiteForTenant(pool, tenantId, siteId);
+  if (!site) return { error: 'site_not_found', status: 404 };
+  if (!site.gbp_connected) return { error: 'not_connected', site };
+  const refreshToken = site.gbp_oauth_token_ref;
+  if (!refreshToken) return { error: 'not_connected', site };
+  let locationName = site.gbp_location_name || null;
+  if (!locationName) {
+    const tokenData = await getAccessToken(refreshToken).catch(() => null);
+    if (!tokenData) return { error: 'gbp_auth_expired', site };
+    try {
+      locationName = await resolveGbpLocationName(tokenData.access_token);
+      if (locationName) {
+        await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .input('locationName', sql.NVarChar(200), locationName)
+          .query('UPDATE arion.site SET gbp_location_name = @locationName WHERE tenant_id = @tenantId AND site_id = @siteId');
+      }
+    } catch (e) {
+      console.warn('[gbp] resolveGbpLocationName failed:', e.message);
+    }
+    if (!locationName) return { error: 'location_not_found', site };
+  }
+  return { site, refreshToken, locationName };
+}
+
+// --- GET /arion/business?siteId= ---
+// Live GBP profile + 30-day performance metrics.
+router.get('/business', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error === 'not_connected') return res.json({ connected: false, error: 'not_connected' });
+    if (ctx.error === 'gbp_auth_expired') return res.json({ connected: true, error: 'gbp_auth_expired' });
+    if (ctx.error === 'location_not_found') return res.json({ connected: true, error: 'location_not_found' });
+
+    // Parallel: fetch business info + performance metrics
+    const [infoRes, perfRes] = await Promise.all([
+      gbpFetchInfo(ctx.refreshToken, ctx.locationName),
+      gbpFetchPerformance(ctx.refreshToken, ctx.locationName, 30),
+    ]);
+
+    if (infoRes?.error) {
+      return res.json({ connected: true, error: infoRes.error });
+    }
+
+    const loc = infoRes.location;
+    const business = {
+      name: loc.title || null,
+      phone: loc.phoneNumbers?.primaryPhone || null,
+      address: gbpFormatAddress(loc.storefrontAddress), // null-or-string, never "null" text
+      website: loc.websiteUri || null,
+      primaryCategory: loc.categories?.primaryCategory?.displayName || null,
+      description: loc.profile?.description || null,
+      regularHours: loc.regularHours || null,
+      specialHours: loc.specialHours || null,
+      locationName: infoRes.locationName,
+    };
+
+    let metrics = null, dailyBreakdown = [];
+    if (perfRes && !perfRes.error && perfRes.data) {
+      const sum = gbpSummarizePerf(perfRes.data);
+      metrics = {
+        impressions: sum.impressions,
+        impressionsDesktopMaps: sum.impressionsDesktopMaps,
+        impressionsDesktopSearch: sum.impressionsDesktopSearch,
+        impressionsMobileMaps: sum.impressionsMobileMaps,
+        impressionsMobileSearch: sum.impressionsMobileSearch,
+        calls: sum.calls,
+        websiteClicks: sum.websiteClicks,
+        directionsRequests: sum.directionsRequests,
+        conversations: sum.conversations,
+        bookings: sum.bookings,
+      };
+      dailyBreakdown = sum.dailyBreakdown;
+    }
+
+    res.json({ connected: true, business, metrics, dailyBreakdown });
+  } catch (err) {
+    console.error('[arion/business]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/business/reviews?siteId= ---
+router.get('/business/reviews', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.json({ connected: !['not_connected','site_not_found'].includes(ctx.error), error: ctx.error });
+    const r = await gbpFetchReviews(ctx.refreshToken, ctx.locationName);
+    if (r?.error) return res.json({ connected: true, error: r.error, totalReviewCount: 0, averageRating: 0, reviews: [] });
+    res.json({ connected: true, totalReviewCount: r.totalReviewCount, averageRating: r.averageRating, reviews: r.reviews });
+  } catch (err) {
+    console.error('[arion/business/reviews]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/business/insights?siteId=&period=30|90 ---
+router.get('/business/insights', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const period = [30, 90].includes(parseInt(req.query.period, 10)) ? parseInt(req.query.period, 10) : 30;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.json({ connected: !['not_connected','site_not_found'].includes(ctx.error), error: ctx.error });
+    const perf = await gbpFetchPerformance(ctx.refreshToken, ctx.locationName, period);
+    if (perf?.error) return res.json({ connected: true, error: perf.error, period });
+    const sum = gbpSummarizePerf(perf.data);
+    res.json({
+      connected: true,
+      period,
+      totals: {
+        impressions: sum.impressions,
+        calls: sum.calls,
+        websiteClicks: sum.websiteClicks,
+        directionsRequests: sum.directionsRequests,
+        conversations: sum.conversations,
+        bookings: sum.bookings,
+      },
+      dailyBreakdown: sum.dailyBreakdown,
+    });
+  } catch (err) {
+    console.error('[arion/business/insights]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/business/qanda?siteId= ---
+router.get('/business/qanda', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.json({ connected: !['not_connected','site_not_found'].includes(ctx.error), error: ctx.error, questions: [] });
+    const q = await gbpFetchQuestions(ctx.refreshToken, ctx.locationName);
+    if (q?.error) return res.json({ connected: true, error: q.error, questions: [] });
+    res.json({ connected: true, questions: q.questions });
+  } catch (err) {
+    console.error('[arion/business/qanda]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- PATCH /arion/business/update?siteId= ---
+// Body: { name?, phone?, website?, description?, regularHours?, specialHours? }
+router.patch('/business/update', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.status(400).json({ error: { code: ctx.error.toUpperCase(), message: ctx.error, status: 400 } });
+
+    const { name, phone, website, description, regularHours, specialHours } = req.body || {};
+    const updates = {};
+    const maskParts = [];
+    if (name !== undefined) { updates.title = name; maskParts.push('title'); }
+    if (phone !== undefined) { updates.phoneNumbers = { primaryPhone: phone }; maskParts.push('phoneNumbers.primaryPhone'); }
+    if (website !== undefined) { updates.websiteUri = website; maskParts.push('websiteUri'); }
+    if (description !== undefined) { updates.profile = { description }; maskParts.push('profile.description'); }
+    if (regularHours !== undefined) { updates.regularHours = regularHours; maskParts.push('regularHours'); }
+    if (specialHours !== undefined) { updates.specialHours = specialHours; maskParts.push('specialHours'); }
+    if (maskParts.length === 0) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'No fields to update', status: 400 } });
+
+    const r = await gbpPatchInfo(ctx.refreshToken, ctx.locationName, maskParts.join(','), updates);
+    if (r.error) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: r.error, status: 502 } });
+    res.json({ ok: true, location: r.location });
+  } catch (err) {
+    console.error('[arion/business/update]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/business/reviews/:reviewId/reply?siteId= ---
+router.post('/business/reviews/:reviewId/reply', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const reviewId = req.params.reviewId;
+  const { comment } = req.body || {};
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  if (!comment || !comment.trim()) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'comment required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.status(400).json({ error: { code: ctx.error.toUpperCase(), message: ctx.error, status: 400 } });
+    const r = await gbpReplyToReview(ctx.refreshToken, ctx.locationName, reviewId, comment.trim());
+    if (r.error) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: r.error, status: 502 } });
+    res.json({ ok: true, reply: r.reply });
+  } catch (err) {
+    console.error('[arion/business/reviews/reply]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- DELETE /arion/business/reviews/:reviewId/reply?siteId= ---
+router.delete('/business/reviews/:reviewId/reply', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const reviewId = req.params.reviewId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.status(400).json({ error: { code: ctx.error.toUpperCase(), message: ctx.error, status: 400 } });
+    const r = await gbpDeleteReviewReply(ctx.refreshToken, ctx.locationName, reviewId);
+    if (r.error) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: r.error, status: 502 } });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[arion/business/reviews/reply:delete]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/business/posts/create?siteId= ---
+router.post('/business/posts/create', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.status(400).json({ error: { code: ctx.error.toUpperCase(), message: ctx.error, status: 400 } });
+    const r = await gbpCreateLocalPost(ctx.refreshToken, ctx.locationName, req.body || {});
+    if (r.error) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: r.error, status: 502 } });
+    res.json({ ok: true, post: r.post });
+  } catch (err) {
+    console.error('[arion/business/posts/create]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- DELETE /arion/business/posts/:postId?siteId= ---
+router.delete('/business/posts/:postId', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const postId = req.params.postId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.status(400).json({ error: { code: ctx.error.toUpperCase(), message: ctx.error, status: 400 } });
+    const r = await gbpDeleteLocalPost(ctx.refreshToken, ctx.locationName, postId);
+    if (r.error) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: r.error, status: 502 } });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[arion/business/posts/delete]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/business/qanda/:questionId/answer?siteId= ---
+router.post('/business/qanda/:questionId/answer', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const questionId = req.params.questionId;
+  const { text } = req.body || {};
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  if (!text || !text.trim()) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'text required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.status(400).json({ error: { code: ctx.error.toUpperCase(), message: ctx.error, status: 400 } });
+    const r = await gbpAnswerQuestion(ctx.refreshToken, ctx.locationName, questionId, text.trim());
+    if (r.error) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: r.error, status: 502 } });
+    res.json({ ok: true, answer: r.answer });
+  } catch (err) {
+    console.error('[arion/business/qanda/answer]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
 
 // --- GET /arion/business/overview?siteId=&provider=google|bing|apple ---
 router.get('/business/overview', async (req, res) => {
@@ -1433,36 +1747,30 @@ router.get('/business/overview', async (req, res) => {
   }
 });
 
-// --- GET /arion/business/posts?siteId= ---
+// --- GET /arion/business/posts?siteId= ---  (Phase 1: live API)
 router.get('/business/posts', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId;
   if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
   try {
     const pool = await getServicesPool();
-    const site = await getSiteForTenant(pool, tenantId, siteId);
-    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    res.json({ posts: [] });
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.json({ connected: !['not_connected','site_not_found'].includes(ctx.error), error: ctx.error, posts: [] });
+    const r = await gbpFetchLocalPosts(ctx.refreshToken, ctx.locationName);
+    if (r?.error) return res.json({ connected: true, error: r.error, posts: [] });
+    res.json({ connected: true, posts: r.posts });
   } catch (err) {
     console.error('[arion/business/posts]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
 
-// --- POST /arion/business/posts?siteId= ---
+// --- POST /arion/business/posts?siteId= ---  (alias for /business/posts/create — kept for backward compat)
 router.post('/business/posts', async (req, res) => {
-  const tenantId = req.tenant.tenantId;
-  const siteId = req.query.siteId;
-  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
-  try {
-    const pool = await getServicesPool();
-    const site = await getSiteForTenant(pool, tenantId, siteId);
-    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    res.json({ ok: true, post: null });
-  } catch (err) {
-    console.error('[arion/business/posts:create]', err);
-    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
-  }
+  // Forward to the /create handler via direct call so we don't duplicate logic
+  req.url = req.url.replace('/business/posts', '/business/posts/create');
+  router.handle(req, res);
 });
 
 // --- GET /arion/business/services?siteId= ---
