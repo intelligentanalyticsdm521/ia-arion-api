@@ -1610,6 +1610,30 @@ router.get('/seo/audit', async (req, res) => {
       }
     }
 
+    // Top pages by issues — most-actionable pages, weighted by error severity
+    const topPagesByIssues = [...pagesForDetail]
+      .filter((p) => (p.errors + p.warnings + p.notices) > 0)
+      .sort((a, b) => (b.errors * 2 + b.warnings + b.notices * 0.25) - (a.errors * 2 + a.warnings + a.notices * 0.25))
+      .slice(0, 10)
+      .map((p) => ({ id: p.id, url: p.url, errors: p.errors, warnings: p.warnings, notices: p.notices }));
+
+    // Issue Categories — grouped by section for category-level donut
+    const issueCategories = [];
+    if (allIssues.length > 0) {
+      const byCategory = {};
+      for (const iss of allIssues) {
+        const key = iss.category || 'other';
+        if (!byCategory[key]) byCategory[key] = { uid: key, name: iss.categoryName || 'Other', errorsCount: 0, warningsCount: 0, noticesCount: 0 };
+        if (iss.severity === 'error') byCategory[key].errorsCount += iss.count;
+        else if (iss.severity === 'warning') byCategory[key].warningsCount += iss.count;
+        else if (iss.severity === 'notice') byCategory[key].noticesCount += iss.count;
+      }
+      issueCategories.push(...Object.values(byCategory).sort((a, b) =>
+        (b.errorsCount * 2 + b.warningsCount + b.noticesCount * 0.25) -
+        (a.errorsCount * 2 + a.warningsCount + a.noticesCount * 0.25)
+      ));
+    }
+
     res.json({
       connected: true,
       status: 'complete',
@@ -1628,6 +1652,8 @@ router.get('/seo/audit', async (req, res) => {
       topIssues: realTopIssues,
       allIssues,
       pages: pagesForDetail,
+      topPagesByIssues,
+      issueCategories,
       indexability,
       httpStatus,
       domain,
@@ -1639,6 +1665,81 @@ router.get('/seo/audit', async (req, res) => {
     });
   } catch (err) {
     console.error('[arion/seo/audit]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/seo/audit/page?siteId=&pageId= ---
+// Returns FULL per-page audit detail from SE Ranking's
+// /audit/{detailId}/page/{pageId} endpoint. Every field is passthrough so the
+// UI can surface whatever SE Ranking exposes without backend churn per field.
+router.get('/seo/audit/page', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const pageId = String(req.query.pageId || '');
+  if (!siteId || !pageId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId and pageId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.se_ranking_project_id) return res.json({ connected: false, status: 'not_connected' });
+
+    const projectId = site.se_ranking_project_id;
+    const detailId = site.se_ranking_audit_id || projectId;
+
+    // Fetch page + optional issues list in parallel
+    const [pageRaw, issuesRaw] = await Promise.all([
+      seRankingRaw('GET', `/audit/${encodeURIComponent(detailId)}/page/${encodeURIComponent(pageId)}`).catch((e) => ({ ok: false, errorText: e.message })),
+      seRankingRaw('GET', `/audit/${encodeURIComponent(detailId)}/page/${encodeURIComponent(pageId)}/issues`).catch(() => ({ ok: false })),
+    ]);
+
+    const errors = [];
+    let page = null;
+    if (pageRaw.ok && pageRaw.data) {
+      page = pageRaw.data;
+    } else {
+      errors.push(`page fetch failed: HTTP ${pageRaw.status || 'n/a'} ${pageRaw.errorText || ''}`);
+    }
+
+    // Build issues array — from dedicated endpoint if available, else from page_issues on the page object
+    let issues = [];
+    if (issuesRaw.ok && Array.isArray(issuesRaw.data?.items)) {
+      issues = issuesRaw.data.items.map((i) => ({
+        slug: i.slug || i.code || null,
+        name: i.title || i.name || i.slug || 'Issue',
+        severity: String(i.severity || 'warning').toLowerCase(),
+        count: Number(i.count) || 1,
+        description: i.description || null,
+      }));
+    } else if (page?.page_issues && typeof page.page_issues === 'object') {
+      for (const [slug, val] of Object.entries(page.page_issues)) {
+        const v = val && typeof val === 'object' ? val : { value: val };
+        issues.push({
+          slug,
+          name: v.name || slug,
+          severity: String(v.status || v.severity || 'warning').toLowerCase(),
+          count: Number(v.value ?? v.count ?? 1) || 1,
+          description: v.description || null,
+        });
+      }
+    }
+
+    if (!page) {
+      return res.json({ connected: true, status: 'unavailable', page: null, issues: [], errors });
+    }
+
+    res.json({
+      connected: true,
+      status: 'complete',
+      projectId,
+      auditId: site.se_ranking_audit_id || null,
+      pageId,
+      page,   // full passthrough — UI reads any field
+      issues,
+      errors: errors.length ? errors : undefined,
+    });
+  } catch (err) {
+    console.error('[arion/seo/audit/page]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
@@ -2268,14 +2369,299 @@ router.get('/seo/competitors', async (req, res) => {
     }
 
     const competitors = Array.from(byDomain.values());
+
+    // Content Gap: keywords where at least one tracked competitor ranks in
+    // top 10 and we do not. Sourced from /sites/{id}/positions which returns
+    // OUR positions per keyword; for competitor positions we fetch the
+    // competitor-scoped endpoint.
+    // Best-effort: single most-recent snapshot, fail-soft on any upstream error.
+    let contentGap = [];
+    try {
+      const today = new Date();
+      const fromDate = new Date(today.getTime() - 7 * 86400000).toISOString().split('T')[0];
+      const toDate = today.toISOString().split('T')[0];
+      const posRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${fromDate}&date_to=${toDate}`);
+      const ourKeywordPositions = new Map(); // keywordId -> { keyword, searchVolume, ourBestPos }
+
+      if (posRaw.ok && Array.isArray(posRaw.data)) {
+        for (const engineBlock of posRaw.data) {
+          for (const kw of engineBlock.keywords || []) {
+            const kwId = String(kw.keyword_id || kw.id || '');
+            if (!kwId) continue;
+            const latestPos = (kw.positions || [])
+              .map((p) => Number(p.pos || 0))
+              .filter((n) => n > 0)
+              .sort((a, b) => a - b)[0] ?? null;
+            const existing = ourKeywordPositions.get(kwId);
+            if (!existing || (latestPos != null && (existing.ourBestPos == null || latestPos < existing.ourBestPos))) {
+              ourKeywordPositions.set(kwId, {
+                keyword: kw.keyword || existing?.keyword || '',
+                searchVolume: kw.search_volume ?? kw.sv ?? existing?.searchVolume ?? null,
+                ourBestPos: latestPos ?? existing?.ourBestPos ?? null,
+              });
+            }
+          }
+        }
+      }
+
+      // Per-competitor fetch: /sites/{id}/competitors/{competitorId}/positions
+      // (some SE Ranking versions use this path). Falls back silently.
+      const gapByKeyword = new Map();
+      const compFetches = competitors.slice(0, 10).map(async (comp) => {
+        if (!comp.id) return;
+        const compPosRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/competitors/${encodeURIComponent(comp.id)}/positions?date_from=${fromDate}&date_to=${toDate}`)
+          .catch(() => ({ ok: false }));
+        if (!compPosRaw.ok || !Array.isArray(compPosRaw.data)) return;
+        for (const engineBlock of compPosRaw.data) {
+          for (const kw of engineBlock.keywords || []) {
+            const kwId = String(kw.keyword_id || kw.id || '');
+            const latestPos = (kw.positions || [])
+              .map((p) => Number(p.pos || 0))
+              .filter((n) => n > 0)
+              .sort((a, b) => a - b)[0] ?? null;
+            if (!kwId || latestPos == null || latestPos > 10) continue;
+            const us = ourKeywordPositions.get(kwId);
+            const ourPos = us?.ourBestPos ?? null;
+            // Content gap = competitor top-10, us not top-10 (or not ranking)
+            if (ourPos != null && ourPos <= 10) continue;
+            const row = gapByKeyword.get(kwId) || {
+              keywordId: kwId,
+              keyword: kw.keyword || us?.keyword || '',
+              searchVolume: kw.search_volume ?? us?.searchVolume ?? null,
+              ourPosition: ourPos,
+              competitorPositions: [],
+            };
+            if (!row.competitorPositions.find((r) => r.domain === comp.domain)) {
+              row.competitorPositions.push({ domain: comp.domain, position: latestPos });
+            }
+            gapByKeyword.set(kwId, row);
+          }
+        }
+      });
+      await Promise.all(compFetches);
+
+      contentGap = Array.from(gapByKeyword.values())
+        .map((g) => ({ ...g, competitorPositions: g.competitorPositions.sort((a, b) => a.position - b.position) }))
+        .sort((a, b) => {
+          const aMin = a.competitorPositions[0]?.position ?? 99;
+          const bMin = b.competitorPositions[0]?.position ?? 99;
+          return aMin - bMin;
+        })
+        .slice(0, 100);
+    } catch (e) {
+      console.warn('[arion/seo/competitors] content gap fetch failed:', e.message);
+    }
+
     res.json({
       connected: true,
       projectId,
       competitors,
+      contentGap,
       upstreamErrors: upstreamErrors.length ? upstreamErrors : undefined,
     });
   } catch (err) {
     console.error('[arion/seo/competitors]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/seo/ai-search?siteId=&range=30d ---
+// AI Search (AIRT) — aggregates across all LLM engines tracked for the
+// project. Returns per-engine stats + recent prompt rankings + source pages
+// + competitor mentions.
+router.get('/seo/ai-search', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const rangeCode = (req.query.range || '30d').toString().toLowerCase();
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+
+  const AI_ENGINE_META = (baseName) => {
+    const n = String(baseName || '').toLowerCase();
+    if (n === 'chatgpt') return { label: 'ChatGPT', tierRequired: 'growth' };
+    if (n === 'gemini') return { label: 'Gemini', tierRequired: 'growth' };
+    if (n === 'ai_mode' || n === 'aimode') return { label: 'Google AI Mode', tierRequired: 'growth' };
+    if (n === 'ai_overview' || n === 'aioverview') return { label: 'Google AI Overview', tierRequired: 'authority' };
+    if (n === 'perplexity') return { label: 'Perplexity', tierRequired: 'consulting' };
+    return { label: baseName || 'AI Engine', tierRequired: 'authority' };
+  };
+
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.se_ranking_project_id) return res.json({ connected: false, engines: [], aggregate: null });
+
+    const tier = (site.seo_addon_tier || '').toLowerCase();
+    const tierRank = { starter: 0, essentials: 1, growth: 2, authority: 3 }[tier] ?? 0;
+    if (tierRank < 2) {
+      return res.json({
+        connected: true,
+        tierGated: true,
+        tier,
+        message: 'AI Search Results require the Growth or Authority SEO tier.',
+        engines: [],
+        aggregate: { totalMentions: 0, uniquePromptsMentioned: 0, totalPromptsTracked: 0, visibilityScore: 0, topSourcePages: [], competitorMentions: [] },
+      });
+    }
+
+    const projectId = site.se_ranking_project_id;
+
+    // Resolve date range
+    const range = resolveRange(rangeCode);
+    const from = range.current.start;
+    const to = range.current.end;
+    const priorFrom = range.prior.start;
+    const priorTo = range.prior.end;
+
+    // 1) List engines for this project
+    const llmRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/airt/llm`).catch((e) => ({ ok: false, errorText: e.message }));
+    const llms = llmRaw.ok && Array.isArray(llmRaw.data) ? llmRaw.data : [];
+
+    // 2) Per engine: statistics (current + prior) and latest prompts ranking
+    const engines = [];
+    const sourceByUrl = new Map();       // url -> { url, citationCount, engines:Set }
+    const competitorByName = new Map();  // name -> { competitor, count, engines:Set }
+    let totalMentions = 0;
+    let totalPromptsTracked = 0;
+    const uniquePromptIdsMentioned = new Set();
+    let visibilitySum = 0;
+    let visibilityEngineCount = 0;
+
+    await Promise.all(llms.map(async (llm) => {
+      const baseName = String(llm.base_name || '').toLowerCase();
+      const meta = AI_ENGINE_META(baseName);
+      // tier unlock: growth unlocks chatgpt/gemini/ai_mode; authority adds ai_overview
+      const minRank = meta.tierRequired === 'growth' ? 2 : meta.tierRequired === 'authority' ? 3 : 99;
+      const unlocked = tierRank >= minRank;
+
+      const engineId = String(llm.id);
+      const engineEntry = {
+        engineId,
+        baseName,
+        label: meta.label,
+        region: llm.region_name || null,
+        lang: llm.lang_code ? String(llm.lang_code).toUpperCase() : null,
+        unlocked,
+        tierRequired: meta.tierRequired,
+        current: { mentions: 0, avgPosition: null, visibilityScore: 0, promptsCount: 0, linkedCount: 0 },
+        prior: { mentions: 0, avgPosition: null, visibilityScore: 0, promptsCount: 0, linkedCount: 0 },
+        delta: { mentions: 0, visibilityScore: 0, avgPosition: null },
+        recentPrompts: [],
+        upstreamErrors: [],
+      };
+
+      if (!unlocked) {
+        engines.push(engineEntry);
+        return;
+      }
+
+      // Statistics (current period + prior period)
+      const [statRaw, priorStatRaw] = await Promise.all([
+        seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/airt/llm/${encodeURIComponent(engineId)}/statistics?date_from=${from}&date_to=${to}`).catch(() => ({ ok: false })),
+        seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/airt/llm/${encodeURIComponent(engineId)}/statistics?date_from=${priorFrom}&date_to=${priorTo}`).catch(() => ({ ok: false })),
+      ]);
+
+      const readStats = (raw) => {
+        if (!raw.ok || !raw.data) return { mentions: 0, avgPosition: null, visibilityScore: 0, promptsCount: 0, linkedCount: 0 };
+        const d = raw.data;
+        return {
+          mentions: Number(d.mentions_count ?? d.mentioned_count ?? d.mentions ?? 0),
+          avgPosition: d.avg_position != null ? Number(d.avg_position) : d.average_position != null ? Number(d.average_position) : null,
+          visibilityScore: Number(d.visibility_score ?? d.visibility ?? 0),
+          promptsCount: Number(d.prompts_count ?? d.total_prompts ?? 0),
+          linkedCount: Number(d.linked_count ?? d.link_mentions ?? d.with_link ?? 0),
+        };
+      };
+
+      engineEntry.current = readStats(statRaw);
+      engineEntry.prior = readStats(priorStatRaw);
+      engineEntry.delta = {
+        mentions: engineEntry.current.mentions - engineEntry.prior.mentions,
+        visibilityScore: Math.round((engineEntry.current.visibilityScore - engineEntry.prior.visibilityScore) * 10) / 10,
+        avgPosition: engineEntry.current.avgPosition != null && engineEntry.prior.avgPosition != null
+          ? Math.round((engineEntry.prior.avgPosition - engineEntry.current.avgPosition) * 10) / 10
+          : null,
+      };
+
+      totalMentions += engineEntry.current.mentions;
+      if (engineEntry.current.promptsCount > totalPromptsTracked) totalPromptsTracked = engineEntry.current.promptsCount;
+      if (engineEntry.current.visibilityScore > 0) {
+        visibilitySum += engineEntry.current.visibilityScore;
+        visibilityEngineCount++;
+      }
+
+      // Prompts: try the most recent date in range first; fall back to range end
+      const promptsDate = to;
+      const promptsRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/airt/llm/${encodeURIComponent(engineId)}/prompts/rankings?date=${promptsDate}`).catch(() => ({ ok: false }));
+      if (promptsRaw.ok && Array.isArray(promptsRaw.data)) {
+        for (const p of promptsRaw.data) {
+          const promptId = String(p.prompt_id || p.id || '');
+          const mentioned = !!(p.mentioned || p.is_mentioned || (p.position != null && Number(p.position) > 0));
+          const citationUrls = Array.isArray(p.links) ? p.links.map((l) => String(l.url || l)).filter(Boolean)
+                              : Array.isArray(p.citations) ? p.citations.map((c) => String(c.url || c)).filter(Boolean)
+                              : [];
+          const competitors = Array.isArray(p.competitors) ? p.competitors : Array.isArray(p.mentions) ? p.mentions : [];
+          engineEntry.recentPrompts.push({
+            promptId,
+            prompt: p.prompt || p.query || '',
+            position: p.position ?? null,
+            mentioned,
+            citationUrls,
+            competitors: competitors.map((c) => String(c.name || c.domain || c)).filter(Boolean),
+            date: p.date || promptsDate,
+          });
+          if (mentioned && promptId) uniquePromptIdsMentioned.add(`${engineId}:${promptId}`);
+          for (const url of citationUrls) {
+            const k = url.toLowerCase().replace(/\/$/, '');
+            const ex = sourceByUrl.get(k) || { url, citationCount: 0, engines: new Set() };
+            ex.citationCount++;
+            ex.engines.add(meta.label);
+            sourceByUrl.set(k, ex);
+          }
+          for (const comp of (p.competitors || [])) {
+            const name = String(comp.name || comp.domain || comp || '').trim();
+            if (!name) continue;
+            const ex = competitorByName.get(name) || { competitor: name, count: 0, engines: new Set() };
+            ex.count++;
+            ex.engines.add(meta.label);
+            competitorByName.set(name, ex);
+          }
+        }
+      } else if (!promptsRaw.ok) {
+        engineEntry.upstreamErrors.push(`prompts/rankings: HTTP ${promptsRaw.status || 'n/a'}`);
+      }
+      engineEntry.recentPrompts.sort((a, b) => (b.mentioned ? 1 : 0) - (a.mentioned ? 1 : 0));
+
+      engines.push(engineEntry);
+    }));
+
+    const topSourcePages = Array.from(sourceByUrl.values())
+      .map((s) => ({ url: s.url, citationCount: s.citationCount, engines: Array.from(s.engines) }))
+      .sort((a, b) => b.citationCount - a.citationCount)
+      .slice(0, 25);
+
+    const competitorMentions = Array.from(competitorByName.values())
+      .map((c) => ({ competitor: c.competitor, count: c.count, engines: Array.from(c.engines) }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 25);
+
+    res.json({
+      connected: true,
+      tier,
+      tierGated: false,
+      range: { code: rangeCode, current: range.current, prior: range.prior, days: range.days },
+      engines,
+      aggregate: {
+        totalMentions,
+        uniquePromptsMentioned: uniquePromptIdsMentioned.size,
+        totalPromptsTracked,
+        visibilityScore: visibilityEngineCount > 0 ? Math.round((visibilitySum / visibilityEngineCount) * 10) / 10 : 0,
+        topSourcePages,
+        competitorMentions,
+      },
+    });
+  } catch (err) {
+    console.error('[arion/seo/ai-search]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
