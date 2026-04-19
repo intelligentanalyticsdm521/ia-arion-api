@@ -1291,10 +1291,11 @@ router.get('/seo/audit', async (req, res) => {
       { key: 'quarterly', date: new Date(today.getTime() - 90 * 86400000).toISOString().split('T')[0] },
     ];
     const historySnapshots = {};
-    if (auditId) {
+    const histId = auditId || projectId;
+    if (histId) {
       await Promise.all(dates.map(async ({ key, date }) => {
         try {
-          const histRaw = await seRankingRaw('GET', `/audit/${encodeURIComponent(auditId)}/history?date=${date}`);
+          const histRaw = await seRankingRaw('GET', `/audit/${encodeURIComponent(histId)}/history?date=${date}`);
           if (histRaw.ok && histRaw.data && !Array.isArray(histRaw.data)) {
             const d = histRaw.data;
             historySnapshots[key] = {
@@ -1318,10 +1319,11 @@ router.get('/seo/audit', async (req, res) => {
     // Top issues — fetch and surface the top 5 by count. Best-effort:
     // /audit/{id}/issues may time out on large projects, so fail soft.
     let topIssues = [];
-    if (auditId) {
+    const issuesId = auditId || projectId;
+    if (issuesId) {
       try {
         const issuesRaw = await Promise.race([
-          seRankingRaw('GET', `/audit/${encodeURIComponent(auditId)}/issues`),
+          seRankingRaw('GET', `/audit/${encodeURIComponent(issuesId)}/issues`),
           new Promise((resolve) => setTimeout(() => resolve({ ok: false, timedOut: true }), 8000)),
         ]);
         if (issuesRaw.ok && Array.isArray(issuesRaw.data?.items)) {
@@ -1355,11 +1357,16 @@ router.get('/seo/audit', async (req, res) => {
     let allIssues = [];           // full flat issue list for Issue Report tab
     let pagesForDetail = [];      // trimmed pages list for Crawled Pages / Found * tabs
 
-    if (auditId) {
+    // Use auditId if present, otherwise fall back to projectId. SE Ranking's
+    // v4 /audit endpoints are keyed by the same id that /audit/{id} accepts
+    // (the project id), so the fallback is safe when the project hasn't been
+    // assigned a separate audit id yet.
+    const detailId = auditId || projectId;
+    if (detailId) {
       try {
         const [reportRaw, pagesRaw] = await Promise.all([
-          seRankingRaw('GET', `/audit/${encodeURIComponent(auditId)}/report`),
-          seRankingRaw('GET', `/audit/${encodeURIComponent(auditId)}/pages`),
+          seRankingRaw('GET', `/audit/${encodeURIComponent(detailId)}/report`),
+          seRankingRaw('GET', `/audit/${encodeURIComponent(detailId)}/pages`),
         ]);
         const report = reportRaw.ok ? reportRaw.data : null;
         const pagesData = pagesRaw.ok ? pagesRaw.data : null;
@@ -2236,16 +2243,23 @@ router.get('/seo/competitors', async (req, res) => {
         const url = String(c.url || c.name || '').trim();
         const domainKey = url.toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
         if (!domainKey) continue;
+        // SE Ranking's /competitors/site/{id} returns DT, visibility, and
+        // keyword-count signals. Field names vary across API versions — try
+        // the most likely keys and fall back to null.
+        const visibilityScore = c.visibility_score ?? c.visibility ?? c.visib ?? null;
+        const keywordsCount = c.keywords_count ?? c.keywords ?? c.kw_count ?? c.total_keywords ?? null;
+        const trafficSum = c.traffic_sum ?? c.traffic ?? c.organic_traffic ?? null;
         byDomain.set(domainKey, {
           id: c.id ?? null,
           domain: domainKey,
           competitor: url || domainKey,
           url: url || null,
-          engines: [],                         // not tier-scoped by engine in this endpoint
-          visibility: null,                    // only returned by positions endpoint
-          visibility_score: null,
-          keywords: null,
-          overlap: null,
+          engines: [],
+          visibility: typeof visibilityScore === 'number' ? visibilityScore : null,
+          visibility_score: typeof visibilityScore === 'number' ? visibilityScore : null,
+          keywords: typeof keywordsCount === 'number' ? keywordsCount : null,
+          traffic: typeof trafficSum === 'number' ? trafficSum : null,
+          overlap: c.overlap ?? null,
           domainTrust: typeof c.domain_trust === 'number' ? c.domain_trust : null,
           added_at: c.added_at ?? c.created_at ?? null,
           raw: c,
@@ -2257,7 +2271,6 @@ router.get('/seo/competitors', async (req, res) => {
     res.json({
       connected: true,
       projectId,
-      engineCount: engineIds.length,
       competitors,
       upstreamErrors: upstreamErrors.length ? upstreamErrors : undefined,
     });
