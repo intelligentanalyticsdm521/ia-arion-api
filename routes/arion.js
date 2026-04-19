@@ -1182,6 +1182,17 @@ router.get('/seo/audit', async (req, res) => {
     auditRaw = await seRankingRaw('GET', `/audit/${encodeURIComponent(projectId)}`);
     if (auditRaw.ok) audit = auditRaw.data;
 
+    // Fetch /audit/list in parallel so we can extract the REAL SE Ranking
+    // health score (stats.score) — the /audit/{id} overview above does NOT
+    // include the score field. List response includes stats.score + prev_stats
+    // for built-in period-over-period deltas. Confirmed working 2026-04-20.
+    const auditListRaw = await seRankingRaw('GET', '/audit/list').catch(() => null);
+    let listItem = null;
+    if (auditListRaw?.ok && Array.isArray(auditListRaw.data?.items)) {
+      listItem = auditListRaw.data.items.find((it) => String(it.id) === String(auditId))
+        || auditListRaw.data.items.find((it) => String(it.site_id) === String(projectId));
+    }
+
     // No audit on file, stored id invalid, or force=true — start a new one.
     if (!audit) {
       const started = await startSiteAudit(projectId, tenantId);
@@ -1228,55 +1239,104 @@ router.get('/seo/audit', async (req, res) => {
     const notices = Number(audit.total_notices ?? 0);
     const passed = Number(audit.total_passed ?? 0);
     const pagesCrawled = Number(audit.total_pages ?? 0);
-    const issues = { errors, warnings, notices, passed };
+    const issues = { errors, warnings, notices, passed, total: errors + warnings + notices };
 
-    // Health score resolution — PREFER SE Ranking's own score. The /audit/{projectId}
-    // overview may or may not include a score field depending on API version. If it
-    // doesn't, fall back to the deeper /site-audit/audits/{auditId} summary which
-    // consistently returns score_percent. Only compute our own severity-weighted
-    // approximation if SE Ranking supplies no score at all.
-    const candidateScoreFields = ['score_percent', 'audit_score', 'health_score', 'overall_score', 'score', 'audit_score_percent'];
-    const readScore = (obj) => {
-      if (!obj || typeof obj !== 'object') return null;
-      for (const f of candidateScoreFields) {
-        const v = obj[f];
-        if (typeof v === 'number' && Number.isFinite(v)) return Math.round(v);
-        if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return Math.round(Number(v));
-      }
-      return null;
-    };
+    // Health score — prefer the real score from /audit/list. Fall back to our
+    // severity-weighted approximation only if the list call failed.
+    let healthScore = null;
+    let healthScoreSource = null;
+    let prevStats = null;
 
-    let healthScore = readScore(audit);
-    let healthScoreSource = healthScore != null ? 'se_ranking_audit_overview' : null;
-    let auditDetailRaw = null;
-
-    if (healthScore == null && auditId) {
-      // Try the fuller summary endpoint — SE Ranking's own UI score is sourced here.
-      auditDetailRaw = await seRankingRaw('GET', `/site-audit/audits/${encodeURIComponent(auditId)}`).catch(() => null);
-      if (auditDetailRaw && auditDetailRaw.ok) {
-        const d = auditDetailRaw.data || {};
-        const detailScore = readScore(d);
-        if (detailScore != null) {
-          healthScore = detailScore;
-          healthScoreSource = 'se_ranking_audit_detail';
-        }
-      }
-    }
-
-    if (healthScore == null) {
-      // Severity-weighted fallback (NOT a pass ratio). Errors count ~10× more than
-      // warnings in SE Ranking's own scoring. We normalize against total checks
-      // (errors + warnings + notices + passed), not against pages, because the
-      // raw /audit overview aggregates per-check not per-page.
+    if (listItem?.stats && typeof listItem.stats.score === 'number') {
+      healthScore = Math.round(listItem.stats.score);
+      healthScoreSource = 'se_ranking_official';
+      prevStats = listItem.prev_stats ?? null;
+    } else {
+      // Fallback: severity-weighted approximation
       const totalChecks = errors + warnings + notices + passed;
       if (totalChecks > 0) {
         const weightedDeduction = (errors * 10 + warnings * 2 + notices * 0.5);
-        const maxDeduction = totalChecks * 10; // all checks were errors → 0
+        const maxDeduction = totalChecks * 10;
         healthScore = Math.max(0, Math.min(100, Math.round((1 - weightedDeduction / maxDeduction) * 100)));
       } else {
         healthScore = 0;
       }
-      healthScoreSource = 'ia_weighted_approximation';
+      healthScoreSource = 'ia_weighted_fallback';
+    }
+
+    // Page health ratio — total pages vs pages with issues (errors OR warnings).
+    // Approximate: if we don't have per-page breakdown yet, estimate from
+    // error+warning count capped at total pages.
+    const pagesWithIssues = Math.min(pagesCrawled, errors + warnings);
+    const pagesHealthy = Math.max(0, pagesCrawled - pagesWithIssues);
+
+    // Delta values from prev_stats (populated by SE Ranking after 2+ audits)
+    const deltas = prevStats ? {
+      healthScore: (listItem.stats?.score ?? 0) - (prevStats.score ?? 0),
+      errors: (listItem.stats?.errors ?? 0) - (prevStats.errors ?? 0),
+      warnings: (listItem.stats?.warnings ?? 0) - (prevStats.warnings ?? 0),
+      notices: (listItem.stats?.notices ?? 0) - (prevStats.notices ?? 0),
+      crawled: (listItem.stats?.crawled ?? 0) - (prevStats.crawled ?? 0),
+    } : null;
+
+    // Historical snapshots — call /audit/{id}/history for comparison dates.
+    // Tier-gated by the caller (UI decides which dates to show based on tier).
+    // We fetch up to 4 snapshots (current / 7d / 30d / 90d ago) and let the
+    // UI hide the ones outside the user's tier.
+    const today = new Date();
+    const dates = [
+      { key: 'current', date: today.toISOString().split('T')[0] },
+      { key: 'weekly',  date: new Date(today.getTime() - 7  * 86400000).toISOString().split('T')[0] },
+      { key: 'monthly', date: new Date(today.getTime() - 30 * 86400000).toISOString().split('T')[0] },
+      { key: 'quarterly', date: new Date(today.getTime() - 90 * 86400000).toISOString().split('T')[0] },
+    ];
+    const historySnapshots = {};
+    if (auditId) {
+      await Promise.all(dates.map(async ({ key, date }) => {
+        try {
+          const histRaw = await seRankingRaw('GET', `/audit/${encodeURIComponent(auditId)}/history?date=${date}`);
+          if (histRaw.ok && histRaw.data && !Array.isArray(histRaw.data)) {
+            const d = histRaw.data;
+            historySnapshots[key] = {
+              date,
+              auditTime: d.audit_time || null,
+              pagesCrawled: d.total_pages ?? null,
+              errors: d.total_errors ?? null,
+              warnings: d.total_warnings ?? null,
+              notices: d.total_notices ?? null,
+              passed: d.total_passed ?? null,
+              // pages_data has per-issue counts we'll expose later
+              issueCounts: d.pages_data ?? null,
+            };
+          }
+        } catch (e) {
+          // Missing snapshots are OK — UI handles null gracefully
+        }
+      }));
+    }
+
+    // Top issues — fetch and surface the top 5 by count. Best-effort:
+    // /audit/{id}/issues may time out on large projects, so fail soft.
+    let topIssues = [];
+    if (auditId) {
+      try {
+        const issuesRaw = await Promise.race([
+          seRankingRaw('GET', `/audit/${encodeURIComponent(auditId)}/issues`),
+          new Promise((resolve) => setTimeout(() => resolve({ ok: false, timedOut: true }), 8000)),
+        ]);
+        if (issuesRaw.ok && Array.isArray(issuesRaw.data?.items)) {
+          topIssues = issuesRaw.data.items
+            .filter((i) => Number(i.count) > 0)
+            .sort((a, b) => (Number(b.count) || 0) - (Number(a.count) || 0))
+            .slice(0, 5)
+            .map((i) => ({
+              name: i.title || i.name || i.slug || 'Issue',
+              severity: (i.severity || 'warning').toLowerCase(),
+              count: Number(i.count) || 0,
+              slug: i.slug || null,
+            }));
+        }
+      } catch (e) { /* non-fatal */ }
     }
 
     res.json({
@@ -1287,9 +1347,20 @@ router.get('/seo/audit', async (req, res) => {
       healthScore,
       healthScoreSource,
       pagesCrawled,
+      pagesWithIssues,
+      pagesHealthy,
       lastAuditDate: audit.audit_time || audit.start_time || null,
+      nextScheduledDate: null,  // TODO: derive from audit settings
       issues,
-      issuesByCategory: [], // populated by /audit/{id}/issues in Phase 4 Site Audit build
+      deltas,
+      history: historySnapshots,
+      topIssues,
+      // Placeholder sections for V2 widgets
+      indexability: null,      // TODO: parse /audit/{id}/report
+      httpStatus: null,        // TODO: aggregate from /audit/{id}/pages
+      domain: null,            // TODO: extract from history snapshots' domain_data
+      coreWebVitals: null,     // TODO: from /audit/{id}/report
+      useCases: null,          // TODO: multiple filtered /audit/{id}/pages/issues calls
     });
   } catch (err) {
     console.error('[arion/seo/audit]', err);
