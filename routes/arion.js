@@ -1758,67 +1758,36 @@ router.get('/seo/competitors', async (req, res) => {
 
     const projectId = site.se_ranking_project_id;
 
-    // Pull positions WITHOUT a date filter so we always get the full engine
-    // list for the project — not just engines that had results in some
-    // arbitrary range.
-    const positionsRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions`);
-    const engineBlocks = Array.isArray(positionsRaw.data) ? positionsRaw.data : [];
-    const engineIds = Array.from(new Set(engineBlocks.map((b) => String(b.site_engine_id)).filter(Boolean)));
-
+    // Correct SE Ranking Project API path (confirmed via docs + browser probe
+    // 2026-04-19): /competitors/site/{site_id} returns the full tracked
+    // competitor list for the project, engine-independent. The previously
+    // used /sites/{id}/competitors?se_id=X pattern does not exist in the
+    // current v4 API — it returns 400 on all shapes.
     const upstreamErrors = [];
     const byDomain = new Map();
 
-    // Fetch competitors for each engine in parallel and merge.
-    const results = await Promise.all(
-      engineIds.map((seId) =>
-        seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/competitors?se_id=${encodeURIComponent(seId)}`)
-          .then((r) => ({ seId, r }))
-          .catch((err) => ({ seId, r: { ok: false, status: 0, errorText: err.message } }))
-      )
-    );
-
-    for (const { seId, r } of results) {
-      if (!r.ok) {
-        upstreamErrors.push({ seId, status: r.status, errorText: r.errorText || null });
-        continue;
-      }
-      if (!Array.isArray(r.data)) continue;
-      for (const c of r.data) {
-        const domainKey = String(c.url || c.domain || c.competitor || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const listRaw = await seRankingRaw('GET', `/competitors/site/${encodeURIComponent(projectId)}`);
+    if (!listRaw.ok) {
+      upstreamErrors.push({ endpoint: `/competitors/site/${projectId}`, status: listRaw.status, errorText: listRaw.errorText || null });
+    } else if (Array.isArray(listRaw.data)) {
+      for (const c of listRaw.data) {
+        const url = String(c.url || c.name || '').trim();
+        const domainKey = url.toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
         if (!domainKey) continue;
-        const existing = byDomain.get(domainKey);
-        // Merge per-engine rows so the returned record carries the best
-        // (most-populated) visibility/keyword-count numbers across engines.
-        const merged = {
-          id: c.id ?? existing?.id ?? null,
+        byDomain.set(domainKey, {
+          id: c.id ?? null,
           domain: domainKey,
-          competitor: c.url || c.domain || c.competitor || domainKey,
-          url: c.url || existing?.url || null,
-          engines: [...new Set([...(existing?.engines || []), seId])],
-          visibility: typeof c.visibility === 'number' ? c.visibility : (existing?.visibility ?? null),
-          visibility_score: typeof c.visibility_score === 'number' ? c.visibility_score : (existing?.visibility_score ?? null),
-          keywords: c.keywords ?? c.keywords_count ?? c.total_keywords ?? existing?.keywords ?? null,
-          overlap: c.overlap ?? c.overlap_percent ?? c.keyword_overlap ?? existing?.overlap ?? null,
-          added_at: c.added_at ?? c.created_at ?? existing?.added_at ?? null,
+          competitor: url || domainKey,
+          url: url || null,
+          engines: [],                         // not tier-scoped by engine in this endpoint
+          visibility: null,                    // only returned by positions endpoint
+          visibility_score: null,
+          keywords: null,
+          overlap: null,
+          domainTrust: typeof c.domain_trust === 'number' ? c.domain_trust : null,
+          added_at: c.added_at ?? c.created_at ?? null,
           raw: c,
-        };
-        byDomain.set(domainKey, merged);
-      }
-    }
-
-    // Legacy fallback — if positions returned no engines (fresh project with
-    // no keyword history), we still try a no-engine GET which some SE Ranking
-    // accounts accept.
-    if (engineIds.length === 0) {
-      const bareRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/competitors`);
-      if (bareRaw.ok && Array.isArray(bareRaw.data)) {
-        for (const c of bareRaw.data) {
-          const domainKey = String(c.url || c.domain || c.competitor || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
-          if (!domainKey || byDomain.has(domainKey)) continue;
-          byDomain.set(domainKey, { id: c.id ?? null, domain: domainKey, competitor: c.url || c.domain || domainKey, url: c.url || null, engines: [], visibility: null, keywords: null, overlap: null, added_at: c.added_at ?? null, raw: c });
-        }
-      } else if (!bareRaw.ok) {
-        upstreamErrors.push({ seId: 'bare', status: bareRaw.status, errorText: bareRaw.errorText || null });
+        });
       }
     }
 
