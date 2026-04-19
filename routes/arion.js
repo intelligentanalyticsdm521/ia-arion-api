@@ -950,6 +950,59 @@ router.get('/seo/overview', async (req, res) => {
       else standardCards.push(card);
     }
 
+    // AI engines live in a SEPARATE SE Ranking subsystem (AI Result Tracker)
+    // and are NOT returned by /sites/{id}/positions or /sites/{id}/search-engines.
+    // Fetch /sites/{id}/airt/llm to populate AI cards with real engine
+    // metadata. Per-LLM statistics (mentions / link presence) require
+    // /airt/llm/{id}/statistics — wired in V2.
+    try {
+      const airtRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/airt/llm`);
+      if (airtRaw.ok && Array.isArray(airtRaw.data)) {
+        for (const llm of airtRaw.data) {
+          const baseName = String(llm.base_name || '').toLowerCase();
+          const aiLabel = baseName === 'chatgpt' ? 'ChatGPT'
+                        : baseName === 'gemini' ? 'Gemini'
+                        : baseName === 'ai_mode' || baseName === 'aimode' ? 'AI Mode'
+                        : baseName === 'perplexity' ? 'Perplexity'
+                        : baseName === 'ai_overview' || baseName === 'aioverview' ? 'AI Overview'
+                        : llm.base_name || `AI ${llm.id}`;
+          const region = llm.region_name || null;
+          const lang = llm.lang_code ? String(llm.lang_code).toUpperCase() : null;
+          const longParts = [aiLabel];
+          if (region) longParts.push(region);
+          if (lang) longParts.push(lang);
+          aiCards.push({
+            engineId: String(llm.id),
+            name: aiLabel,
+            label: aiLabel,
+            longLabel: longParts.join(' · '),
+            type: baseName,
+            device: 'ai',
+            region,
+            lang,
+            // Placeholders until /airt/llm/{id}/statistics is wired
+            current: {
+              avgPosition: null,
+              visibilityScore: 0,
+              top10Count: null,
+              trafficForecast: 0,
+              totalKeywords: null,
+              rankingKeywords: null,
+              movers: { jumped: 0, dropped: 0, unchanged: 0 },
+              buckets: { top1: 0, top2_3: 0, top4_5: 0, top6_10: 0, top11_30: 0, top31_100: 0, notRanking: 0 },
+            },
+            prior: { avgPosition: null, visibilityScore: 0, top10Count: null, trafficForecast: 0, totalKeywords: null, rankingKeywords: null, movers: { jumped: 0, dropped: 0, unchanged: 0 }, buckets: { top1: 0, top2_3: 0, top4_5: 0, top6_10: 0, top11_30: 0, top31_100: 0, notRanking: 0 } },
+            avgPositionDelta: null,
+            visibilityDelta: 0,
+            top10Delta: 0,
+            placeholder: true,  // UI flag — indicates stats haven't been wired yet
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('[arion/seo/overview] AI engine fetch failed:', e.message);
+    }
+
     // Keyword movers (jumped / dropped) — using position change > 0 means
     // improved (lower number).
     const sortedByChange = [...curKeywords].sort((a, b) => Number(b.positionChange || 0) - Number(a.positionChange || 0));
