@@ -846,6 +846,14 @@ router.get('/seo/rankings', async (req, res) => {
 
     const delta = (cur, prev) => (cur == null || prev == null ? null : Math.round((cur - prev) * 10) / 10);
 
+    // Daily distribution series for the Rankings-page "Distribution of top
+    // positions" chart. Respects the engine filter so the chart shows only
+    // the selected engine's trend when user toggles.
+    const filteredCurBlocks = effectiveFilter
+      ? curBlocks.filter((b) => effectiveFilter.has(String(b.site_engine_id)))
+      : curBlocks;
+    const distributionSeries = buildDistributionSeries(filteredCurBlocks, range.current.start, range.current.end);
+
     res.json({
       connected: true,
       projectId,
@@ -869,6 +877,7 @@ router.get('/seo/rankings', async (req, res) => {
         },
       },
       keywords,
+      distributionSeries,
       upstreamError,
     });
   } catch (err) {
