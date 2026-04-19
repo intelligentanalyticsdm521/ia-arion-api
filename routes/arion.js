@@ -1352,6 +1352,8 @@ router.get('/seo/audit', async (req, res) => {
     let foundResources = null;
     let foundLinks = null;
     let realTopIssues = topIssues;  // falls back to what we already had
+    let allIssues = [];           // full flat issue list for Issue Report tab
+    let pagesForDetail = [];      // trimmed pages list for Crawled Pages / Found * tabs
 
     if (auditId) {
       try {
@@ -1365,7 +1367,6 @@ router.get('/seo/audit', async (req, res) => {
 
         // ── Build flat issue list from report.sections ───────────────────
         if (report?.sections) {
-          const allIssues = [];
           for (const sec of report.sections) {
             for (const code of Object.keys(sec.props || {})) {
               const p = sec.props[code];
@@ -1549,6 +1550,47 @@ router.get('/seo/audit', async (req, res) => {
             pagesWithIssues = pagesWithAnyIssue;
             pagesHealthy = Math.max(0, pagesArr.length - pagesWithAnyIssue);
           }
+
+          // ── Trim page list for modal tabs (Crawled Pages / Found * / Issues)
+          // Keep the fields the UI needs, drop heavy ones (content_hash, title text
+          // snippets already in `title`, etc). Cap at 500 pages — most projects are
+          // under that; larger projects will need pagination in a later pass.
+          pagesForDetail = pagesArr.slice(0, 500).map((p) => ({
+            id: p.id,
+            url: p.url,
+            status: Number(p.status) || 0,
+            depth: Number(p.depth) || 0,
+            loadMs: Number(p.load_ms) || 0,
+            size: Number(p.size) || 0,
+            title: p.title || null,
+            titleLen: Number(p.title_len) || 0,
+            description: p.description || null,
+            descriptionLen: Number(p.description_len) || 0,
+            h1: p.h1 || null,
+            wordsCount: Number(p.words_count) || 0,
+            indexable: String(p.indexable) === '1',
+            noindex: Number(p.noindex) === 1,
+            blockedRobots: Number(p.blocked_robots) === 1,
+            canonical: p.canonical_url || null,
+            // Issue counts per page
+            errors: Number(p.errors) || 0,
+            warnings: Number(p.warnings) || 0,
+            notices: Number(p.notices) || 0,
+            // Resource counts
+            imgCount: Number(p.img) || 0,
+            cssSize: Number(p.css_size) || 0,
+            jsSize: Number(p.js_size) || 0,
+            imgSize: Number(p.img_size) || 0,
+            // Link counts
+            totalLinks: Number(p.total_links) || 0,
+            outlinksInternal: Number(p.outlinks_internal) || 0,
+            outlinksExternal: Number(p.outlinks_external) || 0,
+            inlinks: Number(p.inlinks) || 0,
+            inlinksFollow: Number(p.inlinks_follow) || 0,
+            inlinksNofollow: Number(p.inlinks_nofollow) || 0,
+            redirectCount: Number(p.redirect_count) || 0,
+            redirectUrl: p.redirect_url || null,
+          }));
         }
 
         // Use report's score_percent if available (matches /audit/list)
@@ -1577,6 +1619,8 @@ router.get('/seo/audit', async (req, res) => {
       deltas,
       history: historySnapshots,
       topIssues: realTopIssues,
+      allIssues,
+      pages: pagesForDetail,
       indexability,
       httpStatus,
       domain,
