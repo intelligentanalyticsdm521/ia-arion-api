@@ -680,43 +680,97 @@ router.post('/seo/project/link', async (req, res) => {
 const ENGINE_META_CACHE = new Map();
 const ENGINE_META_TTL_MS = 6 * 60 * 60 * 1000;
 
+// Global catalog cache — /system/search-engines returns 4,000+ entries, rarely
+// changes. Fetch once per hour per process.
+let SYSTEM_ENGINE_CATALOG = null;
+let SYSTEM_ENGINE_CATALOG_TS = 0;
+const SYSTEM_ENGINE_CATALOG_TTL_MS = 60 * 60 * 1000;
+
+async function getSystemEngineCatalog() {
+  if (SYSTEM_ENGINE_CATALOG && Date.now() - SYSTEM_ENGINE_CATALOG_TS < SYSTEM_ENGINE_CATALOG_TTL_MS) {
+    return SYSTEM_ENGINE_CATALOG;
+  }
+  const r = await seRankingRaw('GET', '/system/search-engines');
+  const catalog = {};
+  if (r.ok && Array.isArray(r.data)) {
+    for (const e of r.data) catalog[String(e.id)] = e; // { id, name, region_id, type }
+  }
+  SYSTEM_ENGINE_CATALOG = catalog;
+  SYSTEM_ENGINE_CATALOG_TS = Date.now();
+  return catalog;
+}
+
 async function loadEngineMetaForProject(projectId, site_engine_ids) {
   const cached = ENGINE_META_CACHE.get(String(projectId));
   if (cached && Date.now() - cached.ts < ENGINE_META_TTL_MS) return cached.map;
 
-  // Diagnostic 2026-04-18 confirmed SE Ranking has NO public API path that
-  // resolves site_engine_id (e.g. 46877) to {brand, region, city, device}.
-  // That mapping lives only behind SE Ranking's web UI. Until onboarding
-  // provides an admin-entered label map, we fall back to canonical labeling:
-  // assume the project tracks Google + optional Bing across Desktop + Mobile
-  // in a deterministic order, and label the engines generically. This is the
-  // same assumption the tier-matrix was sold on (Authority = 4 engines:
-  // Google+Bing × Desktop+Mobile).
-  const ids = (site_engine_ids || []).map(String);
+  // Real metadata via two SE Ranking endpoints:
+  //   /sites/{projectId}/search-engines  → per-project engines with
+  //       { site_engine_id, search_engine_id, region_name, lang_code }
+  //   /system/search-engines             → global catalog with
+  //       { id, name, region_id, type }  where type ∈ google, google_mobile, bing, ...
+  // Join produces proper labels like "Google USA · Des Moines, Iowa · EN".
+  const [projectEnginesRaw, catalog] = await Promise.all([
+    seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/search-engines`),
+    getSystemEngineCatalog(),
+  ]);
+
+  const projectEngines = projectEnginesRaw.ok && Array.isArray(projectEnginesRaw.data)
+    ? projectEnginesRaw.data
+    : [];
+
   const map = {};
-  const canonicalLabels = [
-    { name: 'Google', device: 'desktop', label: 'Google · Desktop' },
-    { name: 'Google', device: 'mobile', label: 'Google · Mobile' },
-    { name: 'Bing', device: 'desktop', label: 'Bing · Desktop' },
-    { name: 'Bing', device: 'mobile', label: 'Bing · Mobile' },
-  ];
-  // IDs arrive from /positions in SE Ranking's configured order; we assume the
-  // onboarding wizard adds Google first (Desktop then Mobile), Bing second.
-  // If the project has fewer than 4 engines (lower tiers), we fill in the
-  // most likely subset (e.g. Starter = 2 = Google Desktop + Mobile).
-  ids.forEach((id, i) => {
-    const canonical = canonicalLabels[i] || null;
-    map[id] = {
-      id,
-      name: canonical?.name || null,
-      region: null,
-      city: null,
-      device: canonical?.device || null,
-      lang: null,
-      label: canonical?.label || `Engine ${id}`,
-      canonical: Boolean(canonical),   // flag so UI can show "confirm in onboarding" tooltip
+  for (const pe of projectEngines) {
+    const siteEngineId = String(pe.site_engine_id);
+    const catEntry = catalog[String(pe.search_engine_id)] || null;
+    const catName = catEntry?.name || null;        // e.g. "Google USA", "Google Mobile USA", "Bing USA (English)"
+    const catType = catEntry?.type || null;        // e.g. "google", "google_mobile", "bing", "chatgpt"
+    const region = pe.region_name || null;          // e.g. "Des Moines, Iowa, United States"
+    const lang = pe.lang_code ? pe.lang_code.toUpperCase() : null;
+
+    // Infer brand + device from catalog `type`. Covers standard engines AND
+    // AI engines (chatgpt, gemini, ai_overview, ai_mode, perplexity) without
+    // special-casing — the type field is the source of truth.
+    const isAi = ['chatgpt', 'gemini', 'perplexity', 'ai_overview', 'ai_mode', 'aiMode', 'aimode', 'claude'].includes(catType);
+    const isMobile = catType && catType.includes('mobile');
+    const brand = catType === 'google' || catType === 'google_mobile' ? 'Google'
+               : catType === 'bing' || catType === 'bing_mobile' ? 'Bing'
+               : isAi ? (catName || catType)
+               : (catName || catType || `Engine ${siteEngineId}`);
+
+    // Short label for hero cards: "Google Desktop", "Google Mobile", "Bing",
+    // "ChatGPT", "Gemini", etc.
+    const shortLabel = brand === 'Google' ? `Google ${isMobile ? 'Mobile' : 'Desktop'}`
+                     : brand === 'Bing' ? 'Bing'
+                     : brand;
+
+    // Long label for tooltips / detail views: brand + region + lang
+    const parts = [catName || brand];
+    if (region) parts.push(region);
+    if (lang) parts.push(lang);
+    const longLabel = parts.filter(Boolean).join(' · ');
+
+    map[siteEngineId] = {
+      id: siteEngineId,
+      name: brand,
+      catalogName: catName,
+      type: catType,
+      device: isMobile ? 'mobile' : (isAi ? 'ai' : 'desktop'),
+      region,
+      lang,
+      isAi,
+      label: shortLabel,
+      longLabel,
+      canonical: false,  // real data from SE Ranking, not a guess
     };
-  });
+  }
+
+  // Fallback for any engine id in site_engine_ids but missing from
+  // /sites/{id}/search-engines response (shouldn't happen but guard anyway).
+  for (const id of (site_engine_ids || []).map(String)) {
+    if (!map[id]) map[id] = { id, name: null, label: `Engine ${id}`, longLabel: `Engine ${id}`, canonical: true };
+  }
+
   ENGINE_META_CACHE.set(String(projectId), { ts: Date.now(), map });
   return map;
 }
@@ -858,30 +912,17 @@ router.get('/seo/overview', async (req, res) => {
     const stats = computeAggregateStats(curKeywords);
     const priorStats = computeAggregateStats(priorKeywords);
 
-    // Per-engine aggregates for hero cards. Group engines by provider label
-    // ("Google" / "Bing") and by AI engine names ("ChatGPT", "Gemini", etc).
-    const byProvider = {};
-    const byAiEngine = {};
-    for (const engineId of engineIds) {
-      const meta = engineMetaById[engineId];
-      const name = (meta?.name || '').toLowerCase();
-      const isAi = ['chatgpt', 'gemini', 'perplexity', 'ai overview', 'ai mode', 'claude'].some((ai) => name.includes(ai));
-      const bucket = isAi ? byAiEngine : byProvider;
-      // Use brand name as bucket key
-      const bucketKey = meta?.name || `Engine ${engineId}`;
-      if (!bucket[bucketKey]) bucket[bucketKey] = { engineIds: [], device: new Set() };
-      bucket[bucketKey].engineIds.push(engineId);
-      if (meta?.device) bucket[bucketKey].device.add(meta.device);
-    }
-    const computeEngineGroupStats = (group) => {
-      const filter = new Set(group.engineIds);
+    // Per-engine hero cards — one card per site_engine_id so the UI can show
+    // "Google Desktop" / "Google Mobile" / "Bing" as SEPARATE cards (not
+    // grouped under a single "Google" brand card). AI engines are separated
+    // from standard engines via the meta.isAi flag.
+    const computeEngineStats = (engineId) => {
+      const filter = new Set([engineId]);
       const kw = parsePositions(curBlocks, { rangeStart: range.current.start, rangeEnd: range.current.end, engineFilter: filter, engineMetaById });
       const prior = parsePositions(priorBlocks, { rangeStart: range.prior.start, rangeEnd: range.prior.end, engineFilter: filter, engineMetaById });
       const cur = computeAggregateStats(kw);
       const pri = computeAggregateStats(prior);
       return {
-        engineCount: group.engineIds.length,
-        devices: Array.from(group.device),
         current: cur,
         prior: pri,
         avgPositionDelta: cur.avgPosition != null && pri.avgPosition != null ? Math.round((pri.avgPosition - cur.avgPosition) * 10) / 10 : null,
@@ -889,8 +930,25 @@ router.get('/seo/overview', async (req, res) => {
         top10Delta: cur.top10Count - pri.top10Count,
       };
     };
-    const providerCards = Object.entries(byProvider).map(([name, group]) => ({ name, ...computeEngineGroupStats(group) }));
-    const aiCards = Object.entries(byAiEngine).map(([name, group]) => ({ name, ...computeEngineGroupStats(group) }));
+
+    const standardCards = [];
+    const aiCards = [];
+    for (const engineId of engineIds) {
+      const meta = engineMetaById[engineId];
+      const card = {
+        engineId,
+        name: meta?.name || `Engine ${engineId}`,
+        label: meta?.label || `Engine ${engineId}`,
+        longLabel: meta?.longLabel || meta?.label || `Engine ${engineId}`,
+        type: meta?.type || null,
+        device: meta?.device || null,
+        region: meta?.region || null,
+        lang: meta?.lang || null,
+        ...computeEngineStats(engineId),
+      };
+      if (meta?.isAi) aiCards.push(card);
+      else standardCards.push(card);
+    }
 
     // Keyword movers (jumped / dropped) — using position change > 0 means
     // improved (lower number).
@@ -910,7 +968,10 @@ router.get('/seo/overview', async (req, res) => {
       range: { code: rangeCode, label: range.label, current: range.current, prior: range.prior, days: range.days },
       engines: { metadata: Object.values(engineMetaById), availableIds: engineIds },
       heroCards: {
-        providers: providerCards,
+        // Legacy brand-grouped array kept for any callers still using it.
+        providers: standardCards,
+        // New per-engine arrays — UI should prefer these.
+        standard: standardCards,
         ai: aiCards,
       },
       stats: {
