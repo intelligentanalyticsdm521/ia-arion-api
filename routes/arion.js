@@ -1264,11 +1264,11 @@ router.get('/seo/audit', async (req, res) => {
       healthScoreSource = 'ia_weighted_fallback';
     }
 
-    // Page health ratio — total pages vs pages with issues (errors OR warnings).
-    // Approximate: if we don't have per-page breakdown yet, estimate from
-    // error+warning count capped at total pages.
-    const pagesWithIssues = Math.min(pagesCrawled, errors + warnings);
-    const pagesHealthy = Math.max(0, pagesCrawled - pagesWithIssues);
+    // Page health ratio — approximation from error+warning count, refined
+    // below with real per-page data from /audit/{id}/pages when that fetch
+    // succeeds. Uses `let` so the detail-fetch block can override.
+    let pagesWithIssues = Math.min(pagesCrawled, errors + warnings);
+    let pagesHealthy = Math.max(0, pagesCrawled - pagesWithIssues);
 
     // Delta values from prev_stats (populated by SE Ranking after 2+ audits)
     const deltas = prevStats ? {
@@ -1339,6 +1339,228 @@ router.get('/seo/audit', async (req, res) => {
       } catch (e) { /* non-fatal */ }
     }
 
+    // ── Full report fetch — powers all widget sections (indexability, HTTP
+    // status, CWV, domain metrics, use cases, top issues, page distribution).
+    // Fetches /audit/{id}/report for section-level data AND /audit/{id}/pages
+    // for per-page aggregation. Runs in parallel to keep latency low.
+    let indexability = null;
+    let httpStatus = null;
+    let domain = null;
+    let coreWebVitals = null;
+    let useCases = null;
+    let pageDistribution = null;
+    let foundResources = null;
+    let foundLinks = null;
+    let realTopIssues = topIssues;  // falls back to what we already had
+
+    if (auditId) {
+      try {
+        const [reportRaw, pagesRaw] = await Promise.all([
+          seRankingRaw('GET', `/audit/${encodeURIComponent(auditId)}/report`),
+          seRankingRaw('GET', `/audit/${encodeURIComponent(auditId)}/pages`),
+        ]);
+        const report = reportRaw.ok ? reportRaw.data : null;
+        const pagesData = pagesRaw.ok ? pagesRaw.data : null;
+        const pagesArr = Array.isArray(pagesData?.items) ? pagesData.items : [];
+
+        // ── Build flat issue list from report.sections ───────────────────
+        if (report?.sections) {
+          const allIssues = [];
+          for (const sec of report.sections) {
+            for (const code of Object.keys(sec.props || {})) {
+              const p = sec.props[code];
+              if (!p || !p.value || Number(p.value) === 0) continue;
+              allIssues.push({
+                slug: p.code || code,
+                name: p.name || code,
+                severity: String(p.status || 'warning').toLowerCase(),
+                count: Number(p.value) || 0,
+                category: sec.uid,
+                categoryName: sec.name,
+              });
+            }
+          }
+          allIssues.sort((a, b) => b.count - a.count);
+          realTopIssues = allIssues.slice(0, 10);
+
+          // ── Most Popular Use Cases — aggregate common filter targets
+          const bySlug = Object.fromEntries(allIssues.map((i) => [i.slug, i.count]));
+          useCases = [
+            {
+              slug: 'uncrawled',
+              name: 'Uncrawled pages',
+              count: (bySlug.blocked_by_robots || 0) + (bySlug.blocked_by_noindex || 0) + (bySlug.blocked_by_xrobots || 0) + (bySlug.blocked_by_nofollow || 0),
+            },
+            {
+              slug: 'non_indexable',
+              name: 'Non-indexable pages',
+              count: pagesArr.filter((p) => String(p.indexable) === '0' || Number(p.noindex) === 1).length,
+            },
+            {
+              slug: 'metadata_issues',
+              name: 'Pages with metadata issues',
+              count: (bySlug.title_missing || 0) + (bySlug.title_duplicate || 0) + (bySlug.title_long || 0) + (bySlug.title_short || 0)
+                   + (bySlug.description_missing || 0) + (bySlug.description_duplicate || 0) + (bySlug.description_long || 0) + (bySlug.description_multiple || 0),
+            },
+            {
+              slug: 'problematic_links',
+              name: 'Links to problematic pages',
+              count: (bySlug.links3xx || 0) + (bySlug.extlinks3xx || 0) + (bySlug.extlinks4xx || 0) + (bySlug.extlinks_timeout || 0),
+            },
+            {
+              slug: 'redirect_chains',
+              name: 'Redirect chains and loops',
+              count: (bySlug.redirect_chain || 0) + (bySlug.redirect_loop || 0) + (bySlug.canonical_chain || 0),
+            },
+          ];
+        }
+
+        // ── Domain metrics from report.domain_props ─────────────────────
+        if (report?.domain_props) {
+          const dp = report.domain_props;
+          domain = {
+            domainName: dp.domain || null,
+            domainTrust: Number(dp.dt) || null,
+            referringDomains: Number(dp.domains) || null,
+            backlinks: Number(dp.backlinks) || null,
+            pagesInGoogle: Number(dp.index_google) || null,
+            expirationDate: dp.expdate || null,
+            lastUpdated: dp.updated || null,
+          };
+        }
+
+        // ── Core Web Vitals from report.sections.webvitals ──────────────
+        const webvitalsSec = report?.sections?.find((s) => s.uid === 'webvitals');
+        if (webvitalsSec?.props) {
+          const wv = webvitalsSec.props;
+          const readValue = (obj) => {
+            if (!obj) return null;
+            const v = Number(obj.value);
+            return Number.isFinite(v) && v > 0 ? v : null;
+          };
+          coreWebVitals = {
+            realWorld: {
+              lcp: readValue(wv.chrome_ux_lcp),
+              inp: readValue(wv.chrome_ux_inp),
+              cls: readValue(wv.chrome_ux_cls),
+              fcp: readValue(wv.chrome_ux_fcp),
+            },
+            lab: {
+              lcp: readValue(wv.lighthouse_lcp),
+              cls: readValue(wv.lighthouse_cls),
+              fcp: readValue(wv.lighthouse_fcp),
+              speedIndex: readValue(wv.lighthouse_speed_index),
+              tti: readValue(wv.lighthouse_tti),
+              tbt: readValue(wv.lighthouse_tbt),
+            },
+            hasData: readValue(wv.chrome_ux_lcp) != null || readValue(wv.lighthouse_lcp) != null,
+          };
+        }
+
+        // ── HTTP Status Codes from /pages aggregation ───────────────────
+        if (pagesArr.length > 0) {
+          const statusBuckets = { '1xx': 0, '2xx': 0, '3xx': 0, '4xx': 0, '5xx': 0 };
+          for (const pg of pagesArr) {
+            const sc = Number(pg.status) || 0;
+            if (sc >= 100 && sc < 200) statusBuckets['1xx']++;
+            else if (sc >= 200 && sc < 300) statusBuckets['2xx']++;
+            else if (sc >= 300 && sc < 400) statusBuckets['3xx']++;
+            else if (sc >= 400 && sc < 500) statusBuckets['4xx']++;
+            else if (sc >= 500 && sc < 600) statusBuckets['5xx']++;
+          }
+          httpStatus = {
+            total: pagesArr.length,
+            buckets: statusBuckets,
+          };
+
+          // ── Indexability from pages + report ──────────────────────────
+          const indexable = pagesArr.filter((p) => String(p.indexable) === '1' && Number(p.noindex) === 0 && Number(p.blocked_robots) === 0).length;
+          const nonIndexable = pagesArr.length - indexable;
+          const blockedByMeta = pagesArr.filter((p) => Number(p.noindex) === 1).length;
+          const blockedByRobots = pagesArr.filter((p) => Number(p.blocked_robots) === 1).length;
+          const blockedByXRobots = pagesArr.filter((p) => p.xrobots && String(p.xrobots).includes('noindex')).length;
+          const nonCanonical = pagesArr.filter((p) => p.canonical_url && p.canonical_url !== p.url).length;
+          const non200 = pagesArr.filter((p) => {
+            const s = Number(p.status) || 0;
+            return s !== 200;
+          }).length;
+          indexability = {
+            indexable,
+            nonIndexable,
+            blockedBy: {
+              robotsTxt: blockedByRobots,
+              metaTag: blockedByMeta,
+              xRobots: blockedByXRobots,
+              nonCanonical,
+              non200Status: non200,
+            },
+          };
+
+          // ── Page Distribution (depth, response time, redirects) ──────
+          const depthBuckets = {};
+          const responseBuckets = { '0-0.1s': 0, '0.1-0.5s': 0, '0.5-1s': 0, '1-3s': 0, '3s+': 0 };
+          const redirectBuckets = { '0': 0, '1': 0, '2': 0, '3+': 0 };
+          for (const pg of pagesArr) {
+            const d = Number(pg.depth) || 0;
+            depthBuckets[d] = (depthBuckets[d] || 0) + 1;
+            const ms = Number(pg.load_ms) || 0;
+            if (ms < 100) responseBuckets['0-0.1s']++;
+            else if (ms < 500) responseBuckets['0.1-0.5s']++;
+            else if (ms < 1000) responseBuckets['0.5-1s']++;
+            else if (ms < 3000) responseBuckets['1-3s']++;
+            else responseBuckets['3s+']++;
+            const rc = Number(pg.redirect_count) || 0;
+            if (rc === 0) redirectBuckets['0']++;
+            else if (rc === 1) redirectBuckets['1']++;
+            else if (rc === 2) redirectBuckets['2']++;
+            else redirectBuckets['3+']++;
+          }
+          pageDistribution = { depth: depthBuckets, responseTime: responseBuckets, redirects: redirectBuckets };
+
+          // ── Found Resources: aggregate img/css/js sizes across pages ─
+          const imgCount = pagesArr.reduce((s, p) => s + (Number(p.img) || 0), 0);
+          const cssSizeTotal = pagesArr.reduce((s, p) => s + (Number(p.css_size) || 0), 0);
+          const jsSizeTotal = pagesArr.reduce((s, p) => s + (Number(p.js_size) || 0), 0);
+          foundResources = {
+            images: imgCount,
+            cssSizeBytes: cssSizeTotal,
+            jsSizeBytes: jsSizeTotal,
+            total: imgCount, // images is best single-number proxy
+          };
+
+          // ── Found Links: internal + external aggregates ──────────────
+          const totalLinks = pagesArr.reduce((s, p) => s + (Number(p.total_links) || 0), 0);
+          const internalLinks = pagesArr.reduce((s, p) => s + (Number(p.outlinks_internal) || 0), 0);
+          const externalLinks = pagesArr.reduce((s, p) => s + (Number(p.outlinks_external) || 0), 0);
+          const nofollowLinks = pagesArr.reduce((s, p) => s + (Number(p.inlinks_nofollow) || 0), 0);
+          foundLinks = {
+            total: totalLinks,
+            internal: internalLinks,
+            external: externalLinks,
+            nofollow: nofollowLinks,
+          };
+
+          // Refine page-health ratio using real indexability data
+          if (indexability) {
+            const pagesWithAnyIssue = pagesArr.filter((p) =>
+              Number(p.errors) > 0 || Number(p.warnings) > 0
+            ).length;
+            // Override the approximation with real per-page data
+            pagesWithIssues = pagesWithAnyIssue;
+            pagesHealthy = Math.max(0, pagesArr.length - pagesWithAnyIssue);
+          }
+        }
+
+        // Use report's score_percent if available (matches /audit/list)
+        if (report?.score_percent && healthScoreSource !== 'se_ranking_official') {
+          healthScore = Number(report.score_percent) || healthScore;
+          healthScoreSource = 'se_ranking_report';
+        }
+      } catch (e) {
+        console.warn('[arion/seo/audit] detail fetch failed:', e.message);
+      }
+    }
+
     res.json({
       connected: true,
       status: 'complete',
@@ -1350,17 +1572,19 @@ router.get('/seo/audit', async (req, res) => {
       pagesWithIssues,
       pagesHealthy,
       lastAuditDate: audit.audit_time || audit.start_time || null,
-      nextScheduledDate: null,  // TODO: derive from audit settings
+      nextScheduledDate: null,
       issues,
       deltas,
       history: historySnapshots,
-      topIssues,
-      // Placeholder sections for V2 widgets
-      indexability: null,      // TODO: parse /audit/{id}/report
-      httpStatus: null,        // TODO: aggregate from /audit/{id}/pages
-      domain: null,            // TODO: extract from history snapshots' domain_data
-      coreWebVitals: null,     // TODO: from /audit/{id}/report
-      useCases: null,          // TODO: multiple filtered /audit/{id}/pages/issues calls
+      topIssues: realTopIssues,
+      indexability,
+      httpStatus,
+      domain,
+      coreWebVitals,
+      useCases,
+      pageDistribution,
+      foundResources,
+      foundLinks,
     });
   } catch (err) {
     console.error('[arion/seo/audit]', err);
