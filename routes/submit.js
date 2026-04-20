@@ -4,6 +4,8 @@ import crypto from 'node:crypto';
 import { getServicesPool } from '../db/servicesPool.js';
 import { requireSiteToken } from '../middleware/requireSiteToken.js';
 import { firePlatformEvent } from '../lib/platformEvents.js';
+import { redeemProvisionCode } from '../lib/provisionCodes.js';
+import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
 
 const router = Router();
 
@@ -198,7 +200,7 @@ router.post('/webhooks/site-event', requireSiteToken, async (req, res) => {
     await transaction.begin();
 
     try {
-      // If the WP plugin sent a form submission event, also write to site_form_submission
+      // ── form.submitted — persist to site_form_submission ──
       if (event_type === 'form.submitted' && payload.email) {
         const submissionId = crypto.randomUUID();
         await transaction.request()
@@ -231,6 +233,114 @@ router.post('/webhooks/site-event', requireSiteToken, async (req, res) => {
         payload.submission_id = submissionId;
       }
 
+      // ── Content lifecycle events → site_content_change ──
+      if (event_type === 'post.published' || event_type === 'post.updated' || event_type === 'post.deleted' || event_type === 'page.published') {
+        const changeType = event_type === 'post.deleted' ? 'deleted' : event_type === 'post.updated' ? 'updated' : 'published';
+        await transaction.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .input('postId', sql.BigInt, Number(payload.post_id) || 0)
+          .input('postType', sql.NVarChar(40), payload.post_type || (event_type === 'page.published' ? 'page' : 'post'))
+          .input('changeType', sql.NVarChar(20), changeType)
+          .input('postUrl', sql.NVarChar(2000), payload.post_url || payload.page_url || null)
+          .input('postTitle', sql.NVarChar(500), payload.post_title || payload.page_title || null)
+          .input('authorId', sql.BigInt, Number(payload.author_id) || null)
+          .input('wordCount', sql.Int, Number(payload.word_count) || null)
+          .input('categoriesJson', sql.NVarChar(sql.MAX), Array.isArray(payload.categories) ? JSON.stringify(payload.categories) : null)
+          .input('tagsJson', sql.NVarChar(sql.MAX), Array.isArray(payload.tags) ? JSON.stringify(payload.tags) : null)
+          .query(`
+            INSERT INTO arion.site_content_change
+              (tenant_id, site_id, post_id, post_type, change_type, post_url, post_title,
+               author_id, word_count, categories_json, tags_json)
+            VALUES
+              (@tenantId, @siteId, @postId, @postType, @changeType, @postUrl, @postTitle,
+               @authorId, @wordCount, @categoriesJson, @tagsJson)
+          `);
+      }
+
+      // ── Plugin / theme / core lifecycle → site_security_event (inventory changes are security-relevant) ──
+      if (event_type.startsWith('plugin.') || event_type.startsWith('theme.') || event_type.startsWith('wp_core.')) {
+        const severity = event_type === 'plugin.deleted' || event_type === 'wp_core.update_available' ? 'warning' : 'info';
+        await transaction.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .input('eventType', sql.NVarChar(80), event_type)
+          .input('severity', sql.NVarChar(20), severity)
+          .input('title', sql.NVarChar(300), payload.plugin_name || payload.theme_name || payload.new_version || event_type)
+          .input('detailJson', sql.NVarChar(sql.MAX), JSON.stringify(payload))
+          .query(`
+            INSERT INTO arion.site_security_event
+              (tenant_id, site_id, event_type, severity, title, detail_json)
+            VALUES
+              (@tenantId, @siteId, @eventType, @severity, @title, @detailJson)
+          `);
+      }
+
+      // ── Wordfence security events ──
+      if (event_type.startsWith('wordfence.')) {
+        const severity = /attack|block|malware|lockout/i.test(event_type) ? 'critical' : 'warning';
+        await transaction.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .input('eventType', sql.NVarChar(80), event_type)
+          .input('severity', sql.NVarChar(20), severity)
+          .input('title', sql.NVarChar(300), (payload.details && payload.details.title) || event_type)
+          .input('detailJson', sql.NVarChar(sql.MAX), JSON.stringify(payload))
+          .input('sourceIp', sql.NVarChar(45), payload.details?.ip || payload.ip || null)
+          .query(`
+            INSERT INTO arion.site_security_event
+              (tenant_id, site_id, event_type, severity, title, detail_json, source_ip)
+            VALUES
+              (@tenantId, @siteId, @eventType, @severity, @title, @detailJson, @sourceIp)
+          `);
+      }
+
+      // ── WooCommerce order events → site_woo_order ──
+      if (event_type === 'woo.order.created' || event_type === 'woo.order.completed') {
+        const status = event_type === 'woo.order.completed' ? 'completed' : 'created';
+        const emailHash = payload.customer_email
+          ? crypto.createHash('sha256').update(String(payload.customer_email).toLowerCase().trim()).digest('hex')
+          : null;
+        try {
+          await transaction.request()
+            .input('tenantId', sql.UniqueIdentifier, tenantId)
+            .input('siteId', sql.UniqueIdentifier, siteId)
+            .input('sourceOrderId', sql.NVarChar(50), String(payload.order_id || ''))
+            .input('status', sql.NVarChar(40), status)
+            .input('orderTotal', sql.Decimal(18, 2), payload.order_total ? Number(payload.order_total) : null)
+            .input('currency', sql.NVarChar(10), payload.currency || 'USD')
+            .input('emailHash', sql.NVarChar(64), emailHash)
+            .input('itemsJson', sql.NVarChar(sql.MAX), payload.items ? JSON.stringify(payload.items) : null)
+            .query(`
+              INSERT INTO arion.site_woo_order
+                (tenant_id, site_id, source_order_id, order_status, order_total, currency, customer_email_hash, items_json)
+              VALUES
+                (@tenantId, @siteId, @sourceOrderId, @status, @orderTotal, @currency, @emailHash, @itemsJson)
+            `);
+        } catch (wooErr) {
+          // Unique-index violation on (site_id, source_order_id, order_status) — ignore dupes
+          if (!/UQ_woo_order_source/i.test(String(wooErr.message))) throw wooErr;
+        }
+      }
+
+      // ── site.health.degraded + any other event — always fire platform event for downstream handlers ──
+
+      // Update plugin_last_status_at + plugin_version on the site row (non-blocking bookkeeping)
+      if (payload.plugin_version) {
+        await transaction.request()
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .input('version', sql.NVarChar(20), String(payload.plugin_version))
+          .input('status', sql.NVarChar(30), 'connected')
+          .query(`
+            UPDATE arion.site
+            SET plugin_version = @version,
+                plugin_status = @status,
+                plugin_last_status_at = SYSDATETIMEOFFSET(),
+                plugin_connected_at = ISNULL(plugin_connected_at, SYSDATETIMEOFFSET())
+            WHERE site_id = @siteId
+          `);
+      }
+
       const eventId = await firePlatformEvent(transaction, {
         tenantId,
         eventType: `arion.${event_type}`,
@@ -248,6 +358,101 @@ router.post('/webhooks/site-event', requireSiteToken, async (req, res) => {
     }
   } catch (err) {
     console.error('[webhooks:site-event]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /public/provision-codes/redeem ---
+// Public endpoint called by the IA Plugin to redeem a one-time provisioning
+// code for site credentials. The plugin calls this directly (no site-token
+// auth required yet — that's what this endpoint is issuing).
+//
+// Body: { code, site_url?, admin_email? }
+// Returns: { site_id, tenant_id, site_token, tier, seo_addon, domain? }
+router.post('/public/provision-codes/redeem', async (req, res) => {
+  const { code, site_url, admin_email } = req.body || {};
+  if (!code) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'code is required', status: 400 } });
+  }
+
+  try {
+    const pool = await getServicesPool();
+    const redemption = await redeemProvisionCode(pool, { code, fromUrl: site_url });
+
+    if (!redemption.ok) {
+      const statusMap = { invalid_format: 400, not_found: 404, already_redeemed: 410, expired: 410, revoked: 403 };
+      const msgMap = {
+        invalid_format: 'The provisioning code format is invalid.',
+        not_found: 'No matching provisioning code found.',
+        already_redeemed: 'This code has already been redeemed.',
+        expired: 'This code has expired. Request a new one from your ARION admin.',
+        revoked: 'This code was revoked.',
+      };
+      return res.status(statusMap[redemption.reason] || 400).json({
+        error: { code: redemption.reason.toUpperCase(), message: msgMap[redemption.reason] || 'Code rejected', status: statusMap[redemption.reason] || 400 },
+      });
+    }
+
+    const { tenant_id, site_id } = redemption.code_row;
+
+    // Generate a fresh site_token and store its hash
+    const rawToken = generateSiteToken();
+    const tokenHash = hashSiteToken(rawToken);
+
+    const siteUpd = await pool.request()
+      .input('siteId', sql.UniqueIdentifier, site_id)
+      .input('tenantId', sql.UniqueIdentifier, tenant_id)
+      .input('tokenHash', sql.NVarChar(64), tokenHash)
+      .input('adminEmail', sql.NVarChar(254), admin_email || null)
+      .query(`
+        UPDATE arion.site
+        SET site_token_hash = @tokenHash,
+            site_token_last_rotated = SYSDATETIMEOFFSET(),
+            plugin_status = 'connected',
+            plugin_connected_at = SYSDATETIMEOFFSET(),
+            plugin_last_status_at = SYSDATETIMEOFFSET(),
+            updated_at = SYSDATETIMEOFFSET()
+        OUTPUT inserted.site_id, inserted.tenant_id, inserted.arion_tier, inserted.domain
+        WHERE site_id = @siteId AND tenant_id = @tenantId
+      `);
+
+    if (siteUpd.recordset.length === 0) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    }
+    const siteRow = siteUpd.recordset[0];
+
+    // Fire provisioning event so platform event log captures this
+    try {
+      await firePlatformEvent(pool, {
+        tenantId: tenant_id,
+        eventType: 'arion.plugin.provisioned',
+        sourceProduct: 'ia-plugin',
+        eventRefId: site_id,
+        payload: { site_id, site_url: site_url || null, admin_email: admin_email || null },
+      });
+    } catch (e) {
+      console.warn('[provision:event]', e.message);
+    }
+
+    // Pull site row tier info for the response
+    const seoResult = await pool.request()
+      .input('siteId', sql.UniqueIdentifier, site_id)
+      .query('SELECT arion_tier, seo_addon_tier FROM arion.site WHERE site_id = @siteId');
+
+    res.json({
+      data: {
+        provisioned: true,
+        site_id,
+        tenant_id,
+        site_token: rawToken,            // RAW token returned ONLY here
+        tier: seoResult.recordset[0]?.arion_tier || null,
+        seo_addon: seoResult.recordset[0]?.seo_addon_tier || null,
+        domain: siteRow.domain || null,
+      },
+      meta: { timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[public:provision-codes:redeem]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });

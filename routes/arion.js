@@ -26,6 +26,7 @@ import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPage
 import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing, listGoogleSitemaps } from '../lib/sitemapGenerator.js';
 import { getDomainInfo, getDnsRecords, createDnsRecords, deleteDnsRecords, getSslStatus, getWpSiteInfo, getWpPages, getWpPosts, getWpPlugins } from '../lib/hostinger.js';
 import { runPageSpeedTest } from '../lib/pagespeed.js';
+import { plugin as pluginApi, pluginGet, pluginPost, pluginFetchAll } from '../lib/pluginClient.js';
 import { meetsMinTier } from '../lib/tierCheck.js';
 import { getKeywordPositions, getProjectCompetitors, getAuditSummary, getProjectKeywords, getSiteOverview, getPositionsHistory, startSiteAudit, addCompetitor as seRankingAddCompetitor, rawRequest as seRankingRaw } from '../lib/seranking.js';
 import { getKeywordData as seRankingKeywordData } from '../lib/serankingData.js';
@@ -4805,6 +4806,381 @@ router.get('/sites/:siteId/pagespeed-history', async (req, res) => {
     res.json({ data: { snapshots: result.recordset }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
   } catch (err) {
     console.error('[pagespeed-history]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// IA PLUGIN DATA PROXY ROUTES (2026-04-20)
+// All routes call the plugin's REST API via WP app password Basic auth.
+// Every response carries pluginStatus so the UI can surface connectivity
+// issues gracefully. Snapshot-cache upsert happens for endpoints that feed
+// daily trend data; live fetch falls back to a DB-cached snapshot if the
+// site is unreachable.
+// ════════════════════════════════════════════════════════════════════════
+
+function pluginResponseFallback(pool, tenantId, siteId) {
+  // Fetch the most recent snapshot so the UI has something to render even
+  // when the live site is unreachable.
+  return pool.request()
+    .input('tenantId', sql.UniqueIdentifier, tenantId)
+    .input('siteId', sql.UniqueIdentifier, siteId)
+    .query(`
+      SELECT TOP 1 snapshot_date, payload_json, captured_at
+      FROM arion.site_plugin_snapshot
+      WHERE site_id = @siteId AND tenant_id = @tenantId
+      ORDER BY snapshot_date DESC
+    `)
+    .then((r) => {
+      if (r.recordset.length === 0) return null;
+      try { return { fallback: true, ...JSON.parse(r.recordset[0].payload_json || '{}'), snapshot_date: r.recordset[0].snapshot_date, captured_at: r.recordset[0].captured_at }; }
+      catch { return null; }
+    })
+    .catch(() => null);
+}
+
+async function runPluginProxy(req, res, fn, label) {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.domain) return res.status(409).json({ error: { code: 'NOT_READY', message: 'Site has no domain configured', status: 409 } });
+
+    const result = await fn(site, pool);
+    res.json({
+      data: result.data || null,
+      plugin_status: result.pluginStatus || 'connected',
+      errors: result.errors || [],
+      fallback: Boolean(result.fallback),
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error(`[plugin:${label}]`, err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+}
+
+// GET /arion/sites/:siteId/plugin/status — quick connection check
+router.get('/sites/:siteId/plugin/status', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.status(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'status'));
+
+// GET /arion/sites/:siteId/plugin/health — plugin health + WP env
+router.get('/sites/:siteId/plugin/health', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.health(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'health'));
+
+// GET /arion/sites/:siteId/plugin/security — aggregated security pull
+router.get('/sites/:siteId/plugin/security', (req, res) => runPluginProxy(req, res, async (site, pool) => {
+  const [wf, ch, users] = await Promise.all([
+    pluginApi.securityWordfence(site),
+    pluginApi.securityCoreHealth(site),
+    pluginApi.securityUsers(site),
+  ]);
+
+  // If everything failed, pull the last snapshot
+  if (!wf.ok && !ch.ok && !users.ok) {
+    const fallback = await pluginResponseFallback(pool, req.tenant.tenantId, req.params.siteId);
+    if (fallback) return { data: fallback.security || null, pluginStatus: wf.pluginStatus || 'unreachable', errors: [wf.errorText, ch.errorText, users.errorText].filter(Boolean), fallback: true };
+  }
+
+  return {
+    data: {
+      wordfence: wf.data || null,
+      core_health: ch.data || null,
+      users: users.data || null,
+    },
+    pluginStatus: wf.ok ? wf.pluginStatus : (ch.ok ? ch.pluginStatus : users.pluginStatus) || 'unreachable',
+    errors: [
+      !wf.ok && `wordfence: ${wf.errorText}`,
+      !ch.ok && `core_health: ${ch.errorText}`,
+      !users.ok && `users: ${users.errorText}`,
+    ].filter(Boolean),
+  };
+}, 'security'));
+
+// GET /arion/sites/:siteId/plugin/performance — aggregated performance pull
+router.get('/sites/:siteId/plugin/performance', (req, res) => runPluginProxy(req, res, async (site, pool) => {
+  const [ls, sp, srv, cron] = await Promise.all([
+    pluginApi.perfLitespeed(site),
+    pluginApi.perfShortpixel(site),
+    pluginApi.perfServer(site),
+    pluginApi.perfCron(site),
+  ]);
+
+  if (!ls.ok && !sp.ok && !srv.ok && !cron.ok) {
+    const fallback = await pluginResponseFallback(pool, req.tenant.tenantId, req.params.siteId);
+    if (fallback) return { data: fallback.performance || null, pluginStatus: 'unreachable', errors: [], fallback: true };
+  }
+
+  return {
+    data: {
+      litespeed: ls.data || null,
+      shortpixel: sp.data || null,
+      server: srv.data || null,
+      cron: cron.data || null,
+    },
+    pluginStatus: [ls, sp, srv, cron].find((r) => r.ok)?.pluginStatus || 'unreachable',
+    errors: [
+      !ls.ok && `litespeed: ${ls.errorText}`,
+      !sp.ok && `shortpixel: ${sp.errorText}`,
+      !srv.ok && `server: ${srv.errorText}`,
+      !cron.ok && `cron: ${cron.errorText}`,
+    ].filter(Boolean),
+  };
+}, 'performance'));
+
+// GET /arion/sites/:siteId/plugin/content-aggregate — content summary + RankMath
+router.get('/sites/:siteId/plugin/content-aggregate', (req, res) => runPluginProxy(req, res, async (site) => {
+  const [summary, rm] = await Promise.all([
+    pluginApi.contentSummary(site),
+    pluginApi.contentSeoAgg(site),
+  ]);
+  return {
+    data: { summary: summary.data || null, seo: rm.data || null },
+    pluginStatus: summary.ok ? summary.pluginStatus : rm.pluginStatus,
+    errors: [!summary.ok && `summary: ${summary.errorText}`, !rm.ok && `seo: ${rm.errorText}`].filter(Boolean),
+  };
+}, 'content-aggregate'));
+
+// GET /arion/sites/:siteId/plugin/theme
+router.get('/sites/:siteId/plugin/theme', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.theme(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'theme'));
+
+// GET /arion/sites/:siteId/plugin/forms-summary
+router.get('/sites/:siteId/plugin/forms-summary', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.formsSummary(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'forms-summary'));
+
+// GET /arion/sites/:siteId/plugin/updates — all available updates
+router.get('/sites/:siteId/plugin/updates', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.updatesAvailable(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'updates'));
+
+// GET /arion/sites/:siteId/plugin/plugins — plugin inventory (live)
+router.get('/sites/:siteId/plugin/plugins', (req, res) => runPluginProxy(req, res, async (site, pool) => {
+  const r = await pluginApi.plugins(site);
+  if (r.ok && Array.isArray(r.data)) {
+    // Update inventory table (replace)
+    try {
+      await pool.request()
+        .input('siteId', sql.UniqueIdentifier, req.params.siteId)
+        .query('DELETE FROM arion.site_plugin_inventory WHERE site_id = @siteId AND captured_at < DATEADD(hour, -1, SYSDATETIMEOFFSET())');
+      for (const p of r.data) {
+        await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, req.tenant.tenantId)
+          .input('siteId', sql.UniqueIdentifier, req.params.siteId)
+          .input('pluginFile', sql.NVarChar(300), String(p.file || ''))
+          .input('pluginSlug', sql.NVarChar(200), p.slug || null)
+          .input('pluginName', sql.NVarChar(300), p.name || null)
+          .input('currentVersion', sql.NVarChar(40), p.version || null)
+          .input('newVersion', sql.NVarChar(40), null)
+          .input('updateAvailable', sql.Bit, p.update_available ? 1 : 0)
+          .input('isActive', sql.Bit, p.active ? 1 : 0)
+          .input('author', sql.NVarChar(200), p.author || null)
+          .query(`
+            INSERT INTO arion.site_plugin_inventory
+              (tenant_id, site_id, plugin_file, plugin_slug, plugin_name,
+               current_version, new_version, update_available, is_active, author)
+            VALUES (@tenantId, @siteId, @pluginFile, @pluginSlug, @pluginName,
+                    @currentVersion, @newVersion, @updateAvailable, @isActive, @author)
+          `);
+      }
+    } catch (e) { console.warn('[plugin:plugins:inventory-write]', e.message); }
+  }
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'plugins'));
+
+// POST /arion/sites/:siteId/plugin/updates/plugin — trigger plugin update
+router.post('/sites/:siteId/plugin/updates/plugin', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  const pluginFile = req.body?.plugin;
+  const userEmail = req.user?.email || req.user?.userId || null;
+
+  if (!pluginFile) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'plugin is required', status: 400 } });
+
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    // Log start
+    const logResult = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('updateType', sql.NVarChar(20), 'plugin')
+      .input('target', sql.NVarChar(300), pluginFile)
+      .input('status', sql.NVarChar(20), 'pending')
+      .input('triggeredBy', sql.NVarChar(200), userEmail)
+      .query(`
+        INSERT INTO arion.site_plugin_update_log
+          (tenant_id, site_id, update_type, target, status, triggered_by)
+        OUTPUT inserted.log_id
+        VALUES (@tenantId, @siteId, @updateType, @target, @status, @triggeredBy)
+      `);
+    const logId = logResult.recordset[0].log_id;
+
+    const r = await pluginApi.updatePlugin(site, pluginFile);
+
+    const finalStatus = r.ok ? 'success' : 'failure';
+    await pool.request()
+      .input('logId', sql.UniqueIdentifier, logId)
+      .input('status', sql.NVarChar(20), finalStatus)
+      .input('errorMsg', sql.NVarChar(sql.MAX), r.ok ? null : (r.errorText || 'unknown'))
+      .query(`
+        UPDATE arion.site_plugin_update_log
+        SET status = @status, error_message = @errorMsg, completed_at = SYSDATETIMEOFFSET()
+        WHERE log_id = @logId
+      `);
+
+    res.json({
+      data: { success: r.ok, plugin: pluginFile, log_id: logId, detail: r.data || null },
+      plugin_status: r.pluginStatus,
+      errors: r.ok ? [] : [r.errorText || 'update failed'],
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[plugin:updates:plugin]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// POST /arion/sites/:siteId/plugin/updates/theme — trigger theme update
+router.post('/sites/:siteId/plugin/updates/theme', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  const stylesheet = req.body?.stylesheet;
+  const userEmail = req.user?.email || req.user?.userId || null;
+
+  if (!stylesheet) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'stylesheet is required', status: 400 } });
+
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const logResult = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('updateType', sql.NVarChar(20), 'theme')
+      .input('target', sql.NVarChar(300), stylesheet)
+      .input('status', sql.NVarChar(20), 'pending')
+      .input('triggeredBy', sql.NVarChar(200), userEmail)
+      .query(`INSERT INTO arion.site_plugin_update_log (tenant_id, site_id, update_type, target, status, triggered_by) OUTPUT inserted.log_id VALUES (@tenantId, @siteId, @updateType, @target, @status, @triggeredBy)`);
+    const logId = logResult.recordset[0].log_id;
+
+    const r = await pluginApi.updateTheme(site, stylesheet);
+
+    await pool.request()
+      .input('logId', sql.UniqueIdentifier, logId)
+      .input('status', sql.NVarChar(20), r.ok ? 'success' : 'failure')
+      .input('errorMsg', sql.NVarChar(sql.MAX), r.ok ? null : (r.errorText || 'unknown'))
+      .query(`UPDATE arion.site_plugin_update_log SET status = @status, error_message = @errorMsg, completed_at = SYSDATETIMEOFFSET() WHERE log_id = @logId`);
+
+    res.json({
+      data: { success: r.ok, stylesheet, log_id: logId },
+      plugin_status: r.pluginStatus,
+      errors: r.ok ? [] : [r.errorText || 'update failed'],
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[plugin:updates:theme]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// POST /arion/sites/:siteId/plugin/updates/core — trigger WP core update
+router.post('/sites/:siteId/plugin/updates/core', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  const userEmail = req.user?.email || req.user?.userId || null;
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const logResult = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('updateType', sql.NVarChar(20), 'core')
+      .input('target', sql.NVarChar(300), 'wordpress-core')
+      .input('status', sql.NVarChar(20), 'pending')
+      .input('triggeredBy', sql.NVarChar(200), userEmail)
+      .query(`INSERT INTO arion.site_plugin_update_log (tenant_id, site_id, update_type, target, status, triggered_by) OUTPUT inserted.log_id VALUES (@tenantId, @siteId, @updateType, @target, @status, @triggeredBy)`);
+    const logId = logResult.recordset[0].log_id;
+
+    const r = await pluginApi.updateCore(site);
+
+    await pool.request()
+      .input('logId', sql.UniqueIdentifier, logId)
+      .input('status', sql.NVarChar(20), r.ok ? 'success' : 'failure')
+      .input('errorMsg', sql.NVarChar(sql.MAX), r.ok ? null : (r.errorText || 'unknown'))
+      .query(`UPDATE arion.site_plugin_update_log SET status = @status, error_message = @errorMsg, completed_at = SYSDATETIMEOFFSET() WHERE log_id = @logId`);
+
+    res.json({
+      data: { success: r.ok, log_id: logId, detail: r.data || null },
+      plugin_status: r.pluginStatus,
+      errors: r.ok ? [] : [r.errorText || 'update failed'],
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[plugin:updates:core]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// GET /arion/sites/:siteId/plugin/security-events — read stored security events from DB
+router.get('/sites/:siteId/plugin/security-events', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
+  try {
+    const pool = await getServicesPool();
+    const result = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('limit', sql.Int, limit)
+      .query(`
+        SELECT TOP (@limit) event_id, event_type, severity, title, detail_json, source_ip, occurred_at, ack_at
+        FROM arion.site_security_event
+        WHERE site_id = @siteId AND tenant_id = @tenantId
+        ORDER BY occurred_at DESC
+      `);
+    res.json({ data: { events: result.recordset }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    console.error('[plugin:security-events]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// GET /arion/sites/:siteId/plugin/updates-log — history of update actions
+router.get('/sites/:siteId/plugin/updates-log', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    const result = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .query(`
+        SELECT TOP 50 log_id, update_type, target, previous_version, new_version,
+               status, error_message, triggered_by, triggered_at, completed_at
+        FROM arion.site_plugin_update_log
+        WHERE site_id = @siteId AND tenant_id = @tenantId
+        ORDER BY triggered_at DESC
+      `);
+    res.json({ data: { entries: result.recordset }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    console.error('[plugin:updates-log]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });

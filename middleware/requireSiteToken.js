@@ -5,11 +5,15 @@ import { hashSiteToken } from '../lib/siteToken.js';
 export async function requireSiteToken(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
+    // Accept both `Bearer <token>` and `Token <token>` prefixes — the IA plugin
+    // sends `Token <token>` per its historical convention.
+    let token = null;
+    if (authHeader?.startsWith('Bearer ')) token = authHeader.slice(7);
+    else if (authHeader?.startsWith('Token ')) token = authHeader.slice(6);
+    if (!token) {
       return res.status(401).json({ error: { code: 'MISSING_TOKEN', message: 'Site token required', status: 401 } });
     }
 
-    const token = authHeader.slice(7);
     const tenantId = req.body?.tenant_id || req.headers['x-tenant-id'];
     const siteId = req.body?.site_id || req.headers['x-site-id'];
 
