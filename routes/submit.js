@@ -5,7 +5,8 @@ import { getServicesPool } from '../db/servicesPool.js';
 import { requireSiteToken } from '../middleware/requireSiteToken.js';
 import { firePlatformEvent } from '../lib/platformEvents.js';
 import { redeemProvisionCode } from '../lib/provisionCodes.js';
-import { triggerOnboardingPageSpeed } from './arion.js';
+import { triggerOnboardingPageSpeed, getSiteForTenant } from './arion.js';
+import { plugin as pluginApiFull } from '../lib/pluginClient.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
 
 const router = Router();
@@ -449,16 +450,39 @@ router.post('/public/provision-codes/redeem', async (req, res) => {
       console.warn('[provision:event]', e.message);
     }
 
-    // Kick off an initial PageSpeed run so the client has real CWV data
-    // in the Portal from day 1. Fire-and-forget — no await.
-    try {
-      const domainForPsi = siteRow.domain || (site_url ? new URL(site_url).hostname : null);
-      if (domainForPsi) {
-        triggerOnboardingPageSpeed(pool, tenant_id, site_id, domainForPsi);
+    // Apply IA defaults (LiteSpeed + Wordfence + Rank Math + WP Mail SMTP
+    // + Safe SVG) so the site is fully configured the moment the plugin
+    // connects. Fire-and-forget; the plugin endpoint is idempotent.
+    // Also kicks off a baseline PSI run so the client has real CWV data.
+    (async () => {
+      try {
+        // Re-fetch site with token so we can call the plugin back
+        const p = await getServicesPool();
+        const siteWithToken = await getSiteForTenant(p, tenant_id, site_id);
+        if (siteWithToken) {
+          // Apply defaults — wait ~5s for plugin to be fully initialized
+          setTimeout(async () => {
+            try {
+              const r = await pluginApiFull.applyIADefaults(siteWithToken);
+              console.log(`[provision:apply-defaults] ${siteWithToken.domain}: ok=${r.ok} applied=${JSON.stringify(r.data?.results || {}).slice(0, 200)}`);
+            } catch (e) {
+              console.warn('[provision:apply-defaults]', e.message);
+            }
+          }, 5000);
+        }
+      } catch (e) {
+        console.warn('[provision:apply-defaults:outer]', e.message);
       }
-    } catch (e) {
-      console.warn('[provision:onboarding-psi]', e.message);
-    }
+
+      try {
+        const domainForPsi = siteRow.domain || (site_url ? new URL(site_url).hostname : null);
+        if (domainForPsi) {
+          triggerOnboardingPageSpeed(pool, tenant_id, site_id, domainForPsi);
+        }
+      } catch (e) {
+        console.warn('[provision:onboarding-psi]', e.message);
+      }
+    })();
 
     // Pull site row tier info for the response
     const seoResult = await pool.request()

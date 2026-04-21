@@ -65,7 +65,7 @@ function toSiteSummary(row) {
 }
 
 // Helper: get site by siteId + tenantId
-async function getSiteForTenant(pool, tenantId, siteId) {
+export async function getSiteForTenant(pool, tenantId, siteId) {
   const r = await pool.request()
     .input('tenantId', sql.UniqueIdentifier, tenantId)
     .input('siteId', sql.UniqueIdentifier, siteId)
@@ -5238,6 +5238,47 @@ router.post('/sites/:siteId/plugin/cache/purge', (req, res) => runPluginProxy(re
   const r = await pluginApi.purgeCache(site);
   return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
 }, 'purge-cache'));
+
+// v2.0.10 — LiteSpeed config GET + POST (full settings)
+router.get('/sites/:siteId/plugin/litespeed/config', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.litespeedConfigGet(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'litespeed-config-get'));
+
+router.post('/sites/:siteId/plugin/litespeed/config', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.litespeedConfigSet(site, req.body || {});
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'litespeed-config-set'));
+
+// v2.0.10 — One-click "Apply IA Defaults" across every managed plugin.
+// Also fires a PageSpeed run automatically since the performance config
+// just changed and we want a fresh baseline.
+router.post('/sites/:siteId/plugin/onboarding/apply-defaults', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const r = await pluginApi.applyIADefaults(site);
+
+    // Kick off a fresh PSI run — fire-and-forget, results land in snapshot table
+    if (site.domain) {
+      triggerOnboardingPageSpeed(pool, tenantId, siteId, site.domain);
+    }
+
+    res.json({
+      data: r.data || { applied_at: new Date().toISOString(), results: {} },
+      plugin_status: r.pluginStatus,
+      errors: r.errors || [],
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString(), psi_triggered: !!site.domain },
+    });
+  } catch (err) {
+    console.error('[apply-ia-defaults]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
 
 router.get('/sites/:siteId/plugin/content/publishing-pace', (req, res) => runPluginProxy(req, res, async (site) => {
   const r = await pluginApi.contentPace(site);
