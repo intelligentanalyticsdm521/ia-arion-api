@@ -4767,8 +4767,74 @@ router.put('/sites/:siteId/content-seo/:postId', async (req, res) => {
 
 // --- GET /arion/sites/:siteId/vulnerabilities ---
 // Cross-references the IA Plugin's /plugins inventory against Wordfence's
-// public vulnerability database. Falls back to wp-api/core if the plugin
-// isn't reachable.
+// public vulnerability feed. Falls back to wp-api/core if the plugin
+// isn't reachable. Includes diagnostic fields so the UI can explain what
+// was checked, whether Wordfence was reachable, and how many outdated
+// plugins exist regardless of known CVEs.
+//
+// We cache the production feed in-memory for 1h to avoid hammering Wordfence
+// (it's a ~2MB JSON file).
+const WORDFENCE_FEED_URL = 'https://www.wordfence.com/api/intelligence/v2/vulnerabilities/production/';
+let _wfCache = { data: null, fetchedAt: 0, error: null };
+async function getWordfenceFeed() {
+  const now = Date.now();
+  if (_wfCache.data && (now - _wfCache.fetchedAt) < 60 * 60 * 1000) {
+    return { data: _wfCache.data, cached: true, error: null };
+  }
+  try {
+    const r = await fetch(WORDFENCE_FEED_URL, { headers: { 'User-Agent': 'ARION-Vuln-Scanner/1.0' } });
+    if (!r.ok) throw new Error(`Wordfence feed returned ${r.status}`);
+    const data = await r.json();
+    _wfCache = { data, fetchedAt: now, error: null };
+    return { data, cached: false, error: null };
+  } catch (err) {
+    _wfCache.error = err.message;
+    return { data: _wfCache.data, cached: !!_wfCache.data, error: err.message };
+  }
+}
+
+function semverLTE(a, b) {
+  // Returns true if version a <= version b (naive). "a.b.c" compared left-to-right.
+  if (!a || !b) return false;
+  const pa = String(a).split(/[.+-]/).map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split(/[.+-]/).map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x < y) return true;
+    if (x > y) return false;
+  }
+  return true; // equal counts as <=
+}
+
+function matchVulnerability(vuln, installedVersion) {
+  // A Wordfence production-feed entry has a "software" array. Each entry has
+  // affected_versions: { "<= 1.2.3": {...}, ">= 1.0 < 2.0": {...} }.
+  // For MVP we conservatively match if installed version is <= the declared
+  // fixed/affected max — if no data, skip.
+  const software = Array.isArray(vuln.software) ? vuln.software : [];
+  for (const s of software) {
+    const affected = s.affected_versions || {};
+    for (const range of Object.keys(affected)) {
+      // Simple range matching: <= X, < X, >= Y < Z
+      const leq = range.match(/^<=\s*([\d.\w-]+)$/);
+      if (leq && semverLTE(installedVersion, leq[1])) return true;
+      const lt = range.match(/^<\s*([\d.\w-]+)$/);
+      if (lt && semverLTE(installedVersion, lt[1]) && installedVersion !== lt[1]) return true;
+      const between = range.match(/^>=\s*([\d.\w-]+)\s+<\s*([\d.\w-]+)$/);
+      if (between) {
+        if (semverLTE(between[1], installedVersion) && semverLTE(installedVersion, between[2]) && installedVersion !== between[2]) return true;
+      }
+      const betweenLte = range.match(/^>=\s*([\d.\w-]+)\s+<=\s*([\d.\w-]+)$/);
+      if (betweenLte) {
+        if (semverLTE(betweenLte[1], installedVersion) && semverLTE(installedVersion, betweenLte[2])) return true;
+      }
+    }
+  }
+  return false;
+}
+
 router.get('/sites/:siteId/vulnerabilities', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { siteId } = req.params;
@@ -4779,6 +4845,8 @@ router.get('/sites/:siteId/vulnerabilities', async (req, res) => {
 
     // Primary: pull plugin list via IA Plugin (site_token auth — always works)
     let plugins = [];
+    let source = 'plugin';
+    let pluginErr = null;
     const pluginInv = await pluginApi.plugins(site);
     if (pluginInv.ok && Array.isArray(pluginInv.data)) {
       plugins = pluginInv.data.map((p) => {
@@ -4788,41 +4856,72 @@ router.get('/sites/:siteId/vulnerabilities', async (req, res) => {
           name: p.name,
           version: p.version || '',
           file: p.file,
-          active: p.active,
+          active: !!p.active,
+          update_available: !!p.update_available,
+          new_version: p.new_version || null,
         };
       });
     } else {
+      pluginErr = pluginInv.errorText || `plugin_status=${pluginInv.pluginStatus}`;
       // Fallback: wp/v2 core route (requires app password, may fail)
-      plugins = await getWpPlugins(site.domain).catch(() => []);
+      plugins = await getWpPlugins(site.domain).catch((e) => { pluginErr = (pluginErr || '') + '; wp-api: ' + e.message; return []; });
+      source = 'wp-api-fallback';
     }
 
-    const vulnRes = await fetch('https://www.wordfence.com/api/intelligence/v2/vulnerabilities/scanner/', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plugins: plugins.map((p) => ({ slug: p.slug || p.name, version: p.version || '' })) })
-    }).then((r) => r.json()).catch(() => ({ vulnerabilities: [] }));
+    // Pull Wordfence production feed
+    const wfFeed = await getWordfenceFeed();
+    let wordfenceStatus = 'reachable';
+    if (!wfFeed.data && wfFeed.error) wordfenceStatus = 'unreachable';
+    else if (wfFeed.cached) wordfenceStatus = 'cached';
 
-    const vulns = (vulnRes.vulnerabilities || []).map((v) => {
-      const matched = plugins.find((p) => (p.slug || '').toLowerCase() === (v.slug || '').toLowerCase());
-      return {
-        plugin: v.software?.[0]?.name || matched?.name || v.slug,
-        slug: v.slug,
-        installed_version: matched?.version || '--',
-        plugin_file: matched?.file || null,
-        plugin_active: matched?.active ?? null,
-        severity: v.severity || 'medium',
-        cve: v.cve || null,
-        title: v.title,
-        recommendation: 'Update to latest version',
-      };
-    });
+    const allVulns = wfFeed.data ? Object.values(wfFeed.data) : [];
+
+    // Match each installed plugin against the feed
+    const vulns = [];
+    for (const p of plugins) {
+      const slug = (p.slug || '').toLowerCase();
+      if (!slug) continue;
+      const matches = allVulns.filter((v) => {
+        const software = Array.isArray(v.software) ? v.software : [];
+        return software.some((s) => (s.slug || '').toLowerCase() === slug && (s.type || 'plugin') === 'plugin');
+      });
+      for (const v of matches) {
+        if (!matchVulnerability(v, p.version)) continue;
+        const cvss = v.cvss || {};
+        const severity = (cvss.rating || v.severity || 'medium').toLowerCase();
+        const cves = Array.isArray(v.cve) ? v.cve : (v.cve ? [v.cve] : (v.identifiers?.cve || []));
+        vulns.push({
+          plugin: p.name,
+          slug: p.slug,
+          installed_version: p.version || '--',
+          plugin_file: p.file || null,
+          plugin_active: p.active,
+          severity: severity === 'critical' || severity === 'high' || severity === 'medium' || severity === 'low' ? severity : 'medium',
+          cvss_score: cvss.score || null,
+          cve: cves[0] || null,
+          title: v.title || `${p.name} vulnerability`,
+          recommendation: p.update_available ? `Update to ${p.new_version || 'latest'}` : 'Update to latest version (no fix currently available)',
+        });
+      }
+    }
+
+    const outdatedCount = plugins.filter((p) => p.update_available && p.active).length;
 
     res.json({
       data: {
         vulnerabilities: vulns,
         plugins_checked: plugins.length,
+        outdated_active_plugins: outdatedCount,
         critical: vulns.filter((v) => v.severity === 'critical').length,
         high: vulns.filter((v) => v.severity === 'high').length,
         medium: vulns.filter((v) => v.severity === 'medium').length,
+        low: vulns.filter((v) => v.severity === 'low').length,
+        wordfence_status: wordfenceStatus,
+        wordfence_feed_entries: allVulns.length,
+        plugin_source: source,
+        plugin_list_error: pluginErr,
+        wordfence_error: wfFeed.error || null,
+        checked_at: new Date().toISOString(),
       },
       meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
     });
