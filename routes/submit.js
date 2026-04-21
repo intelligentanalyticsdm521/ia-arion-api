@@ -5,6 +5,7 @@ import { getServicesPool } from '../db/servicesPool.js';
 import { requireSiteToken } from '../middleware/requireSiteToken.js';
 import { firePlatformEvent } from '../lib/platformEvents.js';
 import { redeemProvisionCode } from '../lib/provisionCodes.js';
+import { triggerOnboardingPageSpeed } from './arion.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
 
 const router = Router();
@@ -446,6 +447,17 @@ router.post('/public/provision-codes/redeem', async (req, res) => {
       });
     } catch (e) {
       console.warn('[provision:event]', e.message);
+    }
+
+    // Kick off an initial PageSpeed run so the client has real CWV data
+    // in the Portal from day 1. Fire-and-forget — no await.
+    try {
+      const domainForPsi = siteRow.domain || (site_url ? new URL(site_url).hostname : null);
+      if (domainForPsi) {
+        triggerOnboardingPageSpeed(pool, tenant_id, site_id, domainForPsi);
+      }
+    } catch (e) {
+      console.warn('[provision:onboarding-psi]', e.message);
     }
 
     // Pull site row tier info for the response

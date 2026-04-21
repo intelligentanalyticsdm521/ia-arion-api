@@ -4588,6 +4588,10 @@ router.delete('/hosting/dns', async (req, res) => {
 });
 
 // --- POST /arion/hosting/pagespeed?siteId= — Run PageSpeed test + persist ---
+// Fire-and-forget: responds immediately with { queued: true, strategies: [...] }
+// so the Portal doesn't hit its 20s HTTP timeout (PSI takes 30-45s per strategy).
+// The runs complete in the background and save to site_pagespeed_snapshot.
+// Portal polls /pagespeed-history to detect when new rows land.
 router.post('/hosting/pagespeed', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId;
@@ -4602,24 +4606,52 @@ router.post('/hosting/pagespeed', async (req, res) => {
     const { strategy } = req.body || {};
     const triggeredBy = req.body?.triggered_by || 'manual';
 
-    let desktop = null;
-    let mobile = null;
+    // Determine which strategies to run. Default = BOTH so a single click
+    // gives the user mobile + desktop as they requested.
+    const strategies = strategy && (strategy === 'mobile' || strategy === 'desktop')
+      ? [strategy]
+      : ['mobile', 'desktop'];
 
-    if (!strategy || strategy === 'desktop') {
-      desktop = await runPageSpeedTest(testUrl, 'desktop');
-      if (desktop) await savePageSpeedSnapshot(pool, tenantId, siteId, desktop, triggeredBy);
-    }
-    if (!strategy || strategy === 'mobile') {
-      mobile = await runPageSpeedTest(testUrl, 'mobile');
-      if (mobile) await savePageSpeedSnapshot(pool, tenantId, siteId, mobile, triggeredBy);
-    }
+    // Respond immediately so the Portal doesn't time out
+    res.json({ queued: true, strategies, testUrl, estimated_wait_seconds: strategies.length * 45 });
 
-    res.json({ desktop, mobile });
+    // Run in background (after response sent). Azure Functions keeps the
+    // process alive long enough to complete. For safety, we serialize mobile
+    // then desktop so we don't hit PSI rate limits.
+    (async () => {
+      for (const s of strategies) {
+        try {
+          const result = await runPageSpeedTest(testUrl, s);
+          if (result) await savePageSpeedSnapshot(pool, tenantId, siteId, result, triggeredBy);
+          console.log(`[psi:${s}] ${site.domain} saved: perf=${result?.scores?.performance ?? 'null'}`);
+        } catch (err) {
+          console.error(`[psi:${s}] ${site.domain} failed:`, err.message);
+        }
+      }
+    })().catch((err) => console.error('[psi-background]', err));
   } catch (err) {
     console.error('[arion/hosting/pagespeed POST]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
+
+// Auto-trigger on site provisioning — called from provision flow
+export async function triggerOnboardingPageSpeed(pool, tenantId, siteId, domain) {
+  if (!domain) return { queued: false, reason: 'no_domain' };
+  const testUrl = 'https://' + String(domain).replace(/^https?:\/\//, '').replace(/\/$/, '');
+  (async () => {
+    for (const s of ['mobile', 'desktop']) {
+      try {
+        const result = await runPageSpeedTest(testUrl, s);
+        if (result) await savePageSpeedSnapshot(pool, tenantId, siteId, result, 'onboarding');
+        console.log(`[psi:onboarding:${s}] ${domain} saved`);
+      } catch (err) {
+        console.error(`[psi:onboarding:${s}] ${domain} failed:`, err.message);
+      }
+    }
+  })().catch((err) => console.error('[psi-onboarding]', err));
+  return { queued: true, strategies: ['mobile', 'desktop'] };
+}
 
 // Upsert a PSI snapshot by (tenant_id, site_id, run_date, strategy).
 async function savePageSpeedSnapshot(pool, tenantId, siteId, result, triggeredBy = 'manual') {
@@ -5196,6 +5228,11 @@ router.get('/sites/:siteId/plugin/security/scan-issues', (req, res) => runPlugin
   const r = await pluginApi.securityScanIssues(site);
   return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
 }, 'scan-issues'));
+
+router.post('/sites/:siteId/plugin/security/wordfence-config', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.securityWfConfig(site, req.body || {});
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'wordfence-config'));
 
 router.get('/sites/:siteId/plugin/content/publishing-pace', (req, res) => runPluginProxy(req, res, async (site) => {
   const r = await pluginApi.contentPace(site);
