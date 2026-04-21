@@ -5234,6 +5234,11 @@ router.post('/sites/:siteId/plugin/security/wordfence-config', (req, res) => run
   return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
 }, 'wordfence-config'));
 
+router.post('/sites/:siteId/plugin/cache/purge', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.purgeCache(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'purge-cache'));
+
 router.get('/sites/:siteId/plugin/content/publishing-pace', (req, res) => runPluginProxy(req, res, async (site) => {
   const r = await pluginApi.contentPace(site);
   return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
