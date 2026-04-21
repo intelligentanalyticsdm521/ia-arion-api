@@ -4948,14 +4948,13 @@ router.get('/sites/:siteId/plugin/security', (req, res) => runPluginProxy(req, r
 
 // GET /arion/sites/:siteId/plugin/performance — aggregated performance pull
 router.get('/sites/:siteId/plugin/performance', (req, res) => runPluginProxy(req, res, async (site, pool) => {
-  const [ls, sp, srv, cron] = await Promise.all([
+  const [ls, srv, cron] = await Promise.all([
     pluginApi.perfLitespeed(site),
-    pluginApi.perfShortpixel(site),
     pluginApi.perfServer(site),
     pluginApi.perfCron(site),
   ]);
 
-  if (!ls.ok && !sp.ok && !srv.ok && !cron.ok) {
+  if (!ls.ok && !srv.ok && !cron.ok) {
     const fallback = await pluginResponseFallback(pool, req.tenant.tenantId, req.params.siteId);
     if (fallback) return { data: fallback.performance || null, pluginStatus: 'unreachable', errors: [], fallback: true };
   }
@@ -4963,14 +4962,12 @@ router.get('/sites/:siteId/plugin/performance', (req, res) => runPluginProxy(req
   return {
     data: {
       litespeed: ls.data || null,
-      shortpixel: sp.data || null,
       server: srv.data || null,
       cron: cron.data || null,
     },
-    pluginStatus: [ls, sp, srv, cron].find((r) => r.ok)?.pluginStatus || 'unreachable',
+    pluginStatus: [ls, srv, cron].find((r) => r.ok)?.pluginStatus || 'unreachable',
     errors: [
       !ls.ok && `litespeed: ${ls.errorText}`,
-      !sp.ok && `shortpixel: ${sp.errorText}`,
       !srv.ok && `server: ${srv.errorText}`,
       !cron.ok && `cron: ${cron.errorText}`,
     ].filter(Boolean),
@@ -5177,6 +5174,29 @@ router.post('/sites/:siteId/plugin/updates/core', async (req, res) => {
     });
   } catch (err) {
     console.error('[plugin:updates:core]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// POST /arion/sites/:siteId/plugin/performance/image-optimize — trigger LiteSpeed bulk image optim
+router.post('/sites/:siteId/plugin/performance/image-optimize', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const r = await pluginApi.imageOptimize(site);
+
+    res.json({
+      data: r.data || { success: r.ok },
+      plugin_status: r.pluginStatus,
+      errors: r.ok ? [] : [r.errorText || 'image optimize failed'],
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[plugin:performance:image-optimize]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
