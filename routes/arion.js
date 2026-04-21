@@ -4766,6 +4766,9 @@ router.put('/sites/:siteId/content-seo/:postId', async (req, res) => {
 });
 
 // --- GET /arion/sites/:siteId/vulnerabilities ---
+// Cross-references the IA Plugin's /plugins inventory against Wordfence's
+// public vulnerability database. Falls back to wp-api/core if the plugin
+// isn't reachable.
 router.get('/sites/:siteId/vulnerabilities', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { siteId } = req.params;
@@ -4773,22 +4776,56 @@ router.get('/sites/:siteId/vulnerabilities', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    const plugins = await getWpPlugins(site.domain).catch(() => []);
+
+    // Primary: pull plugin list via IA Plugin (site_token auth — always works)
+    let plugins = [];
+    const pluginInv = await pluginApi.plugins(site);
+    if (pluginInv.ok && Array.isArray(pluginInv.data)) {
+      plugins = pluginInv.data.map((p) => {
+        const slugFromFile = (p.file || '').split('/')[0] || null;
+        return {
+          slug: p.slug || slugFromFile || p.name,
+          name: p.name,
+          version: p.version || '',
+          file: p.file,
+          active: p.active,
+        };
+      });
+    } else {
+      // Fallback: wp/v2 core route (requires app password, may fail)
+      plugins = await getWpPlugins(site.domain).catch(() => []);
+    }
+
     const vulnRes = await fetch('https://www.wordfence.com/api/intelligence/v2/vulnerabilities/scanner/', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plugins: plugins.map(p => ({ slug: p.slug || p.name, version: p.version || '' })) })
-    }).then(r => r.json()).catch(() => ({ vulnerabilities: [] }));
-    const vulns = (vulnRes.vulnerabilities || []).map(v => ({
-      plugin: v.software?.[0]?.name || v.slug, slug: v.slug,
-      installed_version: plugins.find(p => p.slug === v.slug)?.version || '--',
-      severity: v.severity || 'medium', cve: v.cve || null,
-      title: v.title, recommendation: 'Update to latest version',
-    }));
-    res.json({ data: { vulnerabilities: vulns, plugins_checked: plugins.length,
-      critical: vulns.filter(v => v.severity === 'critical').length,
-      high: vulns.filter(v => v.severity === 'high').length,
-      medium: vulns.filter(v => v.severity === 'medium').length },
-      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+      body: JSON.stringify({ plugins: plugins.map((p) => ({ slug: p.slug || p.name, version: p.version || '' })) })
+    }).then((r) => r.json()).catch(() => ({ vulnerabilities: [] }));
+
+    const vulns = (vulnRes.vulnerabilities || []).map((v) => {
+      const matched = plugins.find((p) => (p.slug || '').toLowerCase() === (v.slug || '').toLowerCase());
+      return {
+        plugin: v.software?.[0]?.name || matched?.name || v.slug,
+        slug: v.slug,
+        installed_version: matched?.version || '--',
+        plugin_file: matched?.file || null,
+        plugin_active: matched?.active ?? null,
+        severity: v.severity || 'medium',
+        cve: v.cve || null,
+        title: v.title,
+        recommendation: 'Update to latest version',
+      };
+    });
+
+    res.json({
+      data: {
+        vulnerabilities: vulns,
+        plugins_checked: plugins.length,
+        critical: vulns.filter((v) => v.severity === 'critical').length,
+        high: vulns.filter((v) => v.severity === 'high').length,
+        medium: vulns.filter((v) => v.severity === 'medium').length,
+      },
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
   } catch (err) {
     console.error('[vulnerabilities]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
