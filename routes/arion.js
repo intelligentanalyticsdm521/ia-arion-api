@@ -4587,7 +4587,7 @@ router.delete('/hosting/dns', async (req, res) => {
   }
 });
 
-// --- POST /arion/hosting/pagespeed?siteId= — Run PageSpeed test ---
+// --- POST /arion/hosting/pagespeed?siteId= — Run PageSpeed test + persist ---
 router.post('/hosting/pagespeed', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId;
@@ -4600,15 +4600,18 @@ router.post('/hosting/pagespeed', async (req, res) => {
 
     const testUrl = 'https://' + site.domain;
     const { strategy } = req.body || {};
+    const triggeredBy = req.body?.triggered_by || 'manual';
 
     let desktop = null;
     let mobile = null;
 
     if (!strategy || strategy === 'desktop') {
       desktop = await runPageSpeedTest(testUrl, 'desktop');
+      if (desktop) await savePageSpeedSnapshot(pool, tenantId, siteId, desktop, triggeredBy);
     }
     if (!strategy || strategy === 'mobile') {
       mobile = await runPageSpeedTest(testUrl, 'mobile');
+      if (mobile) await savePageSpeedSnapshot(pool, tenantId, siteId, mobile, triggeredBy);
     }
 
     res.json({ desktop, mobile });
@@ -4617,6 +4620,59 @@ router.post('/hosting/pagespeed', async (req, res) => {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
+
+// Upsert a PSI snapshot by (tenant_id, site_id, run_date, strategy).
+async function savePageSpeedSnapshot(pool, tenantId, siteId, result, triggeredBy = 'manual') {
+  if (!result) return;
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const m = result.metrics || {};
+  try {
+    // Delete any existing snapshot for today+strategy so we store the latest
+    await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('runDate', sql.Date, today)
+      .input('strategy', sql.NVarChar(10), result.strategy || 'desktop')
+      .query(`DELETE FROM arion.site_pagespeed_snapshot
+              WHERE tenant_id=@tenantId AND site_id=@siteId AND run_date=@runDate AND strategy=@strategy`);
+
+    await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('runDate', sql.Date, today)
+      .input('strategy', sql.NVarChar(10), result.strategy || 'desktop')
+      .input('performanceScore', sql.Int, result.scores?.performance ?? null)
+      .input('accessibilityScore', sql.Int, result.scores?.accessibility ?? null)
+      .input('seoScore', sql.Int, result.scores?.seo ?? null)
+      .input('bestPracticesScore', sql.Int, result.scores?.bestPractices ?? null)
+      .input('mobilePerformance', sql.Int, result.strategy === 'mobile' ? (result.scores?.performance ?? null) : null)
+      .input('desktopPerformance', sql.Int, result.strategy === 'desktop' ? (result.scores?.performance ?? null) : null)
+      .input('lcpMs', sql.Int, Math.round(m.lcp?.value ?? 0) || null)
+      .input('inpMs', sql.Int, Math.round(m.inp?.value ?? 0) || null)
+      .input('clsScore', sql.Decimal(6, 4), m.cls?.value != null ? Number(m.cls.value).toFixed(4) : null)
+      .input('fcpMs', sql.Int, Math.round(m.fcp?.value ?? 0) || null)
+      .input('tbtMs', sql.Int, Math.round(m.tbt?.value ?? 0) || null)
+      .input('opportunities', sql.NVarChar(sql.MAX), JSON.stringify(result.opportunities || []))
+      .input('cruxUrl', sql.NVarChar(sql.MAX), result.field_url ? JSON.stringify(result.field_url) : null)
+      .input('cruxOrigin', sql.NVarChar(sql.MAX), result.field_origin ? JSON.stringify(result.field_origin) : null)
+      .input('triggeredBy', sql.NVarChar(50), triggeredBy)
+      .query(`
+        INSERT INTO arion.site_pagespeed_snapshot
+          (tenant_id, site_id, run_date, strategy,
+           performance_score, accessibility_score, seo_score, best_practices_score,
+           mobile_performance, desktop_performance,
+           lcp_ms, inp_ms, cls_score, fcp_ms, tbt_ms,
+           opportunities, crux_url_json, crux_origin_json, triggered_by)
+        VALUES (@tenantId, @siteId, @runDate, @strategy,
+                @performanceScore, @accessibilityScore, @seoScore, @bestPracticesScore,
+                @mobilePerformance, @desktopPerformance,
+                @lcpMs, @inpMs, @clsScore, @fcpMs, @tbtMs,
+                @opportunities, @cruxUrl, @cruxOrigin, @triggeredBy)
+      `);
+  } catch (err) {
+    console.error('[savePageSpeedSnapshot]', err.message);
+  }
+}
 
 // --- GET /arion/hosting/pagespeed?siteId= — Get PageSpeed results (runs live for now) ---
 router.get('/hosting/pagespeed', async (req, res) => {
@@ -4932,6 +4988,8 @@ router.get('/sites/:siteId/vulnerabilities', async (req, res) => {
 });
 
 // --- GET /arion/sites/:siteId/pagespeed-history ---
+// Returns snapshots in a shape that groups mobile + desktop per run_date so
+// the Portal can draw a single chart with both lines.
 router.get('/sites/:siteId/pagespeed-history', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { siteId } = req.params;
@@ -4942,10 +5000,43 @@ router.get('/sites/:siteId/pagespeed-history', async (req, res) => {
     const result = await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('siteId', sql.UniqueIdentifier, siteId)
-      .query(`SELECT TOP 30 * FROM arion.site_pagespeed_snapshot
+      .query(`SELECT TOP 60 * FROM arion.site_pagespeed_snapshot
         WHERE tenant_id = @tenantId AND site_id = @siteId
-        ORDER BY run_date DESC`);
-    res.json({ data: { snapshots: result.recordset }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+        ORDER BY run_date DESC, created_at DESC`);
+
+    // Group snapshots by run_date so each date has {mobile: {...}, desktop: {...}}
+    const byDate = new Map();
+    for (const row of result.recordset) {
+      const dateKey = row.run_date instanceof Date ? row.run_date.toISOString().slice(0, 10) : String(row.run_date).slice(0, 10);
+      if (!byDate.has(dateKey)) byDate.set(dateKey, { timestamp: dateKey, mobile: null, desktop: null });
+      const bucket = byDate.get(dateKey);
+      const snapshot = {
+        performance: row.performance_score ?? (row.strategy === 'mobile' ? row.mobile_performance : row.desktop_performance),
+        accessibility: row.accessibility_score ?? null,
+        seo: row.seo_score ?? null,
+        best_practices: row.best_practices_score ?? null,
+        metrics: {
+          lcp: row.lcp_ms,
+          inp: row.inp_ms,
+          cls: row.cls_score != null ? Number(row.cls_score) : null,
+          fcp: row.fcp_ms,
+          tbt: row.tbt_ms,
+        },
+        opportunities: row.opportunities ? (() => { try { return JSON.parse(row.opportunities); } catch { return []; } })() : [],
+        crux_url: row.crux_url_json ? (() => { try { return JSON.parse(row.crux_url_json); } catch { return null; } })() : null,
+        crux_origin: row.crux_origin_json ? (() => { try { return JSON.parse(row.crux_origin_json); } catch { return null; } })() : null,
+        triggered_by: row.triggered_by ?? null,
+      };
+      // Back-compat: support old rows without strategy column
+      const strat = row.strategy || (row.mobile_performance != null ? 'mobile' : 'desktop');
+      bucket[strat] = snapshot;
+      // Convenience shorthand fields the old Portal chart reads
+      if (strat === 'mobile') bucket.mobileScore = snapshot.performance;
+      if (strat === 'desktop') bucket.desktopScore = snapshot.performance;
+    }
+
+    const snapshots = Array.from(byDate.values()).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    res.json({ data: { snapshots }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
   } catch (err) {
     console.error('[pagespeed-history]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
@@ -5091,6 +5182,60 @@ router.get('/sites/:siteId/plugin/theme', (req, res) => runPluginProxy(req, res,
   const r = await pluginApi.theme(site);
   return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
 }, 'theme'));
+
+// ─────────────────────────────────────────────────────────────────────────
+// v2.0.7 analytics proxy routes — new Portal visual-first data endpoints
+// ─────────────────────────────────────────────────────────────────────────
+
+router.get('/sites/:siteId/plugin/security/wordfence-full', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.securityWordfenceFull(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'wordfence-full'));
+
+router.get('/sites/:siteId/plugin/security/scan-issues', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.securityScanIssues(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'scan-issues'));
+
+router.get('/sites/:siteId/plugin/content/publishing-pace', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.contentPace(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'content-pace'));
+
+router.get('/sites/:siteId/plugin/content/age-distribution', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.contentAgeDist(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'content-age'));
+
+router.get('/sites/:siteId/plugin/content/authors', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.contentAuthors(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'content-authors'));
+
+router.get('/sites/:siteId/plugin/content/categories', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.contentCategories(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'content-categories'));
+
+router.get('/sites/:siteId/plugin/content/word-count-distribution', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.contentWordCountDist(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'content-wordcount'));
+
+router.get('/sites/:siteId/plugin/content/activity-calendar', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.contentActivityCal(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'content-activity'));
+
+router.get('/sites/:siteId/plugin/content/seo-detail', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.contentSeoDetail(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'content-seo-detail'));
+
+router.get('/sites/:siteId/plugin/plugins/risk-analysis', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.pluginsRiskAnalysis(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'plugins-risk'));
 
 // GET /arion/sites/:siteId/plugin/forms-summary
 router.get('/sites/:siteId/plugin/forms-summary', (req, res) => runPluginProxy(req, res, async (site) => {
