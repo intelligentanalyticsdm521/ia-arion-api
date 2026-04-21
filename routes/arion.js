@@ -124,7 +124,13 @@ router.get('/sites/:siteId/admin-link', async (req, res) => {
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
     if (!site.wp_admin_url) return res.status(409).json({ error: { code: 'NOT_READY', message: 'Site not yet provisioned', status: 409 } });
-    const adminUrl = site.wp_admin_url.replace(/\/$/, '') + '/wp-admin/';
+    // wp_admin_url may already end in "/wp-admin" or "/wp-admin/" — normalize
+    // to exactly one trailing "/wp-admin/" without doubling it up.
+    let adminUrl = site.wp_admin_url.replace(/\/+$/, ''); // strip trailing slashes
+    if (!/\/wp-admin$/i.test(adminUrl)) {
+      adminUrl += '/wp-admin';
+    }
+    adminUrl += '/';
     res.json({ data: { admin_url: adminUrl }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
   } catch (err) {
     console.error('[arion/sites/admin-link]', err);

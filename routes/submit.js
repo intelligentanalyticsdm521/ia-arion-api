@@ -243,8 +243,11 @@ router.post('/webhooks/site-event', requireSiteToken, async (req, res) => {
       }
 
       // ── Content lifecycle events → site_content_change ──
-      if (event_type === 'post.published' || event_type === 'post.updated' || event_type === 'post.deleted' || event_type === 'page.published') {
-        const changeType = event_type === 'post.deleted' ? 'deleted' : event_type === 'post.updated' ? 'updated' : 'published';
+      if (event_type === 'post.published' || event_type === 'post.updated' || event_type === 'post.deleted' || event_type === 'post.unpublished' || event_type === 'page.published') {
+        const changeType = event_type === 'post.deleted' ? 'deleted'
+          : event_type === 'post.updated' ? 'updated'
+          : event_type === 'post.unpublished' ? 'unpublished'
+          : 'published';
         await transaction.request()
           .input('tenantId', sql.UniqueIdentifier, tenantId)
           .input('siteId', sql.UniqueIdentifier, siteId)
@@ -412,10 +415,12 @@ router.post('/public/provision-codes/redeem', async (req, res) => {
       .input('siteId', sql.UniqueIdentifier, site_id)
       .input('tenantId', sql.UniqueIdentifier, tenant_id)
       .input('tokenHash', sql.NVarChar(64), tokenHash)
+      .input('tokenRaw', sql.NVarChar(256), rawToken)
       .input('adminEmail', sql.NVarChar(254), admin_email || null)
       .query(`
         UPDATE arion.site
         SET site_token_hash = @tokenHash,
+            site_token_raw = @tokenRaw,
             site_token_last_rotated = SYSDATETIMEOFFSET(),
             plugin_status = 'connected',
             plugin_connected_at = SYSDATETIMEOFFSET(),
