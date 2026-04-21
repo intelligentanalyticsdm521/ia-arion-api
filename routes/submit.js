@@ -188,7 +188,16 @@ router.post('/bookings/submit', requireSiteToken, async (req, res) => {
 router.post('/webhooks/site-event', requireSiteToken, async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.site.site_id;
-  const { event_type, payload = {} } = req.body;
+
+  // The IA Plugin sends the payload FLAT on the body root (event_type +
+  // all content fields as siblings). A simple `{event_type, payload}`
+  // destructure leaves `payload` undefined and loses every field. Accept
+  // both shapes — nested `payload` object if present, otherwise treat the
+  // whole body as the payload.
+  const event_type = req.body?.event_type;
+  const payload = (req.body && typeof req.body.payload === 'object' && req.body.payload !== null)
+    ? req.body.payload
+    : (req.body || {});
 
   if (!event_type) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'event_type is required', status: 400 } });
