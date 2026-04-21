@@ -4854,32 +4854,18 @@ router.put('/sites/:siteId/content-seo/:postId', async (req, res) => {
 });
 
 // --- GET /arion/sites/:siteId/vulnerabilities ---
-// Cross-references the IA Plugin's /plugins inventory against Wordfence's
-// public vulnerability feed. Falls back to wp-api/core if the plugin
-// isn't reachable. Includes diagnostic fields so the UI can explain what
-// was checked, whether Wordfence was reachable, and how many outdated
-// plugins exist regardless of known CVEs.
+// v2.0.11 — Pivoted away from the broken Wordfence public feed
+// (www.wordfence.com/api/intelligence/v2/vulnerabilities/production/ now
+// returns HTTP 410 Gone — they retired unauthenticated access).
 //
-// We cache the production feed in-memory for 1h to avoid hammering Wordfence
-// (it's a ~2MB JSON file).
-const WORDFENCE_FEED_URL = 'https://www.wordfence.com/api/intelligence/v2/vulnerabilities/production/';
-let _wfCache = { data: null, fetchedAt: 0, error: null };
-async function getWordfenceFeed() {
-  const now = Date.now();
-  if (_wfCache.data && (now - _wfCache.fetchedAt) < 60 * 60 * 1000) {
-    return { data: _wfCache.data, cached: true, error: null };
-  }
-  try {
-    const r = await fetch(WORDFENCE_FEED_URL, { headers: { 'User-Agent': 'ARION-Vuln-Scanner/1.0' } });
-    if (!r.ok) throw new Error(`Wordfence feed returned ${r.status}`);
-    const data = await r.json();
-    _wfCache = { data, fetchedAt: now, error: null };
-    return { data, cached: false, error: null };
-  } catch (err) {
-    _wfCache.error = err.message;
-    return { data: _wfCache.data, cached: !!_wfCache.data, error: err.message };
-  }
-}
+// New data sources:
+//   1. Wordfence scan findings from the installed plugin — these are real
+//      CVE matches found on the site by Wordfence's own scanner, which
+//      keeps its DB updated automatically via the plugin.
+//   2. Outdated active plugins — proxy for patch urgency, always available.
+//
+// This removes all external API dependencies — the data comes from
+// Wordfence running locally on the site.
 
 function semverLTE(a, b) {
   // Returns true if version a <= version b (naive). "a.b.c" compared left-to-right.
@@ -4896,28 +4882,16 @@ function semverLTE(a, b) {
   return true; // equal counts as <=
 }
 
-function matchVulnerability(vuln, installedVersion) {
-  // A Wordfence production-feed entry has a "software" array. Each entry has
-  // affected_versions: { "<= 1.2.3": {...}, ">= 1.0 < 2.0": {...} }.
-  // For MVP we conservatively match if installed version is <= the declared
-  // fixed/affected max — if no data, skip.
+// _deprecated — was used for matching against the retired Wordfence public feed.
+// Kept for semver helper reuse; new vulnerability source is the local Wordfence
+// scan-issues endpoint which already does the matching.
+function _deprecated_matchVulnerability(vuln, installedVersion) {
   const software = Array.isArray(vuln.software) ? vuln.software : [];
   for (const s of software) {
     const affected = s.affected_versions || {};
     for (const range of Object.keys(affected)) {
-      // Simple range matching: <= X, < X, >= Y < Z
       const leq = range.match(/^<=\s*([\d.\w-]+)$/);
       if (leq && semverLTE(installedVersion, leq[1])) return true;
-      const lt = range.match(/^<\s*([\d.\w-]+)$/);
-      if (lt && semverLTE(installedVersion, lt[1]) && installedVersion !== lt[1]) return true;
-      const between = range.match(/^>=\s*([\d.\w-]+)\s+<\s*([\d.\w-]+)$/);
-      if (between) {
-        if (semverLTE(between[1], installedVersion) && semverLTE(installedVersion, between[2]) && installedVersion !== between[2]) return true;
-      }
-      const betweenLte = range.match(/^>=\s*([\d.\w-]+)\s+<=\s*([\d.\w-]+)$/);
-      if (betweenLte) {
-        if (semverLTE(betweenLte[1], installedVersion) && semverLTE(installedVersion, betweenLte[2])) return true;
-      }
     }
   }
   return false;
@@ -4931,66 +4905,68 @@ router.get('/sites/:siteId/vulnerabilities', async (req, res) => {
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
 
-    // Primary: pull plugin list via IA Plugin (site_token auth — always works)
+    // Pull plugin inventory via IA Plugin (site_token auth)
     let plugins = [];
-    let source = 'plugin';
     let pluginErr = null;
     const pluginInv = await pluginApi.plugins(site);
     if (pluginInv.ok && Array.isArray(pluginInv.data)) {
-      plugins = pluginInv.data.map((p) => {
-        const slugFromFile = (p.file || '').split('/')[0] || null;
-        return {
-          slug: p.slug || slugFromFile || p.name,
-          name: p.name,
-          version: p.version || '',
-          file: p.file,
-          active: !!p.active,
-          update_available: !!p.update_available,
-          new_version: p.new_version || null,
-        };
-      });
+      plugins = pluginInv.data.map((p) => ({
+        slug: p.slug || (p.file || '').split('/')[0] || p.name,
+        name: p.name,
+        version: p.version || '',
+        file: p.file,
+        active: !!p.active,
+        update_available: !!p.update_available,
+        new_version: p.new_version || null,
+      }));
     } else {
       pluginErr = pluginInv.errorText || `plugin_status=${pluginInv.pluginStatus}`;
-      // Fallback: wp/v2 core route (requires app password, may fail)
-      plugins = await getWpPlugins(site.domain).catch((e) => { pluginErr = (pluginErr || '') + '; wp-api: ' + e.message; return []; });
-      source = 'wp-api-fallback';
     }
 
-    // Pull Wordfence production feed
-    const wfFeed = await getWordfenceFeed();
-    let wordfenceStatus = 'reachable';
-    if (!wfFeed.data && wfFeed.error) wordfenceStatus = 'unreachable';
-    else if (wfFeed.cached) wordfenceStatus = 'cached';
+    // v2.0.11 — Pull Wordfence scan findings from the installed plugin.
+    // Wordfence keeps its vulnerability DB updated locally and flags
+    // known-vuln plugins during its scans. Those findings come through
+    // /security/scan-issues with type indicating vulnerable-plugin.
+    const scanRes = await pluginApi.securityScanIssues(site);
+    const scanIssues = (scanRes?.data?.issues || []);
+    const wfInstalled = scanRes?.data?.installed !== false;
 
-    const allVulns = wfFeed.data ? Object.values(wfFeed.data) : [];
-
-    // Match each installed plugin against the feed
-    const vulns = [];
+    // Build CVE-style vulnerability list from Wordfence scan findings that
+    // reference plugins. Wordfence categorizes these with type patterns like
+    // 'wfPluginVulnerability' / 'knownfile_vulnerability'.
+    const pluginLookup = new Map();
     for (const p of plugins) {
-      const slug = (p.slug || '').toLowerCase();
-      if (!slug) continue;
-      const matches = allVulns.filter((v) => {
-        const software = Array.isArray(v.software) ? v.software : [];
-        return software.some((s) => (s.slug || '').toLowerCase() === slug && (s.type || 'plugin') === 'plugin');
-      });
-      for (const v of matches) {
-        if (!matchVulnerability(v, p.version)) continue;
-        const cvss = v.cvss || {};
-        const severity = (cvss.rating || v.severity || 'medium').toLowerCase();
-        const cves = Array.isArray(v.cve) ? v.cve : (v.cve ? [v.cve] : (v.identifiers?.cve || []));
-        vulns.push({
-          plugin: p.name,
-          slug: p.slug,
-          installed_version: p.version || '--',
-          plugin_file: p.file || null,
-          plugin_active: p.active,
-          severity: severity === 'critical' || severity === 'high' || severity === 'medium' || severity === 'low' ? severity : 'medium',
-          cvss_score: cvss.score || null,
-          cve: cves[0] || null,
-          title: v.title || `${p.name} vulnerability`,
-          recommendation: p.update_available ? `Update to ${p.new_version || 'latest'}` : 'Update to latest version (no fix currently available)',
-        });
+      pluginLookup.set((p.slug || '').toLowerCase(), p);
+      if (p.name) pluginLookup.set(p.name.toLowerCase(), p);
+    }
+
+    const vulns = [];
+    for (const iss of scanIssues) {
+      const type = (iss.type || '').toLowerCase();
+      const title = iss.short_msg || iss.long_msg || '';
+      // Only items that look like plugin-vuln findings
+      const isVulnType = type.includes('vulnerab') || type.includes('pluginsecu') || /CVE-\d/i.test(title);
+      if (!isVulnType) continue;
+      // Try to identify which plugin
+      let matched = null;
+      for (const [key, p] of pluginLookup) {
+        if (title.toLowerCase().includes(key) || (iss.file || '').toLowerCase().includes(key)) {
+          matched = p; break;
+        }
       }
+      const cveMatch = title.match(/CVE-\d{4}-\d+/i);
+      vulns.push({
+        plugin: matched?.name || 'Unknown',
+        slug: matched?.slug || null,
+        installed_version: matched?.version || '--',
+        plugin_file: matched?.file || null,
+        plugin_active: matched?.active ?? null,
+        severity: iss.severity || 'medium',
+        cve: cveMatch ? cveMatch[0] : null,
+        title,
+        detected_at: iss.detected_at,
+        recommendation: matched?.update_available ? `Update to ${matched.new_version || 'latest'}` : 'Review in Wordfence and patch',
+      });
     }
 
     const outdatedCount = plugins.filter((p) => p.update_available && p.active).length;
@@ -5004,11 +4980,12 @@ router.get('/sites/:siteId/vulnerabilities', async (req, res) => {
         high: vulns.filter((v) => v.severity === 'high').length,
         medium: vulns.filter((v) => v.severity === 'medium').length,
         low: vulns.filter((v) => v.severity === 'low').length,
-        wordfence_status: wordfenceStatus,
-        wordfence_feed_entries: allVulns.length,
-        plugin_source: source,
+        wordfence_status: wfInstalled ? 'installed' : 'not_installed',
+        wordfence_scan_findings_total: scanIssues.length,
+        plugin_source: pluginErr ? 'failed' : 'plugin',
         plugin_list_error: pluginErr,
-        wordfence_error: wfFeed.error || null,
+        data_source: 'wordfence_local_scan',
+        data_source_note: 'CVE matches come from Wordfence scan findings on the site (local DB, auto-updated). Outdated plugins are the primary actionable signal.',
         checked_at: new Date().toISOString(),
       },
       meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
