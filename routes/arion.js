@@ -5162,6 +5162,34 @@ router.get('/sites/:siteId/plugin/security-events', async (req, res) => {
   }
 });
 
+// GET /arion/sites/:siteId/plugin/auto-update-config — read WP auto-update settings
+router.get('/sites/:siteId/plugin/auto-update-config', (req, res) => runPluginProxy(req, res, async (site) => {
+  const r = await pluginApi.autoUpdateConfig(site);
+  return { data: r.data, pluginStatus: r.pluginStatus, errors: r.errors };
+}, 'auto-update-config'));
+
+// POST /arion/sites/:siteId/plugin/auto-update-config — toggle auto-update
+// Body: { plugin?, theme?, enabled?, all_plugins?, all_themes? }
+router.post('/sites/:siteId/plugin/auto-update-config', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const r = await pluginApi.setAutoUpdate(site, req.body || {});
+    res.json({
+      data: r.data || null,
+      plugin_status: r.pluginStatus,
+      errors: r.ok ? [] : [r.errorText || 'auto-update toggle failed'],
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[plugin:auto-update-config:post]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // GET /arion/sites/:siteId/plugin/updates-log — history of update actions
 router.get('/sites/:siteId/plugin/updates-log', async (req, res) => {
   const tenantId = req.tenant.tenantId;
