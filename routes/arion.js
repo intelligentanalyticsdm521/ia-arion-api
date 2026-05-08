@@ -704,25 +704,42 @@ router.post('/sites/:siteId/gbp/select-location', async (req, res) => {
 });
 
 // --- POST /arion/sites/:siteId/gbp/disconnect ---
-// Clears OAuth token + selected location. User can reconnect with a
-// different Google account.
+// Clears the SELECTED LOCATION but keeps the shared OAuth token because
+// Google Analytics + Search Console + Business Profile all use the same
+// gbp_oauth_token_ref. To force a full Google re-auth, the user clicks
+// "Reconnect" on the Google Analytics card (which re-runs OAuth with
+// select_account prompt).
 router.post('/sites/:siteId/gbp/disconnect', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { siteId } = req.params;
+  const { full } = req.query; // ?full=1 to nuke the OAuth token too
   try {
     const pool = await getServicesPool();
-    await pool.request()
-      .input('tenantId', sql.UniqueIdentifier, tenantId)
-      .input('siteId', sql.UniqueIdentifier, siteId)
-      .query(`
-        UPDATE arion.site
-        SET gbp_connected = 0,
-            gbp_oauth_token_ref = NULL,
-            gbp_location_name = NULL,
-            gbp_place_id = NULL
-        WHERE tenant_id = @tenantId AND site_id = @siteId
-      `);
-    res.json({ data: { disconnected: true }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+    if (full === '1' || full === 'true') {
+      await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .query(`
+          UPDATE arion.site
+          SET gbp_connected = 0,
+              gbp_oauth_token_ref = NULL,
+              gbp_location_name = NULL,
+              gbp_place_id = NULL
+          WHERE tenant_id = @tenantId AND site_id = @siteId
+        `);
+    } else {
+      // Default: only clear GBP-specific selection (keep OAuth for GA/GSC)
+      await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .query(`
+          UPDATE arion.site
+          SET gbp_location_name = NULL,
+              gbp_place_id = NULL
+          WHERE tenant_id = @tenantId AND site_id = @siteId
+        `);
+    }
+    res.json({ data: { disconnected: true, mode: full ? 'full' : 'location_only' }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
   } catch (err) {
     console.error('[gbp/disconnect]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
