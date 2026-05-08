@@ -11,6 +11,12 @@ import arionRouter from './routes/arion.js';
 import internalRouter from './routes/internal.js';
 import oauthRouter from './routes/oauth.js';
 import submitRouter from './routes/submit.js';
+import onboardingDomainsRouter from './routes/onboarding/domains.js';
+import onboardingCheckoutRouter from './routes/onboarding/checkout.js';
+import onboardingWebhookRouter from './routes/onboarding/webhook.js';
+import onboardingSubmitRouter from './routes/onboarding/submit.js';
+import onboardingStatusRouter from './routes/onboarding/status.js';
+import provisioningRouter from './routes/provisioning.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -44,6 +50,11 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 app.use((req, res, next) => (req.method === 'OPTIONS' ? res.sendStatus(204) : next()));
+
+// Mount the Stripe webhook BEFORE express.json so the router can apply raw-body
+// parsing internally (signature verification needs the byte-exact request body).
+app.use('/onboarding/webhook', onboardingWebhookRouter);
+
 app.use(express.json({ limit: '2mb' }));
 
 const startedAt = new Date().toISOString();
@@ -73,6 +84,16 @@ app.use('/health', healthRouter);
 app.use('/internal', internalRouter);
 app.use('/oauth', oauthRouter);
 app.use('/', submitRouter);
+// Onboarding routes are public (no auth) — used during signup before a tenant exists.
+// Each route does its own validation; sensitive paths require a signup session token.
+app.use('/onboarding/domains', onboardingDomainsRouter);
+app.use('/onboarding/checkout', onboardingCheckoutRouter);
+app.use('/onboarding/submit', onboardingSubmitRouter);
+app.use('/onboarding/status', onboardingStatusRouter);
+// Provisioning endpoints (no JWT auth — authenticated via single-use provisioning code in body
+// or the PROVISIONER_SHARED_SECRET header for worker callbacks).
+// Called by the IA Plugin's bootstrap class on a freshly-provisioned client site.
+app.use('/provisioning', provisioningRouter);
 app.use('/arion', requireAuth, tenantResolution, requireArionAccess, arionRouter);
 
 app.use((req, res) => res.status(404).json({ error: 'not_found', method: req.method, path: req.path }));

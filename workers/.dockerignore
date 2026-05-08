@@ -1,0 +1,12 @@
+node_modules
+.git
+.env
+.env.local
+*.log
+db/
+routes/
+middleware/
+auth/
+test/
+*.test.js
+README*
