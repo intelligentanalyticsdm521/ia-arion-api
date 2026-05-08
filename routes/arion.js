@@ -630,7 +630,12 @@ router.put('/my-business/:provider', async (req, res) => {
 
 // --- GET /arion/sites/:siteId/gbp/locations ---
 // SECURITY: surfaces ALL accounts + locations the OAuth'd Google user
-// can access. Portal must show this as a picker; we never auto-pick.
+// can access. Portal renders this as a picker.
+//
+// SMART AUTO-PICK (v2.0.13): if there's exactly ONE location on the account,
+// or if exactly one location has a domain match with the site, save it
+// automatically and return auto_selected=true. Reduces friction for the
+// 90%+ of small-biz clients with a single GBP listing.
 router.get('/sites/:siteId/gbp/locations', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { siteId } = req.params;
@@ -646,12 +651,35 @@ router.get('/sites/:siteId/gbp/locations', async (req, res) => {
 
     const { listAllGbpLocations } = await import('../lib/gbpApi.js');
     const locations = await listAllGbpLocations(tokenData.access_token, site.domain);
+
+    let autoSelected = null;
+    let currentlySelected = site.gbp_location_name || null;
+
+    // Auto-pick rules — only run when nothing is selected yet
+    if (!currentlySelected && locations.length > 0) {
+      const exactMatches = locations.filter((l) => l.match_score >= 1.0);
+      if (locations.length === 1) {
+        autoSelected = locations[0]; // only one option, no ambiguity
+      } else if (exactMatches.length === 1) {
+        autoSelected = exactMatches[0]; // exactly one domain-matched listing
+      }
+      if (autoSelected) {
+        await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .input('locationName', sql.NVarChar(200), autoSelected.location_name)
+          .query('UPDATE arion.site SET gbp_location_name = @locationName WHERE tenant_id = @tenantId AND site_id = @siteId');
+        currentlySelected = autoSelected.location_name;
+      }
+    }
+
     res.json({
       data: {
         locations,
-        currently_selected: site.gbp_location_name || null,
+        currently_selected: currentlySelected,
         site_domain: site.domain,
         suggestion: locations.find((l) => l.match_score >= 1.0)?.location_name || null,
+        auto_selected: autoSelected ? { location_name: autoSelected.location_name, title: autoSelected.title, reason: locations.length === 1 ? 'only_listing' : 'unique_domain_match' } : null,
       },
       meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
     });
@@ -5735,8 +5763,55 @@ router.get('/integrations/google/properties', async (req, res) => {
       }
     } catch (e) { console.warn('[google/properties] GSC list error:', e.message); }
 
+    // v2.0.13 SMART AUTO-SELECT — auto-pick GA4 + GSC when there's no ambiguity.
+    // Reduces friction: typical small-biz client has one GA4 property + one
+    // GSC site for their domain. The picker only really needs to show when
+    // the user manages multiple sites/properties on one Google account.
+    const autoSelected = { ga4: null, gsc: null };
+    let currentGa4 = site.ga4_property_id || null;
+    let currentGsc = site.gsc_site_url || null;
+
+    if (!currentGa4 && ga4Properties.length > 0) {
+      // Domain match if possible, else single-property fallback
+      const siteHost = String(site.domain || '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '');
+      const ga4Match = ga4Properties.find((p) => (p.displayName || '').toLowerCase().includes(siteHost.toLowerCase()));
+      const ga4Pick = ga4Match || (ga4Properties.length === 1 ? ga4Properties[0] : null);
+      if (ga4Pick) {
+        await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .input('ga4PropertyId', sql.NVarChar(40), ga4Pick.propertyId)
+          .query('UPDATE arion.site SET ga4_property_id = @ga4PropertyId WHERE tenant_id = @tenantId AND site_id = @siteId');
+        currentGa4 = ga4Pick.propertyId;
+        autoSelected.ga4 = { propertyId: ga4Pick.propertyId, displayName: ga4Pick.displayName, reason: ga4Match ? 'domain_match' : 'only_property' };
+      }
+    }
+
+    if (!currentGsc && gscSites.length > 0) {
+      const siteHost = String(site.domain || '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '');
+      const gscMatch = gscSites.find((s) => {
+        const sHost = String(s.siteUrl || '').replace(/^sc-domain:/, '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '');
+        return sHost === siteHost;
+      });
+      const gscPick = gscMatch || (gscSites.length === 1 ? gscSites[0] : null);
+      if (gscPick) {
+        await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .input('gscSiteUrl', sql.NVarChar(500), gscPick.siteUrl)
+          .query('UPDATE arion.site SET gsc_site_url = @gscSiteUrl WHERE tenant_id = @tenantId AND site_id = @siteId');
+        currentGsc = gscPick.siteUrl;
+        autoSelected.gsc = { siteUrl: gscPick.siteUrl, reason: gscMatch ? 'domain_match' : 'only_site' };
+      }
+    }
+
     res.json({
-      data: { ga4Properties, gscSites, currentGa4PropertyId: site.ga4_property_id || null },
+      data: {
+        ga4Properties, gscSites,
+        currentGa4PropertyId: currentGa4,
+        currentGscSiteUrl: currentGsc,
+        auto_selected: autoSelected,
+      },
       meta: { tenant_id: tenantId, timestamp: new Date().toISOString() }
     });
   } catch (err) {
