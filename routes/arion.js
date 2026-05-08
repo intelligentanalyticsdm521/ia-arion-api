@@ -628,6 +628,107 @@ router.put('/my-business/:provider', async (req, res) => {
   }
 });
 
+// --- GET /arion/sites/:siteId/gbp/locations ---
+// SECURITY: surfaces ALL accounts + locations the OAuth'd Google user
+// can access. Portal must show this as a picker; we never auto-pick.
+router.get('/sites/:siteId/gbp/locations', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.gbp_connected || !site.gbp_oauth_token_ref) {
+      return res.status(400).json({ error: { code: 'NOT_CONNECTED', message: 'Connect Google first', status: 400 } });
+    }
+    const tokenData = await getAccessToken(site.gbp_oauth_token_ref).catch(() => null);
+    if (!tokenData) return res.status(401).json({ error: { code: 'AUTH_EXPIRED', message: 'Google authorization expired — reconnect', status: 401 } });
+
+    const { listAllGbpLocations } = await import('../lib/gbpApi.js');
+    const locations = await listAllGbpLocations(tokenData.access_token, site.domain);
+    res.json({
+      data: {
+        locations,
+        currently_selected: site.gbp_location_name || null,
+        site_domain: site.domain,
+        suggestion: locations.find((l) => l.match_score >= 1.0)?.location_name || null,
+      },
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[gbp/locations]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/sites/:siteId/gbp/select-location ---
+// User explicitly selects which GBP location belongs to this site.
+router.post('/sites/:siteId/gbp/select-location', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  const { location_name } = req.body;
+  if (!location_name || !/^accounts\/\d+\/locations\/\d+$/.test(location_name)) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'location_name must match accounts/{a}/locations/{l}', status: 400 } });
+  }
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.gbp_oauth_token_ref) return res.status(400).json({ error: { code: 'NOT_CONNECTED', message: 'Connect Google first', status: 400 } });
+
+    // Verify the location is actually one this user can access — prevents
+    // an attacker from setting an arbitrary location_name they don't own
+    const tokenData = await getAccessToken(site.gbp_oauth_token_ref).catch(() => null);
+    if (!tokenData) return res.status(401).json({ error: { code: 'AUTH_EXPIRED', message: 'Google authorization expired', status: 401 } });
+    const { listAllGbpLocations } = await import('../lib/gbpApi.js');
+    const locations = await listAllGbpLocations(tokenData.access_token, site.domain);
+    const found = locations.find((l) => l.location_name === location_name);
+    if (!found) {
+      return res.status(403).json({ error: { code: 'NOT_AUTHORIZED', message: 'Selected location is not in your authorized GBP list', status: 403 } });
+    }
+
+    await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('locationName', sql.NVarChar(200), location_name)
+      .query('UPDATE arion.site SET gbp_location_name = @locationName WHERE tenant_id = @tenantId AND site_id = @siteId');
+
+    res.json({
+      data: { selected: location_name, title: found.title, address: found.address, website_uri: found.website_uri },
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[gbp/select-location]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/sites/:siteId/gbp/disconnect ---
+// Clears OAuth token + selected location. User can reconnect with a
+// different Google account.
+router.post('/sites/:siteId/gbp/disconnect', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .query(`
+        UPDATE arion.site
+        SET gbp_connected = 0,
+            gbp_oauth_token_ref = NULL,
+            gbp_location_name = NULL,
+            gbp_place_id = NULL
+        WHERE tenant_id = @tenantId AND site_id = @siteId
+      `);
+    res.json({ data: { disconnected: true }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    console.error('[gbp/disconnect]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // --- POST /arion/integrations/google/connect ---
 router.post('/integrations/google/connect', async (req, res) => {
   const tenantId = req.tenant.tenantId;
@@ -639,7 +740,9 @@ router.post('/integrations/google/connect', async (req, res) => {
     return res.status(503).json({ error: { code: 'NOT_CONFIGURED', message: 'Google OAuth not configured', status: 503 } });
   }
   const state = Buffer.from(JSON.stringify({ tenantId, siteId, setupMode, returnUrl })).toString('base64url');
-  const params = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', scope, state, access_type: 'offline', prompt: 'consent' });
+  // v2.0.13: force account picker (select_account) so users can switch Google
+  // accounts when reconnecting — was reusing the previously-signed-in account.
+  const params = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', scope, state, access_type: 'offline', prompt: 'select_account consent' });
   res.json({ authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString() });
 });
 
@@ -3961,34 +4064,18 @@ router.get('/search/core-web-vitals', async (req, res) => {
 // Helper: get the site row + resolved GBP location name. Persists the resolved
 // name to arion.site.gbp_location_name on first resolution so subsequent calls skip
 // the accounts→locations discovery round-trip.
+// v2.0.13 — SECURITY: Removed unsafe auto-resolution that picked the
+// first location from accounts[0].locations[0]. If no location has been
+// explicitly selected for this site, return 'gbp_location_not_selected'
+// so the Portal renders the location-picker instead of pulling random data.
 async function getGbpContext(pool, tenantId, siteId) {
   const site = await getSiteForTenant(pool, tenantId, siteId);
   if (!site) return { error: 'site_not_found', status: 404 };
   if (!site.gbp_connected) return { error: 'not_connected', site };
   const refreshToken = site.gbp_oauth_token_ref;
   if (!refreshToken) return { error: 'not_connected', site };
-  let locationName = site.gbp_location_name || null;
-  if (!locationName) {
-    const tokenData = await getAccessToken(refreshToken).catch(() => null);
-    if (!tokenData) return { error: 'gbp_auth_expired', site };
-    try {
-      locationName = await resolveGbpLocationName(tokenData.access_token);
-      if (locationName) {
-        await pool.request()
-          .input('tenantId', sql.UniqueIdentifier, tenantId)
-          .input('siteId', sql.UniqueIdentifier, siteId)
-          .input('locationName', sql.NVarChar(200), locationName)
-          .query('UPDATE arion.site SET gbp_location_name = @locationName WHERE tenant_id = @tenantId AND site_id = @siteId');
-      }
-    } catch (e) {
-      console.warn('[gbp] resolveGbpLocationName failed:', e.message);
-      // Surface quota / disabled errors specifically — these are operator actions,
-      // not a missing-location issue
-      if (e.code === 'gbp_quota_exceeded') return { error: 'gbp_quota_exceeded', site };
-      if (e.code === 'gbp_api_disabled') return { error: 'gbp_api_disabled', site };
-    }
-    if (!locationName) return { error: 'location_not_found', site };
-  }
+  const locationName = site.gbp_location_name || null;
+  if (!locationName) return { error: 'gbp_location_not_selected', site };
   return { site, refreshToken, locationName };
 }
 
