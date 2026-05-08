@@ -32,8 +32,10 @@
 
 import 'dotenv/config';
 import express from 'express';
+import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs/promises';
 import { chromium } from 'playwright';
-import { deployWordpressPlugin } from '../lib/hostinger.js';
 
 const PORT = Number(process.env.PROVISIONER_PORT || 8080);
 const HEADLESS = process.env.PROVISIONER_HEADFUL !== '1';
@@ -104,10 +106,8 @@ async function runJob(job) {
     await reportProgress(job.jobId, 'ai_builder_finalize', {});
     await finalizeAiBuilder(page);
 
-    if (job.websiteId) {
-      await reportProgress(job.jobId, 'plugin_deploy', {});
-      await deployIaPlugin(job);
-    }
+    await reportProgress(job.jobId, 'plugin_deploy', {});
+    await uploadPluginViaUi(page, job);
 
     await reportProgress(job.jobId, 'auto_redeem_trigger', {});
     await triggerAutoRedeem(page, job);
@@ -252,22 +252,73 @@ async function finalizeAiBuilder(page) {
 }
 
 /**
- * Deploy the IA Plugin to the new WP install via Hostinger's API.
- * The plugin archive is hosted at IA_PLUGIN_ARCHIVE_URL.
+ * Upload the IA Plugin via wp-admin's Plugins → Add New → Upload UI.
+ *
+ * Hostinger doesn't expose a plugin-install API endpoint, so we use the
+ * already-authenticated browser session to upload the .zip directly.
+ *
+ * Steps:
+ *   1. Download the plugin archive from IA_PLUGIN_ARCHIVE_URL to a tempfile
+ *   2. Navigate to /wp-admin/plugin-install.php?tab=upload
+ *   3. setInputFiles() on the file input
+ *   4. Click "Install Now"
+ *   5. Wait for "Activate Plugin" link, click it
  */
-async function deployIaPlugin(job) {
+async function uploadPluginViaUi(page, job) {
   const archiveUrl = process.env.IA_PLUGIN_ARCHIVE_URL;
-  if (!archiveUrl) throw Object.assign(new Error('IA_PLUGIN_ARCHIVE_URL not configured'), { step: 'plugin_deploy' });
-
-  const r = await deployWordpressPlugin({
-    websiteId: job.websiteId,
-    archive: archiveUrl, // Hostinger downloads from URL
-    activate: true,
-  });
-  if (!r.ok) {
-    const err = new Error('deployWordpressPlugin failed: ' + r.error);
+  if (!archiveUrl) {
+    const err = new Error('IA_PLUGIN_ARCHIVE_URL not configured');
     err.step = 'plugin_deploy';
     throw err;
+  }
+
+  // Download to temp
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ia-plugin-'));
+  const tmpPath = path.join(tmpDir, 'intelligent-analytics.zip');
+  try {
+    const dlRes = await fetch(archiveUrl, { signal: AbortSignal.timeout(60_000) });
+    if (!dlRes.ok) throw new Error(`Plugin archive download failed: HTTP ${dlRes.status}`);
+    const buf = Buffer.from(await dlRes.arrayBuffer());
+    await fs.writeFile(tmpPath, buf);
+
+    // Navigate to upload page
+    const uploadUrl = job.wpAdminUrl.replace(/\/$/, '') + '/plugin-install.php?tab=upload';
+    await page.goto(uploadUrl, { waitUntil: 'domcontentloaded' });
+
+    // Set the file
+    const fileInput = page.locator('input[type="file"][name="pluginzip"]');
+    await fileInput.waitFor({ state: 'attached', timeout: 15_000 });
+    await fileInput.setInputFiles(tmpPath);
+
+    // Click Install Now
+    const installBtn = page.locator('input[name="install-plugin-submit"], button:has-text("Install Now")').first();
+    await installBtn.click();
+
+    // Wait for the Activate link (or "plugin already exists" warning)
+    const activateLink = page.locator('a:has-text("Activate Plugin"), a:has-text("Activate")').first();
+    try {
+      await activateLink.waitFor({ state: 'visible', timeout: 90_000 });
+      await activateLink.click();
+      // After activation we land on plugins list
+      await page.waitForURL(/plugins\.php/, { timeout: 30_000 });
+    } catch (waitErr) {
+      // Could be "plugin destination already exists" (already installed) — try activating from plugins page instead
+      await page.goto(job.wpAdminUrl.replace(/\/$/, '') + '/plugins.php', { waitUntil: 'domcontentloaded' });
+      const activateInList = page.locator('tr[data-slug="intelligent-analytics"] a:has-text("Activate"), tr#intelligent-analytics a:has-text("Activate")').first();
+      if (await activateInList.isVisible().catch(() => false)) {
+        await activateInList.click();
+        await page.waitForLoadState('domcontentloaded');
+      }
+      // If neither path worked, surface the error
+      if (!page.url().includes('plugins.php')) {
+        const err = new Error('Plugin upload completed but activation could not be confirmed: ' + waitErr.message);
+        err.step = 'plugin_deploy';
+        throw err;
+      }
+    }
+  } finally {
+    // Best-effort temp cleanup
+    fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 

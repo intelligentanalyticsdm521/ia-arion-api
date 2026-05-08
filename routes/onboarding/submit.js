@@ -103,25 +103,45 @@ router.post('/', async (req, res) => {
 
     // 5. Domain registration (purchase mode)
     if (domain.mode === 'purchase') {
-      const purchaseRes = await registerPurchasedDomain(domain.domain, session.email);
+      // Domain purchase requires: catalog item_id + WHOIS profile + a hosting plan order_id.
+      // The questionnaire collects WHOIS contact info; the catalog item is resolved on
+      // demand. If any of these prerequisites are missing, fail fast with a clear error.
+      const purchaseRes = await registerPurchasedDomain({
+        domain: domain.domain,
+        whois: req.body?.whois || answers?.whois || null,
+        sessionEmail: session.email,
+      });
       if (!purchaseRes.ok) {
         return res.status(502).json({ error: { code: 'DOMAIN_PURCHASE_FAILED', message: purchaseRes.error, status: 502 } });
       }
     }
 
     // 6. Create the WordPress install on Hostinger
-    const adminPassword = generatePassword();
+    // Hostinger schema: domain + order_id (integer) + optional datacenter_code.
+    // No admin_email/password fields — the WP admin user is created from the Hostinger
+    // account default. Credentials are retrieved from getWebsiteDetails() after creation.
+    const orderId = Number(process.env.HOSTINGER_DEFAULT_ORDER_ID || 0);
+    if (!orderId) {
+      return res.status(503).json({
+        error: {
+          code: 'NOT_CONFIGURED',
+          message: 'HOSTINGER_DEFAULT_ORDER_ID env var is not set. Run the Hostinger smoke test (scripts/smoke-test.js) to find your active hosting order ID.',
+          status: 503,
+        },
+      });
+    }
     const wpCreate = await createWebsite({
       domain: domain.domain,
-      orderId: null, // arion-api uses default subscription on the Hostinger account
-      adminEmail: session.email,
-      adminPassword,
+      orderId,
+      datacenterCode: process.env.HOSTINGER_DEFAULT_DATACENTER || undefined,
     });
     if (!wpCreate.ok) {
       return res.status(502).json({ error: { code: 'WP_CREATE_FAILED', message: wpCreate.error, status: 502 } });
     }
     const websiteId = wpCreate.data?.website_id || wpCreate.data?.id;
     const wpAdminUrl = wpCreate.data?.wp_admin_url || `https://${domain.domain}/wp-admin/`;
+    const adminPassword = wpCreate.data?.admin_password || '';
+    const wpUser = wpCreate.data?.admin_username || session.email;
 
     // Persist what we know about the new WP install
     await pool.request()
@@ -155,7 +175,6 @@ router.post('/', async (req, res) => {
     });
 
     // 9. Create the job + dispatch to worker
-    const wpUser = session.email; // username = email (locked decision)
     const payload = {
       tenantId: session.tenant_id,
       siteId: session.site_id,
@@ -211,61 +230,62 @@ router.post('/', async (req, res) => {
 // ---------------------------------------------------------------------------
 
 /**
- * Register a purchased domain via Hostinger. We need a WHOIS profile first;
- * this helper creates one synthesized from the signup email + minimal placeholder
- * data. Real WHOIS contact info is collected post-signup in account settings.
+ * Register a purchased domain via Hostinger.
  *
- * NOTE: Hostinger's API may reject placeholder addresses for certain TLDs (.us, etc.).
- * This needs hardening — for now we use the email's domain as a stand-in and rely
- * on the user updating their WHOIS profile from Settings before renewal.
+ * Required: real WHOIS contact info (most TLDs reject placeholders).
+ * Required: a Hostinger catalog item_id for the domain registration price —
+ *           we look this up from the catalog at request time.
+ *
+ * @param {object} args
+ * @param {string} args.domain
+ * @param {object|null} args.whois - { first_name, last_name, email, phone, address1, city, state, zip, country, entity_type, ... }
+ * @param {string} args.sessionEmail
  */
-async function registerPurchasedDomain(domain, email) {
+async function registerPurchasedDomain({ domain, whois, sessionEmail }) {
+  if (!whois || !whois.first_name || !whois.last_name || !whois.address1 || !whois.city || !whois.state || !whois.zip || !whois.phone) {
+    return {
+      ok: false,
+      error: 'WHOIS contact info is required (first_name, last_name, address1, city, state, zip, phone). Collect via the onboarding questionnaire.',
+    };
+  }
+
   const tld = domain.split('.').pop();
-  const [first, last] = parseNameFromEmail(email);
   const whoisRes = await createWhoisProfile({
     tld,
-    country: 'US',
-    entity_type: 'individual',
-    first_name: first,
-    last_name: last,
-    email,
-    phone: '+15555555555',
-    address1: 'TBD — set in Settings',
-    city: 'TBD',
-    state: 'TX',
-    zip: '00000',
+    country: whois.country || 'US',
+    entity_type: whois.entity_type || 'individual',
+    whois_details: {
+      first_name: whois.first_name,
+      last_name: whois.last_name,
+      email: whois.email || sessionEmail,
+      phone: whois.phone,
+      address1: whois.address1,
+      city: whois.city,
+      state: whois.state,
+      zip: whois.zip,
+      country: whois.country || 'US',
+    },
   });
-  if (!whoisRes.ok) {
-    return { ok: false, error: 'WHOIS profile creation failed: ' + whoisRes.error };
-  }
-  const whoisProfileId = whoisRes.data?.id || whoisRes.data?.profile_id;
+  if (!whoisRes.ok) return { ok: false, error: 'WHOIS profile creation failed: ' + whoisRes.error };
+  const whoisOwnerId = whoisRes.data?.id;
 
-  const purchase = await purchaseDomain({
-    domain,
-    whoisProfileId,
-    period: 1,
-    privacyProtection: true,
-  });
-  if (!purchase.ok) {
-    return { ok: false, error: 'Domain purchase failed: ' + purchase.error };
+  // Resolve the catalog item ID for the domain registration price.
+  // Hostinger's catalog returns one item per (TLD, period) combination.
+  const itemId = process.env[`HOSTINGER_DOMAIN_ITEM_${tld.toUpperCase()}`] || null;
+  if (!itemId) {
+    return {
+      ok: false,
+      error: `No catalog item ID configured for .${tld}. Run scripts/smoke-test.js to discover and set HOSTINGER_DOMAIN_ITEM_${tld.toUpperCase()}.`,
+    };
   }
+
+  const purchase = await purchaseDomain({ domain, itemId, whoisOwnerId });
+  if (!purchase.ok) return { ok: false, error: 'Domain purchase failed: ' + purchase.error };
+
   // Best-effort hardening
   enableDomainLock(domain).catch(() => {});
   enablePrivacyProtection(domain).catch(() => {});
   return { ok: true, order_id: purchase.data?.order_id };
-}
-
-function parseNameFromEmail(email) {
-  const local = String(email).split('@')[0] || 'New';
-  const parts = local.split(/[._+-]+/);
-  const first = capitalize(parts[0] || 'New');
-  const last = capitalize(parts[1] || 'Customer');
-  return [first, last];
-}
-
-function capitalize(s) {
-  if (!s) return '';
-  return s[0].toUpperCase() + s.slice(1).toLowerCase();
 }
 
 /**
