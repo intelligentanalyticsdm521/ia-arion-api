@@ -5772,9 +5772,14 @@ router.get('/integrations/google/properties', async (req, res) => {
     let currentGsc = site.gsc_site_url || null;
 
     if (!currentGa4 && ga4Properties.length > 0) {
-      // Domain match if possible, else single-property fallback
+      // Robust match: strip non-alphanumeric, check both directions
       const siteHost = String(site.domain || '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '');
-      const ga4Match = ga4Properties.find((p) => (p.displayName || '').toLowerCase().includes(siteHost.toLowerCase()));
+      const cleanHost = siteHost.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const ga4Match = ga4Properties.find((p) => {
+        const cleanDn = (p.displayName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!cleanDn) return false;
+        return cleanHost.includes(cleanDn) || cleanDn.includes(cleanHost);
+      });
       const ga4Pick = ga4Match || (ga4Properties.length === 1 ? ga4Properties[0] : null);
       if (ga4Pick) {
         await pool.request()

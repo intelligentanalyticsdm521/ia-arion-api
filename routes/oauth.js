@@ -151,6 +151,96 @@ router.get('/google/callback', async (req, res) => {
       `);
 
     console.log(`[oauth/google/callback] Successfully stored refresh token for tenant=${tenantId} site=${siteId}`);
+
+    // v2.0.13: Immediately auto-select GBP location, GA4 property, and GSC site
+    // when there's no ambiguity. The 90% case is "one Google account, one
+    // business" — without this the user sees "Connected" in Settings but
+    // "Not connected" on Business pages because gbp_location_name is null.
+    try {
+      const { getAccessToken } = await import('../lib/googleBusiness.js');
+      const tokenData = await getAccessToken(refreshToken);
+      if (tokenData?.access_token) {
+        const accessToken = tokenData.access_token;
+        const siteRow = await pool.request()
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .query('SELECT domain FROM arion.site WHERE site_id = @siteId');
+        const siteDomain = siteRow.recordset[0]?.domain || '';
+        const siteHost = String(siteDomain).replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '');
+
+        // GBP — auto-pick if single listing or unique domain match
+        try {
+          const { listAllGbpLocations } = await import('../lib/gbpApi.js');
+          const locations = await listAllGbpLocations(accessToken, siteDomain);
+          const exactMatches = locations.filter((l) => l.match_score >= 1.0);
+          let pick = null;
+          if (locations.length === 1) pick = locations[0];
+          else if (exactMatches.length === 1) pick = exactMatches[0];
+          if (pick) {
+            await pool.request()
+              .input('siteId', sql.UniqueIdentifier, siteId)
+              .input('locationName', sql.NVarChar(200), pick.location_name)
+              .query('UPDATE arion.site SET gbp_location_name = @locationName WHERE site_id = @siteId');
+            console.log(`[oauth/google/callback] Auto-picked GBP location: ${pick.title} (${pick.location_name})`);
+          } else {
+            console.log(`[oauth/google/callback] GBP picker needed — ${locations.length} locations, ${exactMatches.length} domain matches`);
+          }
+        } catch (e) { console.warn('[oauth/google/callback] GBP auto-pick failed:', e.message); }
+
+        // GA4 — auto-pick if single property or domain match
+        try {
+          const ga4Res = await fetch('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
+            headers: { Authorization: 'Bearer ' + accessToken }
+          });
+          if (ga4Res.ok) {
+            const data = await ga4Res.json();
+            const props = [];
+            for (const acct of (data.accountSummaries || [])) {
+              for (const prop of (acct.propertySummaries || [])) {
+                props.push({ propertyId: prop.property.replace('properties/', ''), displayName: prop.displayName });
+              }
+            }
+            // Robust matcher: strip non-alphanumeric, check substring both directions
+            const cleanHost = siteHost.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const ga4Match = props.find((p) => {
+              const cleanDn = (p.displayName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+              if (!cleanDn) return false;
+              return cleanHost.includes(cleanDn) || cleanDn.includes(cleanHost);
+            });
+            const ga4Pick = ga4Match || (props.length === 1 ? props[0] : null);
+            if (ga4Pick) {
+              await pool.request()
+                .input('siteId', sql.UniqueIdentifier, siteId)
+                .input('ga4PropertyId', sql.NVarChar(40), ga4Pick.propertyId)
+                .query('UPDATE arion.site SET ga4_property_id = @ga4PropertyId WHERE site_id = @siteId');
+              console.log(`[oauth/google/callback] Auto-picked GA4: ${ga4Pick.displayName}`);
+            }
+          }
+        } catch (e) { console.warn('[oauth/google/callback] GA4 auto-pick failed:', e.message); }
+
+        // GSC — auto-pick if single site or exact domain match
+        try {
+          const gscRes = await fetch('https://www.googleapis.com/webmasters/v3/sites', {
+            headers: { Authorization: 'Bearer ' + accessToken }
+          });
+          if (gscRes.ok) {
+            const data = await gscRes.json();
+            const sites = (data.siteEntry || []).map(s => ({ siteUrl: s.siteUrl }));
+            const gscMatch = sites.find((s) => {
+              const sHost = String(s.siteUrl || '').replace(/^sc-domain:/, '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '');
+              return sHost === siteHost;
+            });
+            const gscPick = gscMatch || (sites.length === 1 ? sites[0] : null);
+            if (gscPick) {
+              await pool.request()
+                .input('siteId', sql.UniqueIdentifier, siteId)
+                .input('gscSiteUrl', sql.NVarChar(500), gscPick.siteUrl)
+                .query('UPDATE arion.site SET gsc_site_url = @gscSiteUrl WHERE site_id = @siteId');
+              console.log(`[oauth/google/callback] Auto-picked GSC: ${gscPick.siteUrl}`);
+            }
+          }
+        } catch (e) { console.warn('[oauth/google/callback] GSC auto-pick failed:', e.message); }
+      }
+    } catch (e) { console.warn('[oauth/google/callback] auto-select outer failed:', e.message); }
   } catch (err) {
     console.error('[oauth/google/callback] DB update error:', err.message);
     return res.status(500).send(`
