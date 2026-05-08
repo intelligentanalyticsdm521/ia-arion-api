@@ -25,6 +25,9 @@ import { verifyWebhook } from '../../lib/stripe.js';
 import { getServicesPool } from '../../db/servicesPool.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
 import { firePlatformEvent } from '../../lib/platformEvents.js';
+import { sendEmail } from '../../lib/email.js';
+import { welcomeEmail, paymentFailedEmail } from '../../lib/emailTemplates.js';
+import { getPlan } from '../../lib/pricing.js';
 
 const router = Router();
 
@@ -182,9 +185,30 @@ async function handleCheckoutCompleted(pool, session) {
       eventRefId: tenantId,
       payload: { plan: meta.plan, billing_cycle: meta.billing_cycle, email: customerEmail },
     });
+
+    // Welcome email — fire and forget (don't fail the webhook if email is down)
+    const planMeta = getPlan(meta.plan || 'starter');
+    const firstName = parseFirstName(session.customer_details?.name || '');
+    const tpl = welcomeEmail({
+      firstName,
+      planName: planMeta?.name || 'your',
+      billingCycle: meta.billing_cycle || 'monthly',
+    });
+    sendEmail({
+      to: customerEmail,
+      subject: tpl.subject,
+      html: tpl.html,
+      tag: 'welcome',
+      metadata: { tenant_id: tenantId, site_id: siteId, stripe_session_id: session.id },
+    }).catch((err) => console.warn('[webhook] welcome email failed:', err.message));
   }
 
   console.log(`[webhook] checkout.completed → tenant=${tenantId} site=${siteId}`);
+}
+
+function parseFirstName(fullName) {
+  if (!fullName) return '';
+  return String(fullName).split(/\s+/)[0] || '';
 }
 
 async function handleSubscriptionDeleted(pool, sub) {
@@ -205,9 +229,29 @@ async function handleSubscriptionUpdated(pool, sub) {
 
 async function handlePaymentFailed(pool, invoice) {
   if (!invoice.subscription) return;
-  await pool.request()
+
+  // Mark tenant past_due + look up email for the dunning notice
+  const r = await pool.request()
     .input('subId', sql.NVarChar(200), invoice.subscription)
-    .query(`UPDATE arion.tenant SET status = 'past_due', updated_at = SYSDATETIMEOFFSET() WHERE stripe_subscription_id = @subId`);
+    .query(`
+      UPDATE arion.tenant
+      SET status = 'past_due', updated_at = SYSDATETIMEOFFSET()
+      OUTPUT inserted.primary_email
+      WHERE stripe_subscription_id = @subId
+    `);
+
+  const email = r.recordset[0]?.primary_email;
+  if (!email) return;
+
+  const amountUsd = invoice.amount_due ? invoice.amount_due / 100 : null;
+  const tpl = paymentFailedEmail({ firstName: '', amountUsd, updatePaymentUrl: null });
+  sendEmail({
+    to: email,
+    subject: tpl.subject,
+    html: tpl.html,
+    tag: 'payment_failed',
+    metadata: { stripe_subscription_id: invoice.subscription, invoice_id: invoice.id },
+  }).catch((err) => console.warn('[webhook] payment-failed email failed:', err.message));
 }
 
 export default router;

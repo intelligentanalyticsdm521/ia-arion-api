@@ -22,6 +22,9 @@ import { hashSiteToken } from '../lib/siteToken.js';
 import { buildManifest } from '../lib/manifestBuilder.js';
 import { firePlatformEvent } from '../lib/platformEvents.js';
 import { transitionState, getJob } from '../lib/provisioningJobs.js';
+import { sendEmail } from '../lib/email.js';
+import { siteReadyEmail, portalAccountInviteEmail } from '../lib/emailTemplates.js';
+import { createPortalUser } from '../lib/entraExternalId.js';
 
 const router = Router();
 
@@ -178,6 +181,16 @@ router.post('/site-ready', async (req, res) => {
         WHERE tenant_id = @tenantId AND site_id = @siteId
       `);
 
+    // Fire site-ready email + tier-gated integration kickoff (best-effort, non-blocking)
+    if (status === 'ok' || status === 'partial') {
+      sendSiteReadyNotification(pool, { tenant_id, site_id, partial: status === 'partial' })
+        .catch((err) => console.warn('[provisioning/site-ready] notification failed:', err.message));
+
+      // Tier-gated integrations (GA4, GSC, Bing Webmaster, SE Ranking project)
+      kickoffTierIntegrations(pool, { tenant_id, site_id })
+        .catch((err) => console.warn('[provisioning/site-ready] integration kickoff failed:', err.message));
+    }
+
     // Fire platform event so downstream services (analytics, billing, etc.)
     // know the site is live.
     await firePlatformEvent(pool, {
@@ -254,6 +267,112 @@ function safeParseArray(s) {
   } catch {
     return [];
   }
+}
+
+/**
+ * Send the "your site is live" email. Looks up the tenant's primary email
+ * and the new site's domain + WP login URL, then fires a templated email.
+ *
+ * @param {sql.ConnectionPool} pool
+ * @param {object} args
+ * @param {string} args.tenant_id
+ * @param {string} args.site_id
+ * @param {boolean} args.partial - true if the bootstrap reported "partial"
+ */
+async function sendSiteReadyNotification(pool, { tenant_id, site_id, partial }) {
+  const r = await pool.request()
+    .input('tenantId', sql.UniqueIdentifier, tenant_id)
+    .input('siteId', sql.UniqueIdentifier, site_id)
+    .query(`
+      SELECT TOP 1 t.primary_email, t.entra_user_id, s.domain, s.wp_admin_url
+      FROM arion.tenant t
+      JOIN arion.site s ON s.tenant_id = t.tenant_id
+      WHERE t.tenant_id = @tenantId AND s.site_id = @siteId
+    `);
+  const row = r.recordset[0];
+  if (!row?.primary_email || !row?.domain) return;
+
+  const wpLoginUrl = row.wp_admin_url
+    ? String(row.wp_admin_url).replace(/\/+$/, '').replace(/\/wp-admin$/, '') + '/wp-login.php'
+    : `https://${row.domain}/wp-login.php`;
+
+  // 1. "Site is live" email
+  const tpl = siteReadyEmail({
+    firstName: '',
+    domain: row.domain,
+    wpLoginUrl,
+    portalUrl: null,
+    partial: !!partial,
+  });
+  await sendEmail({
+    to: row.primary_email,
+    subject: tpl.subject,
+    html: tpl.html,
+    tag: partial ? 'site_ready_partial' : 'site_ready',
+    metadata: { tenant_id, site_id, domain: row.domain },
+  });
+
+  // 2. Portal account invite — only if we haven't already created one
+  if (!row.entra_user_id) {
+    try {
+      const userRes = await createPortalUser({
+        email: row.primary_email,
+        displayName: row.primary_email,
+      });
+      if (userRes.ok) {
+        // Persist the Entra user ID so we don't re-create on retries
+        await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenant_id)
+          .input('userId', sql.NVarChar(80), userRes.userId)
+          .query(`UPDATE arion.tenant SET entra_user_id = @userId, updated_at = SYSDATETIMEOFFSET() WHERE tenant_id = @tenantId`);
+
+        // Email them the temp credentials
+        if (userRes.tempPassword) {
+          const inviteUrl = process.env.IADM_PORTAL_SIGNIN_URL || (process.env.PORTAL_URL || 'https://portal.intelligentanalyticsdm.com');
+          const inviteTpl = portalAccountInviteEmail({
+            firstName: '',
+            email: row.primary_email,
+            inviteRedeemUrl: inviteUrl,
+          });
+          await sendEmail({
+            to: row.primary_email,
+            subject: inviteTpl.subject,
+            // Attach temp password to the body — it's a forced-change credential
+            html: inviteTpl.html.replace(
+              '</td></tr>',
+              `<p style="margin:16px 0 0;font-size:13px;color:#374151;background:#f3f4f6;padding:10px;border-radius:6px;">Temporary password: <code style="font-family:monospace;">${escapeForHtml(userRes.tempPassword)}</code><br/><span style="color:#6b7280;">You'll be asked to change this on first sign-in.</span></p></td></tr>`
+            ),
+            tag: 'portal_account_invite',
+            metadata: { tenant_id, user_id: userRes.userId },
+          });
+        }
+      } else {
+        console.warn('[provisioning/site-ready] createPortalUser failed:', userRes.error);
+      }
+    } catch (err) {
+      console.warn('[provisioning/site-ready] portal user invite error:', err.message);
+    }
+  }
+}
+
+function escapeForHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Fire tier-gated integration setup. Each integration runs independently and
+ * non-blocking — the site is "ready" regardless of whether GA4/GSC/etc.
+ * provisioning succeeds. Failures surface in the dashboard's Integrations
+ * panel where the client can retry.
+ */
+async function kickoffTierIntegrations(pool, { tenant_id, site_id }) {
+  const { default: kickoffModule } = await import('../lib/integrationKickoff.js');
+  await kickoffModule.runForSite(pool, { tenantId: tenant_id, siteId: site_id });
 }
 
 export default router;
