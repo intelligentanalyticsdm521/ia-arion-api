@@ -139,7 +139,7 @@ async function handleCheckoutCompleted(pool, session) {
       .input('stripeSubscriptionId', sql.NVarChar(200), session.subscription || '')
       .query(`
         INSERT INTO arion.tenant
-          (tenant_id, primary_email, plan, billing_cycle, stripe_customer_id, stripe_subscription_id, status, created_at)
+          (tenant_id, primary_email, [plan], billing_cycle, stripe_customer_id, stripe_subscription_id, status, created_at)
         VALUES
           (@tenantId, @email, @plan, @billingCycle, @stripeCustomerId, @stripeSubscriptionId, 'pending_onboarding', SYSDATETIMEOFFSET())
       `);

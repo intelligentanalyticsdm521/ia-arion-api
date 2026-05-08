@@ -15,7 +15,7 @@ BEGIN
   CREATE TABLE arion.tenant (
     tenant_id                UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
     primary_email            NVARCHAR(320)     NOT NULL,
-    plan                     NVARCHAR(40)      NOT NULL DEFAULT 'starter',  -- starter|essentials|growth|authority
+    [plan]                   NVARCHAR(40)      NOT NULL DEFAULT 'starter',  -- starter|essentials|growth|authority
     billing_cycle            NVARCHAR(20)      NOT NULL DEFAULT 'monthly',  -- monthly|annual
     status                   NVARCHAR(40)      NOT NULL DEFAULT 'pending_onboarding',
                                                                             -- pending_onboarding|active|past_due|cancelled|paused

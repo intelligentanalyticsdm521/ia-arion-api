@@ -30,7 +30,7 @@ router.get('/', async (req, res) => {
       .query(`
         SELECT TOP 1
           ss.email, ss.questionnaire_json, ss.domain_json, ss.submitted_at,
-          t.plan, t.billing_cycle, t.status,
+          t.[plan], t.billing_cycle, t.status,
           s.domain, s.provisioning_state
         FROM arion.signup_session ss
         JOIN arion.tenant t ON t.tenant_id = ss.tenant_id

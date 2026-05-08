@@ -62,7 +62,7 @@ router.post('/provision', async (req, res) => {
     // If the tenant existed before the signup flow shipped, fall back to starter.
     const tenantRow = await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
-      .query(`SELECT TOP 1 plan, primary_email FROM arion.tenant WHERE tenant_id = @tenantId`);
+      .query(`SELECT TOP 1 [plan], primary_email FROM arion.tenant WHERE tenant_id = @tenantId`);
     const tenantTier = String(tenantRow.recordset[0]?.plan || 'starter').toLowerCase();
     const tenantEmail = tenantRow.recordset[0]?.primary_email || '';
 
