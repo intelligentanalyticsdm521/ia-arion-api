@@ -37,15 +37,41 @@ export function getCredential() {
 }
 
 let poolPromise = null;
+// Unix-ms timestamp when the cached pool's auth token expires.
+// Managed Identity SQL tokens last ~1 hour; we proactively rebuild 5 min
+// before expiry so we never serve a request with an expired token.
+let poolTokenExpiresAt = 0;
+const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
+/**
+ * Returns a connected mssql ConnectionPool for the iadm_platform database.
+ *
+ * Token-expiry handling: the cached pool is reused only while its auth
+ * token still has >5min of life. Otherwise we tear down the old pool and
+ * build a fresh one. This fixes the long-standing "token is expired" 500s
+ * that would surface after the App Service had been running for 1+ hour.
+ */
 export async function getPlatformPool() {
-  if (poolPromise) return poolPromise;
+  if (poolPromise && Date.now() < poolTokenExpiresAt - TOKEN_REFRESH_BUFFER_MS) {
+    return poolPromise;
+  }
+
+  if (poolPromise) {
+    try {
+      const oldPool = await poolPromise;
+      oldPool.close().catch(() => {});
+    } catch { /* ignore */ }
+    poolPromise = null;
+    poolTokenExpiresAt = 0;
+  }
 
   if (!sqlServer) throw new Error("PLATFORM_SQL_SERVER (or SQL_SERVER) env var is required for arion-api");
 
   const connectTimeoutMs = Number(process.env.SQL_CONNECT_TIMEOUT_MS || "12000");
   const credential = getCredential();
   const token = await withTimeout(credential.getToken(SQL_SCOPE), connectTimeoutMs, "ManagedIdentity getToken");
+
+  poolTokenExpiresAt = token.expiresOnTimestamp || (Date.now() + 50 * 60 * 1000);
 
   const config = {
     server: sqlServer,
@@ -70,6 +96,7 @@ export async function getPlatformPool() {
       .then((pool) => pool)
       .catch((err) => {
         poolPromise = null;
+        poolTokenExpiresAt = 0;
         throw err;
       }),
     connectTimeoutMs,
@@ -77,4 +104,15 @@ export async function getPlatformPool() {
   );
 
   return poolPromise;
+}
+
+/**
+ * Force the next getPlatformPool() call to rebuild from scratch.
+ */
+export function invalidatePlatformPool() {
+  if (poolPromise) {
+    poolPromise.then((p) => p.close().catch(() => {})).catch(() => {});
+  }
+  poolPromise = null;
+  poolTokenExpiresAt = 0;
 }
