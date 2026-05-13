@@ -804,11 +804,46 @@ router.post('/seo/project/create', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    // TODO: call SE Ranking API to create project for site.domain
+    const tier = (site.seo_addon_tier || '').toLowerCase();
+    if (!tier) return res.status(400).json({ error: { code: 'NO_TIER', message: 'Site has no seo_addon_tier — purchase an SEO add-on first.', status: 400 } });
+
+    const { configureForTier, persistResult } = await import('../lib/seoOnboarding.js');
+    const result = await configureForTier(site, tier);
+    if (result.projectId) await persistResult(pool, tenantId, siteId, result);
+
     const integrationId = crypto.randomUUID();
-    res.json({ integration: { siteIntegrationId: integrationId, providerCode: 'se_ranking', status: 'pending', config: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, snapshot: null });
+    res.json({
+      integration: {
+        siteIntegrationId: integrationId, providerCode: 'se_ranking',
+        status: result.ok ? 'active' : 'partial',
+        config: { tier, projectId: result.projectId, ...result.config },
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      },
+      snapshot: { errors: result.errors, manual_steps: result.manual_steps },
+    });
   } catch (err) {
     console.error('[arion/seo/project/create]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// POST /arion/seo/project/reconfigure — re-run onboarding when tier changes
+router.post('/seo/project/reconfigure', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.body;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const tier = (site.seo_addon_tier || '').toLowerCase();
+    if (!tier) return res.status(400).json({ error: { code: 'NO_TIER', message: 'No seo_addon_tier on site' } });
+    const { configureForTier, persistResult } = await import('../lib/seoOnboarding.js');
+    const result = await configureForTier(site, tier);
+    if (result.projectId) await persistResult(pool, tenantId, siteId, result);
+    res.json({ ok: result.ok, tier, config: result.config, projectId: result.projectId, errors: result.errors, manual_steps: result.manual_steps });
+  } catch (err) {
+    console.error('[arion/seo/project/reconfigure]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
