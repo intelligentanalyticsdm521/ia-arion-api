@@ -12,7 +12,7 @@
 import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
-import { pluginPost } from '../../lib/pluginClient.js';
+import { pluginGet, pluginPost } from '../../lib/pluginClient.js';
 
 const router = Router();
 
@@ -96,6 +96,46 @@ router.post('/publish-newsletter', async (req, res) => {
     });
   } catch (err) {
     console.error('[arion/plugin/publish-newsletter]', err);
+    res.status(500).json({ error: 'internal_error', message: err.message });
+  }
+});
+
+/**
+ * GET /arion/plugin/posts?category=Newsletter&limit=50
+ * Returns recent WordPress posts from the tenant's primary site so SPARK
+ * Newsletter Studio can offer an "Import from ARION" flow.
+ */
+router.get('/posts', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const category = (req.query.category || '').toString();
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50));
+  try {
+    const pool = await getServicesPool();
+    const site = await pickPrimarySite(pool, tenantId, req.query.site_id || null);
+    if (!site) {
+      return res.status(404).json({
+        error: 'no_arion_site',
+        message: 'No ARION-managed WordPress site found for this tenant.',
+      });
+    }
+    const q = { limit: String(limit) };
+    if (category) q.category = category;
+    const r = await pluginGet(site, '/posts', { query: q, timeoutMs: 20_000 });
+    if (!r.ok) {
+      return res.status(502).json({
+        error: 'plugin_call_failed',
+        plugin_status: r.pluginStatus,
+        details: r.errorText || null,
+      });
+    }
+    return res.json({
+      ok: true,
+      site_id: site.site_id,
+      posts: r.data?.posts || [],
+      count: r.data?.count || 0,
+    });
+  } catch (err) {
+    console.error('[arion/plugin/posts]', err);
     res.status(500).json({ error: 'internal_error', message: err.message });
   }
 });
