@@ -36,6 +36,7 @@ import bookingsRouter from './arion/bookings.js';
 import gbpRouter from './arion/gbp.js';
 import integrationsRouter from './arion/integrations.js';
 import domainsRouter from './arion/domains.js';
+import pluginRouter from './arion/plugin.js';
 
 const router = Router();
 
@@ -45,6 +46,9 @@ router.use('/sites/:siteId/bookings', bookingsRouter);
 router.use('/sites/:siteId/gbp', gbpRouter);
 router.use('/sites/:siteId', integrationsRouter);
 router.use('/sites/:siteId/domain', domainsRouter);
+
+// Cross-product plugin proxy — used by LUMEN-API for newsletter publishing.
+router.use('/plugin', pluginRouter);
 
 // Helper: get site summary for portal
 function toSiteSummary(row) {
