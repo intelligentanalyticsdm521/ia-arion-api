@@ -827,6 +827,50 @@ router.post('/seo/project/create', async (req, res) => {
   }
 });
 
+// POST /arion/sites/:siteId/provision-code — admin mint a provisioning code +
+// return three install paths (WP-CLI zero-touch, magic link, manual paste).
+router.post('/sites/:siteId/provision-code', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  const { ttl_days } = req.body || {};
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const { createProvisionCode } = await import('../lib/provisionCodes.js');
+    const result = await createProvisionCode(pool, {
+      tenantId, siteId, createdBy: req.user?.email || req.user?.userId || null,
+      ttlDays: Number(ttl_days) > 0 ? Number(ttl_days) : 7,
+    });
+
+    // The plugin auto-redeem reads option `ia_pending_provision_code` on
+    // admin_init. WP-CLI snippet pre-seeds that option during Hostinger
+    // first-boot so the plugin self-configures on first admin pageview.
+    const wpCliSnippet = `wp option update ia_pending_provision_code "${result.code}" --autoload=yes`;
+    const wpCliAlternate = `wp eval 'update_option("ia_pending_provision_code", "${result.code}", true);'`;
+    const magicLink = `${site.primary_url ? site.primary_url.replace(/\/+$/, '') : `https://${site.domain}`}/wp-admin/admin.php?page=ia-arion&ia_provision=${encodeURIComponent(result.code)}`;
+
+    res.status(201).json({
+      data: {
+        code: result.code,
+        code_id: result.code_id,
+        expires_at: result.expires_at,
+        install_options: {
+          zero_touch_wp_cli: wpCliSnippet,
+          zero_touch_wp_cli_alt: wpCliAlternate,
+          magic_link: magicLink,
+          manual_code: result.code,
+        },
+        site: { id: site.site_id, domain: site.domain, primary_url: site.primary_url },
+      },
+    });
+  } catch (err) {
+    console.error('[arion/sites/:siteId/provision-code]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // POST /arion/seo/project/reconfigure — re-run onboarding when tier changes
 router.post('/seo/project/reconfigure', async (req, res) => {
   const tenantId = req.tenant.tenantId;
