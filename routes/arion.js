@@ -6439,6 +6439,162 @@ router.get('/analytics', async (req, res) => {
   }
 });
 
+// ── IA Insights v5.x — score history + prior-period lookup ───────────
+//
+// Frontend trend engines run client-side. The endpoints below let the
+// Trends page persist the resulting scores per period and look up the
+// prior period's scores for ghost-bar comparison.
+
+// POST /arion/ia-insights/scores — upsert current-period scores
+router.post('/ia-insights/scores', async (req, res) => {
+  try {
+    const tenantId = req.tenant.tenantId;
+    const { siteId, periodStart, periodEnd, scores } = req.body || {};
+    if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required' } });
+    if (!scores || typeof scores !== 'object') return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'scores object required' } });
+    if (!periodEnd) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'periodEnd required (YYYY-MM-DD)' } });
+    const periodStartDate = periodStart || new Date(new Date(periodEnd).getTime() - 90 * 86400000).toISOString().slice(0, 10);
+
+    const pool = await getServicesPool();
+    let written = 0;
+    for (const [reportKey, scoreVal] of Object.entries(scores)) {
+      const intScore = Math.max(0, Math.min(100, Math.round(Number(scoreVal) || 0)));
+      try {
+        await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .input('reportKey', sql.NVarChar(40), reportKey)
+          .input('periodEnd', sql.Date, periodEnd)
+          .input('periodStart', sql.Date, periodStartDate)
+          .input('score', sql.Int, intScore)
+          .query(`MERGE arion.ia_insights_score_history AS tgt
+                  USING (SELECT @tenantId AS tenant_id, @siteId AS site_id, @reportKey AS report_key, @periodEnd AS period_end) AS src
+                  ON tgt.tenant_id=src.tenant_id AND tgt.site_id=src.site_id AND tgt.report_key=src.report_key AND tgt.period_end=src.period_end
+                  WHEN MATCHED THEN UPDATE SET score=@score, period_start=@periodStart, updated_at=SYSUTCDATETIME()
+                  WHEN NOT MATCHED THEN INSERT (tenant_id, site_id, report_key, period_end, period_start, score)
+                    VALUES (@tenantId, @siteId, @reportKey, @periodEnd, @periodStart, @score);`);
+        written++;
+      } catch (e) { console.warn('[ia-insights/scores] upsert failed', reportKey, e.message); }
+    }
+    res.json({ ok: true, written });
+  } catch (err) {
+    console.error('[ia-insights/scores POST]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+  }
+});
+
+// GET /arion/ia-insights/prior-scores?siteId=&beforeDate=YYYY-MM-DD
+// Returns the most recent score history row per report_key whose period_end
+// is strictly before the supplied date — i.e. the "prior period" comparison.
+router.get('/ia-insights/prior-scores', async (req, res) => {
+  try {
+    const tenantId = req.tenant.tenantId;
+    const siteId = req.query.siteId;
+    const beforeDate = req.query.beforeDate || new Date().toISOString().slice(0, 10);
+    if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required' } });
+    const pool = await getServicesPool();
+    const r = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('beforeDate', sql.Date, beforeDate)
+      .query(`WITH ranked AS (
+                SELECT report_key, score, period_end,
+                       ROW_NUMBER() OVER (PARTITION BY report_key ORDER BY period_end DESC) AS rn
+                FROM arion.ia_insights_score_history
+                WHERE tenant_id=@tenantId AND site_id=@siteId AND period_end < @beforeDate
+              )
+              SELECT report_key, score, period_end FROM ranked WHERE rn = 1`);
+    const scores = {};
+    for (const row of r.recordset) scores[row.report_key] = { score: row.score, periodEnd: row.period_end };
+    res.json({ data: scores });
+  } catch (err) {
+    console.error('[ia-insights/prior-scores]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+  }
+});
+
+// GET /arion/ia-insights/score-history?siteId=&reportKey=&limit=12
+// Returns the last N periods of scores for a single report — used for
+// sparkline trend within an expanded report card.
+router.get('/ia-insights/score-history', async (req, res) => {
+  try {
+    const tenantId = req.tenant.tenantId;
+    const siteId = req.query.siteId;
+    const reportKey = req.query.reportKey;
+    const limit = Math.min(60, parseInt(req.query.limit) || 12);
+    if (!siteId || !reportKey) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId and reportKey required' } });
+    const pool = await getServicesPool();
+    const r = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('reportKey', sql.NVarChar(40), reportKey)
+      .input('limit', sql.Int, limit)
+      .query(`SELECT TOP (@limit) period_end, score
+              FROM arion.ia_insights_score_history
+              WHERE tenant_id=@tenantId AND site_id=@siteId AND report_key=@reportKey
+              ORDER BY period_end DESC`);
+    res.json({ data: r.recordset.reverse() });
+  } catch (err) {
+    console.error('[ia-insights/score-history]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+  }
+});
+
+// GET /arion/ia-insights/service-area?siteId=  — read tenant service area config
+// PUT /arion/ia-insights/service-area — update
+router.get('/ia-insights/service-area', async (req, res) => {
+  try {
+    const tenantId = req.tenant.tenantId;
+    const siteId = req.query.siteId;
+    if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required' } });
+    const pool = await getServicesPool();
+    const r = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId).input('siteId', sql.UniqueIdentifier, siteId)
+      .query(`SELECT service_area_json FROM arion.site WHERE site_id=@siteId AND tenant_id=@tenantId`);
+    const raw = r.recordset[0]?.service_area_json || null;
+    let data = null;
+    try { data = raw ? JSON.parse(raw) : null; } catch { /* ignore */ }
+    res.json({ data });
+  } catch (err) {
+    console.error('[ia-insights/service-area GET]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+  }
+});
+
+router.put('/ia-insights/service-area', async (req, res) => {
+  try {
+    const tenantId = req.tenant.tenantId;
+    const { siteId, serviceArea } = req.body || {};
+    if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required' } });
+    const pool = await getServicesPool();
+    await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId).input('siteId', sql.UniqueIdentifier, siteId)
+      .input('json', sql.NVarChar(sql.MAX), serviceArea ? JSON.stringify(serviceArea) : null)
+      .query(`UPDATE arion.site SET service_area_json=@json WHERE site_id=@siteId AND tenant_id=@tenantId`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[ia-insights/service-area PUT]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+  }
+});
+
+// GET /arion/ia-insights/benchmarks?category=  — list industry benchmarks
+router.get('/ia-insights/benchmarks', async (req, res) => {
+  try {
+    const category = req.query.category;
+    const pool = await getServicesPool();
+    const r = pool.request();
+    let q = `SELECT service_category, metric_key, benchmark_value, units, notes FROM arion.ia_insights_benchmark`;
+    if (category) { r.input('cat', sql.NVarChar(60), category); q += ' WHERE service_category=@cat'; }
+    q += ' ORDER BY service_category, metric_key';
+    const rs = await r.query(q);
+    res.json({ data: rs.recordset });
+  } catch (err) {
+    console.error('[ia-insights/benchmarks]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+  }
+});
+
 // --- GET /arion/analytics/insights?siteId= ---
 router.get('/analytics/insights', async (req, res) => {
   const tenantId = req.tenant.tenantId;
