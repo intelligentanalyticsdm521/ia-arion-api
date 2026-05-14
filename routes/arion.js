@@ -6550,11 +6550,12 @@ router.get('/ia-insights/service-area', async (req, res) => {
     const pool = await getServicesPool();
     const r = await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId).input('siteId', sql.UniqueIdentifier, siteId)
-      .query(`SELECT service_area_json FROM arion.site WHERE site_id=@siteId AND tenant_id=@tenantId`);
+      .query(`SELECT service_area_json, service_category FROM arion.site WHERE site_id=@siteId AND tenant_id=@tenantId`);
     const raw = r.recordset[0]?.service_area_json || null;
     let data = null;
     try { data = raw ? JSON.parse(raw) : null; } catch { /* ignore */ }
-    res.json({ data });
+    const serviceCategory = r.recordset[0]?.service_category || null;
+    res.json({ data, service_category: serviceCategory });
   } catch (err) {
     console.error('[ia-insights/service-area GET]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
@@ -6564,13 +6565,22 @@ router.get('/ia-insights/service-area', async (req, res) => {
 router.put('/ia-insights/service-area', async (req, res) => {
   try {
     const tenantId = req.tenant.tenantId;
-    const { siteId, serviceArea } = req.body || {};
+    const { siteId, serviceArea, serviceCategory } = req.body || {};
     if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required' } });
     const pool = await getServicesPool();
-    await pool.request()
-      .input('tenantId', sql.UniqueIdentifier, tenantId).input('siteId', sql.UniqueIdentifier, siteId)
-      .input('json', sql.NVarChar(sql.MAX), serviceArea ? JSON.stringify(serviceArea) : null)
-      .query(`UPDATE arion.site SET service_area_json=@json WHERE site_id=@siteId AND tenant_id=@tenantId`);
+    const sets = [];
+    const r = pool.request().input('tenantId', sql.UniqueIdentifier, tenantId).input('siteId', sql.UniqueIdentifier, siteId);
+    // Only touch keys the caller passed (so partial updates don't blank fields).
+    if ('serviceArea' in (req.body || {})) {
+      r.input('json', sql.NVarChar(sql.MAX), serviceArea ? JSON.stringify(serviceArea) : null);
+      sets.push('service_area_json=@json');
+    }
+    if ('serviceCategory' in (req.body || {})) {
+      r.input('cat', sql.NVarChar(60), serviceCategory || null);
+      sets.push('service_category=@cat');
+    }
+    if (!sets.length) return res.status(400).json({ error: { code: 'MISSING_FIELDS', message: 'serviceArea or serviceCategory required' } });
+    await r.query(`UPDATE arion.site SET ${sets.join(', ')} WHERE site_id=@siteId AND tenant_id=@tenantId`);
     res.json({ ok: true });
   } catch (err) {
     console.error('[ia-insights/service-area PUT]', err);
