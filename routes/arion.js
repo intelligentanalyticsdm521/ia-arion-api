@@ -51,6 +51,61 @@ router.use('/sites/:siteId/domain', domainsRouter);
 // Cross-product plugin proxy — used by LUMEN-API for newsletter publishing.
 router.use('/plugin', pluginRouter);
 
+// GET /arion/onboarding/checklist — in-app onboarding parity with
+// SPARK/OLIVER. Real completion from arion.site columns. The SE Ranking
+// step is the IA SEO add-on (seoAddon → UI shows "Add Intelligent
+// Analytics SEO package to access this" rather than a generic upgrade).
+router.get('/onboarding/checklist', async (req, res) => {
+  try {
+    const tenantId = req.tenant.tenantId;
+    const pool = await getServicesPool();
+    const r = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .query(`SELECT TOP 1 site_id, domain, status, ga4_property_id,
+                     gsc_connected, gbp_connected, bing_connected,
+                     se_ranking_project_id
+              FROM arion.site WHERE tenant_id=@tenantId
+              ORDER BY created_at`);
+    const s = r.recordset[0] || null;
+
+    const CATALOG = [
+      { key: 'arion_site',      group: 'ARION', label: 'Create your website',                 required: true,  done: !!s },
+      { key: 'arion_ga4',       group: 'ARION', label: 'Connect Google Analytics 4',          required: true,  done: !!s?.ga4_property_id },
+      { key: 'arion_gsc',       group: 'ARION', label: 'Connect Google Search Console',       required: false, done: !!s && s.gsc_connected === true },
+      { key: 'arion_gbp',       group: 'ARION', label: 'Connect Google Business Profile',     required: false, done: !!s && s.gbp_connected === true },
+      { key: 'arion_bing',      group: 'ARION', label: 'Connect Bing Webmaster Tools',        required: false, done: !!s && s.bing_connected === true },
+      { key: 'arion_seranking', group: 'SEO',   label: 'Set up SE Ranking (SEO tracking)',    required: false, done: !!s?.se_ranking_project_id, seoAddon: true },
+    ];
+    const steps = CATALOG.map((x) => ({
+      product: 'arion',
+      ...x,
+      // SEO step is "locked" behind the IA SEO package until provisioned.
+      locked: x.seoAddon === true && !x.done,
+      requiredAddon: x.seoAddon === true && !x.done ? 'Intelligent Analytics SEO package' : null,
+    }));
+    const total = steps.length;
+    const done = steps.filter((x) => x.done).length;
+    const requiredTotal = steps.filter((x) => x.required).length;
+    const requiredDone = steps.filter((x) => x.required && x.done).length;
+    return res.json({
+      data: {
+        siteId: s?.site_id || null,
+        domain: s?.domain || null,
+        steps,
+        progress: {
+          done, total,
+          required_done: requiredDone, required_total: requiredTotal,
+          percent: total ? Math.round((done / total) * 100) : 0,
+          required_percent: requiredTotal ? Math.round((requiredDone / requiredTotal) * 100) : 0,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('[arion onboarding.checklist]', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // Helper: get site summary for portal
 function toSiteSummary(row) {
   return {
