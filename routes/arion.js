@@ -2,6 +2,7 @@ import { Router } from 'express';
 import sql from 'mssql';
 import crypto from 'node:crypto';
 import { getServicesPool } from '../db/servicesPool.js';
+import { getPlatformPool } from '../db/platformPool.js';
 import { firePlatformEvent } from '../lib/platformEvents.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
 import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries, getSearchConsoleDates, getSearchConsolePageQuery, getAnalyticsData, resolveGscProperty } from '../lib/googleServices.js';
@@ -723,10 +724,28 @@ router.post('/sites/:siteId/gbp/select-location', async (req, res) => {
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('siteId', sql.UniqueIdentifier, siteId)
       .input('locationName', sql.NVarChar(200), location_name)
-      .query('UPDATE arion.site SET gbp_location_name = @locationName WHERE tenant_id = @tenantId AND site_id = @siteId');
+      .input('placeId', sql.NVarChar(80), found.place_id || null)
+      .query('UPDATE arion.site SET gbp_location_name = @locationName, gbp_place_id = @placeId WHERE tenant_id = @tenantId AND site_id = @siteId');
+
+    // Cross-product: push the Google place id + review URL to the SHARED
+    // tenant profile (core.tenants) so OLIVER review-request automation,
+    // invoices, and the customer portal use it automatically — set once in
+    // ARION, used everywhere. Guarded: a pre-migration-004 DB just skips it.
+    if (found.place_id || found.review_uri) {
+      try {
+        const platformPool = await getPlatformPool();
+        await platformPool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('placeId', sql.NVarChar(80), found.place_id || null)
+          .input('reviewUrl', sql.NVarChar(500), found.review_uri || null)
+          .query('UPDATE core.tenants SET google_place_id = @placeId, google_review_url = @reviewUrl WHERE tenant_id = @tenantId');
+      } catch (shareErr) {
+        console.warn('[gbp/select-location] shared-profile write skipped (migration 004 not applied?):', shareErr.message);
+      }
+    }
 
     res.json({
-      data: { selected: location_name, title: found.title, address: found.address, website_uri: found.website_uri },
+      data: { selected: location_name, title: found.title, address: found.address, website_uri: found.website_uri, place_id: found.place_id || null },
       meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
     });
   } catch (err) {

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../db/servicesPool.js';
+import { getPlatformPool } from '../db/platformPool.js';
 
 const router = Router();
 
@@ -179,8 +180,29 @@ router.get('/google/callback', async (req, res) => {
             await pool.request()
               .input('siteId', sql.UniqueIdentifier, siteId)
               .input('locationName', sql.NVarChar(200), pick.location_name)
-              .query('UPDATE arion.site SET gbp_location_name = @locationName WHERE site_id = @siteId');
+              .input('placeId', sql.NVarChar(80), pick.place_id || null)
+              .query('UPDATE arion.site SET gbp_location_name = @locationName, gbp_place_id = @placeId WHERE site_id = @siteId');
             console.log(`[oauth/google/callback] Auto-picked GBP location: ${pick.title} (${pick.location_name})`);
+            // Push Google review URL to the shared tenant profile so OLIVER
+            // (review automation/invoices) and others use it automatically.
+            if (pick.place_id || pick.review_uri) {
+              try {
+                const tRow = await pool.request()
+                  .input('siteId', sql.UniqueIdentifier, siteId)
+                  .query('SELECT tenant_id FROM arion.site WHERE site_id = @siteId');
+                const tid = tRow.recordset[0]?.tenant_id;
+                if (tid) {
+                  const platformPool = await getPlatformPool();
+                  await platformPool.request()
+                    .input('tenantId', sql.UniqueIdentifier, tid)
+                    .input('placeId', sql.NVarChar(80), pick.place_id || null)
+                    .input('reviewUrl', sql.NVarChar(500), pick.review_uri || null)
+                    .query('UPDATE core.tenants SET google_place_id = @placeId, google_review_url = @reviewUrl WHERE tenant_id = @tenantId');
+                }
+              } catch (shareErr) {
+                console.warn('[oauth/google/callback] shared-profile GBP write skipped:', shareErr.message);
+              }
+            }
           } else {
             console.log(`[oauth/google/callback] GBP picker needed — ${locations.length} locations, ${exactMatches.length} domain matches`);
           }
