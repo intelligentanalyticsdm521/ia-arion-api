@@ -34,6 +34,7 @@ import {
 import { createJob, transitionState, getLatestJobForSite } from '../../lib/provisioningJobs.js';
 import { dispatchJob } from '../../lib/workerClient.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
+import { updateSharedProfile } from '../../db/platformPool.js';
 
 const router = Router();
 
@@ -85,6 +86,18 @@ router.post('/', async (req, res) => {
             submitted_at = SYSDATETIMEOFFSET()
         WHERE session_pk = @sessionPk
       `);
+
+    // 3b. Persist the CANONICAL org fields back to the shared core.tenants
+    // record so OLIVER/SPARK see the same business name + brand the customer
+    // just confirmed. ARION-specific website answers (industry, services,
+    // pages, voice, style…) stay ARION-local in questionnaire_json. Strictly
+    // best-effort — updateSharedProfile swallows its own errors so a platform-
+    // DB hiccup can never block site provisioning (critical path).
+    await updateSharedProfile(session.tenant_id, {
+      businessName: answers.businessName || null,
+      brandColor: answers.primaryColor || null,
+      websiteUrl: domain.domain ? `https://${domain.domain}` : null,
+    });
 
     // 4. BYOD verification gate
     if (domain.mode === 'byod') {

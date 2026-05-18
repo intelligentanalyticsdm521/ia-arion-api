@@ -13,8 +13,22 @@
 import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
-import { getPlatformPool } from '../../db/platformPool.js';
+import { getPlatformPool, getSharedProfile } from '../../db/platformPool.js';
 import { getPlan } from '../../lib/pricing.js';
+
+// Map the SHARED core.tenants record onto the wizard's canonical answer
+// fields. Only canonical org fields are prefilled — ARION-specific website
+// answers (industry, services, pages, voice…) are never sourced from here.
+function sharedToPrefill(shared) {
+  if (!shared) return null;
+  const businessName = shared.business_name || shared.full_name || null;
+  const primaryColor = shared.brand_color || null;
+  if (!businessName && !primaryColor) return null;
+  return {
+    ...(businessName ? { businessName } : {}),
+    ...(primaryColor ? { primaryColor } : {}),
+  };
+}
 
 const router = Router();
 
@@ -30,7 +44,7 @@ router.get('/', async (req, res) => {
       .input('sessionId', sql.NVarChar(200), sessionId)
       .query(`
         SELECT TOP 1
-          ss.email, ss.questionnaire_json, ss.domain_json, ss.submitted_at,
+          ss.email, ss.tenant_id, ss.questionnaire_json, ss.domain_json, ss.submitted_at,
           t.[plan], t.billing_cycle, t.status,
           s.domain, s.provisioning_state
         FROM arion.signup_session ss
@@ -54,6 +68,9 @@ router.get('/', async (req, res) => {
           return res.json({
             data: {
               email: x.email,
+              // Guest self-serve intent — no tenant provisioned yet, so there
+              // is no shared profile to prefill from.
+              shared_profile: null,
               product: x.product,
               plan: { key: x.plan, name: pm?.name || x.plan, description: pm?.description || null },
               billing_cycle: x.billing_cycle,
@@ -74,9 +91,15 @@ router.get('/', async (req, res) => {
     const row = r.recordset[0];
     const planMeta = getPlan(row.plan);
 
+    // Prefill canonical answers from the SHARED profile so the customer
+    // doesn't re-type what the operator already entered. Resumed progress
+    // (saved_questionnaire) still wins on the client.
+    const sharedPrefill = sharedToPrefill(await getSharedProfile(row.tenant_id));
+
     return res.json({
       data: {
         email: row.email,
+        shared_profile: sharedPrefill,
         plan: {
           key: row.plan,
           name: planMeta?.name || row.plan,

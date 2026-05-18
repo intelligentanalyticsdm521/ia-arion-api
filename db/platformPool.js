@@ -107,6 +107,73 @@ export async function getPlatformPool() {
 }
 
 /**
+ * The shared org/business profile from core.tenants — the SINGLE source of
+ * truth shared across OLIVER / SPARK / ARION (same record OLIVER reads in
+ * oliver-api/routes/onboarding.js). Returns null if absent or unavailable;
+ * onboarding must never break because the platform DB is unreachable.
+ */
+export async function getSharedProfile(tenantId) {
+  if (!tenantId) return null;
+  try {
+    const pool = await getPlatformPool();
+    const r = await pool.request()
+      .input("tid", sql.UniqueIdentifier, tenantId)
+      .query(`
+        SELECT TOP 1 business_name, full_name, primary_contact_email,
+               primary_contact_phone, website_url, logo_url, brand_color,
+               address_line1, city, state_province, postal_code, country_region
+        FROM core.tenants WHERE tenant_id=@tid`);
+    return r.recordset[0] || null;
+  } catch (e) {
+    console.warn("[arion platformPool] getSharedProfile failed:", e.message);
+    return null;
+  }
+}
+
+// API field → core.tenants column + max length. Only the CANONICAL org fields
+// ARION onboarding can supply; ARION-specific website answers (industry,
+// services, pages, voice…) stay ARION-local and are NOT written here.
+const SHARED_PROFILE_COLUMNS = {
+  businessName: { col: "business_name", len: 1000 },
+  brandColor:   { col: "brand_color",   len: 20 },
+  websiteUrl:   { col: "website_url",   len: 500 },
+};
+
+/**
+ * Write canonical org fields back to the shared core.tenants record. Returns
+ * true on success, false on any failure — callers MUST treat this as
+ * best-effort so a platform-DB hiccup never blocks site provisioning.
+ */
+export async function updateSharedProfile(tenantId, fields) {
+  if (!tenantId || !fields || typeof fields !== "object") return false;
+  try {
+    const sets = [];
+    const pool = await getPlatformPool();
+    const reqDb = pool.request().input("tid", sql.UniqueIdentifier, tenantId);
+    for (const [apiKey, def] of Object.entries(SHARED_PROFILE_COLUMNS)) {
+      if (!(apiKey in fields)) continue;
+      let v = fields[apiKey];
+      if (v === undefined || v === null) continue;
+      v = String(v).trim();
+      if (v === "") continue;
+      if (v.length > def.len) v = v.slice(0, def.len);
+      const p = `p_${apiKey}`;
+      sets.push(`${def.col} = @${p}`);
+      reqDb.input(p, sql.NVarChar(def.len), v);
+    }
+    if (sets.length === 0) return false;
+    await reqDb.query(`
+      UPDATE core.tenants
+         SET ${sets.join(", ")}
+       WHERE tenant_id = @tid`);
+    return true;
+  } catch (e) {
+    console.warn("[arion platformPool] updateSharedProfile failed:", e.message);
+    return false;
+  }
+}
+
+/**
  * Force the next getPlatformPool() call to rebuild from scratch.
  */
 export function invalidatePlatformPool() {
