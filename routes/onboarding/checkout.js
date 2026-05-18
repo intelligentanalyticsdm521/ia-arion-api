@@ -26,9 +26,11 @@ const FREE_FIRST_YEAR_COUPON_ID = process.env.STRIPE_DOMAIN_FREE_FIRST_YEAR_COUP
 // ---------------------------------------------------------------------------
 // GET /catalog — public, used by signup plan-picker UI
 // ---------------------------------------------------------------------------
-router.get('/catalog', (_req, res) => {
+router.get('/catalog', (req, res) => {
+  // ?product=arion|oliver|spark (default arion — backward compatible)
+  const product = String(req.query?.product || 'arion').toLowerCase();
   res.json({
-    data: { plans: getCatalog() },
+    data: { product, plans: getCatalog(product) },
     meta: { timestamp: new Date().toISOString() },
   });
 });
@@ -45,30 +47,40 @@ router.get('/catalog', (_req, res) => {
 // ---------------------------------------------------------------------------
 router.post('/create-session', async (req, res) => {
   const { email, name, plan, billing_cycle, domain } = req.body || {};
+  // product is OPTIONAL and defaults to 'arion' so the existing ARION signup
+  // is byte-for-byte unchanged. oliver|spark are the new self-serve products.
+  const product = String(req.body?.product || 'arion').toLowerCase();
+  const isArion = product === 'arion';
 
   // Validation
   if (!email || typeof email !== 'string') {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'email required', status: 400 } });
   }
-  const planMeta = getPlan(plan);
+  if (!['arion', 'oliver', 'spark'].includes(product)) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'invalid product', status: 400 } });
+  }
+  const planMeta = getPlan(product, plan);
   if (!planMeta) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'invalid plan', status: 400 } });
   }
   if (!['monthly', 'annual'].includes(billing_cycle)) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'billing_cycle must be monthly|annual', status: 400 } });
   }
-  if (!domain || !domain.mode || !['purchase', 'byod'].includes(domain.mode)) {
+  // Domain choice only applies to ARION (it builds a website). OLIVER/SPARK
+  // have no domain step — accept a missing/placeholder domain for them.
+  if (isArion && (!domain || !domain.mode || !['purchase', 'byod'].includes(domain.mode))) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'domain.mode must be purchase|byod', status: 400 } });
   }
+  const dom = isArion ? domain : { mode: 'byod' };
 
   const stripe = getStripeClient();
   if (!stripe) {
     return res.status(503).json({ error: { code: 'SERVICE_UNAVAILABLE', message: 'Stripe not configured', status: 503 } });
   }
 
-  const priceId = getStripePriceId(plan, billing_cycle);
+  const priceId = getStripePriceId(product, plan, billing_cycle);
   if (!priceId) {
-    return res.status(503).json({ error: { code: 'SERVICE_UNAVAILABLE', message: `Stripe price not configured for ${plan}/${billing_cycle}`, status: 503 } });
+    return res.status(503).json({ error: { code: 'SERVICE_UNAVAILABLE', message: `Stripe price not configured for ${product}/${plan}/${billing_cycle}`, status: 503 } });
   }
 
   try {
@@ -76,7 +88,7 @@ router.post('/create-session', async (req, res) => {
     const customer = await ensureCustomer({
       email,
       name,
-      metadata: { source: 'arion_signup', plan, billing_cycle },
+      metadata: { source: `${product}_signup`, product, plan, billing_cycle },
     });
 
     // 2. Build line items: plan subscription + (optional) domain registration
@@ -85,15 +97,15 @@ router.post('/create-session', async (req, res) => {
     ];
 
     let domainLineApplied = false;
-    if (domain.mode === 'purchase' && domain.name) {
+    if (isArion && dom.mode === 'purchase' && dom.name) {
       // Domain billed as a one-time payment via inline price_data so we don't
       // need a separate Stripe Product per TLD/duration.
-      const domainPriceUsd = Number(domain.registration_price_usd || 14.99);
+      const domainPriceUsd = Number(dom.registration_price_usd || 14.99);
       lineItems.push({
         price_data: {
           currency: 'usd',
           product_data: {
-            name: `Domain registration: ${domain.name}`,
+            name: `Domain registration: ${dom.name}`,
             description: '1-year domain registration via Hostinger',
           },
           unit_amount: Math.round(domainPriceUsd * 100), // cents
@@ -107,8 +119,9 @@ router.post('/create-session', async (req, res) => {
     // 3. Build discounts list — free first year on annual + purchase only
     const discounts = [];
     if (
+      isArion &&
       billing_cycle === 'annual' &&
-      domain.mode === 'purchase' &&
+      dom.mode === 'purchase' &&
       domainLineApplied &&
       FREE_FIRST_YEAR_COUPON_ID
     ) {
@@ -129,20 +142,22 @@ router.post('/create-session', async (req, res) => {
         // handler can reconstruct the onboarding context without DB lookups.
         subscription_data: {
           metadata: {
+            product,
             plan,
             billing_cycle,
-            domain_mode: domain.mode,
-            domain_name: domain.name || '',
+            domain_mode: dom.mode,
+            domain_name: dom.name || '',
           },
         },
         metadata: {
+          product,
           plan,
           billing_cycle,
-          domain_mode: domain.mode,
-          domain_name: domain.name || '',
+          domain_mode: dom.mode,
+          domain_name: dom.name || '',
         },
       },
-      { idempotencyKey: idempotencyKey('checkout', email, plan, billing_cycle, domain.name || '') }
+      { idempotencyKey: idempotencyKey('checkout', product, email, plan, billing_cycle, dom.name || '') }
     );
 
     return res.json({

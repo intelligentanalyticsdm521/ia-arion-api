@@ -28,6 +28,7 @@ import { firePlatformEvent } from '../../lib/platformEvents.js';
 import { sendEmail } from '../../lib/email.js';
 import { welcomeEmail, paymentFailedEmail } from '../../lib/emailTemplates.js';
 import { getPlan } from '../../lib/pricing.js';
+import { getPlatformPool } from '../../db/platformPool.js';
 
 const router = Router();
 
@@ -108,6 +109,37 @@ async function handleCheckoutCompleted(pool, session) {
   const customerEmail = session.customer_details?.email || session.customer_email;
   if (!customerEmail) {
     console.warn('[webhook] checkout.completed without email — cannot create tenant');
+    return;
+  }
+
+  // OLIVER / SPARK self-serve = GUEST checkout. There is no Entra account or
+  // core.tenants row yet (created via the provisioning proc on first sign-in).
+  // Record a durable, schema-safe paid intent in core.signup_intent and stop.
+  // ARION keeps its existing arion.* website-build path below, unchanged.
+  const product = String(meta.product || 'arion').toLowerCase();
+  if (product === 'oliver' || product === 'spark') {
+    try {
+      const pp = await getPlatformPool();
+      await pp.request()
+        .input('sid', sql.NVarChar(200), session.id)
+        .input('email', sql.NVarChar(320), customerEmail)
+        .input('product', sql.NVarChar(20), product)
+        .input('plan', sql.NVarChar(40), meta.plan || 'standard')
+        .input('billing', sql.NVarChar(20), meta.billing_cycle || 'monthly')
+        .input('cust', sql.NVarChar(100), session.customer || null)
+        .input('sub', sql.NVarChar(100), session.subscription || null)
+        .query(`
+          IF NOT EXISTS (SELECT 1 FROM core.signup_intent WHERE stripe_session_id=@sid)
+          INSERT INTO core.signup_intent
+            (stripe_session_id, email, product, [plan], billing_cycle,
+             stripe_customer_id, stripe_subscription_id, status)
+          VALUES (@sid, @email, @product, @plan, @billing, @cust, @sub, 'paid')
+        `);
+      console.log(`[webhook] ${product} signup intent recorded → session=${session.id} email=${customerEmail}`);
+    } catch (err) {
+      console.error('[webhook] signup_intent upsert failed:', err.message);
+      throw err; // let Stripe retry — we must not lose a paid signup
+    }
     return;
   }
 

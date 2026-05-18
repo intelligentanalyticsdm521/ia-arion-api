@@ -13,6 +13,7 @@
 import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
+import { getPlatformPool } from '../../db/platformPool.js';
 import { getPlan } from '../../lib/pricing.js';
 
 const router = Router();
@@ -39,6 +40,35 @@ router.get('/', async (req, res) => {
       `);
 
     if (r.recordset.length === 0) {
+      // OLIVER / SPARK self-serve: no arion.* rows — hydrate from the
+      // product-agnostic core.signup_intent (guest checkout intent).
+      try {
+        const pp = await getPlatformPool();
+        const si = await pp.request()
+          .input('sid', sql.NVarChar(200), sessionId)
+          .query(`SELECT TOP 1 email, product, [plan], billing_cycle, status
+                  FROM core.signup_intent WHERE stripe_session_id=@sid`);
+        if (si.recordset.length) {
+          const x = si.recordset[0];
+          const pm = getPlan(x.product, x.plan);
+          return res.json({
+            data: {
+              email: x.email,
+              product: x.product,
+              plan: { key: x.plan, name: pm?.name || x.plan, description: pm?.description || null },
+              billing_cycle: x.billing_cycle,
+              tenant_status: x.status, // 'paid' until provisioned on first sign-in
+              site: { domain: null, provisioning_state: null },
+              saved_questionnaire: null,
+              saved_domain: null,
+              already_submitted: false,
+            },
+            meta: { timestamp: new Date().toISOString() },
+          });
+        }
+      } catch (e) {
+        console.error('[onboarding/session-info] signup_intent lookup failed:', e.message);
+      }
       return res.status(404).json({ error: { code: 'SESSION_NOT_FOUND', message: 'Signup session not found', status: 404 } });
     }
     const row = r.recordset[0];
