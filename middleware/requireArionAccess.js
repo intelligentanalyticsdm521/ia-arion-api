@@ -76,7 +76,9 @@ export async function requireArionAccess(req, res, next) {
       `);
 
     const tenantUserId = membership.recordset[0]?.tenant_user_id || null;
-    if (!tenantUserId) {
+    // IA consulting session: operator isn't a member of the client tenant by
+    // design — actingTenantGuard already validated platform-admin/grant.
+    if (!tenantUserId && !req.isConsultingSession) {
       return res.status(403).json({ error: "Not authorized", details: "User is not a member of the selected tenant." });
     }
 

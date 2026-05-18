@@ -5,6 +5,7 @@ import express from 'express';
 import { requireAuth } from './middleware/requireAuth.js';
 import { tenantResolution } from './middleware/tenantResolution.js';
 import { requireArionAccess } from './middleware/requireArionAccess.js';
+import { actingTenantGuard } from './lib/consultingAccess.js';
 
 import healthRouter from './routes/health.js';
 import arionRouter from './routes/arion.js';
@@ -96,7 +97,7 @@ app.use('/onboarding/session-info', onboardingSessionInfoRouter);
 // or the PROVISIONER_SHARED_SECRET header for worker callbacks).
 // Called by the IA Plugin's bootstrap class on a freshly-provisioned client site.
 app.use('/provisioning', provisioningRouter);
-app.use('/arion', requireAuth, tenantResolution, requireArionAccess, arionRouter);
+app.use('/arion', requireAuth, tenantResolution, actingTenantGuard, requireArionAccess, arionRouter);
 
 app.use((req, res) => res.status(404).json({ error: 'not_found', method: req.method, path: req.path }));
 
