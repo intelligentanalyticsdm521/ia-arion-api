@@ -124,7 +124,7 @@ async function handleCheckoutCompleted(pool, session) {
         .input('sid', sql.NVarChar(200), session.id)
         .input('email', sql.NVarChar(320), customerEmail)
         .input('product', sql.NVarChar(20), product)
-        .input('plan', sql.NVarChar(40), meta.plan || 'standard')
+        .input('plan', sql.NVarChar(40), meta.plan || meta.volume || 'standard')
         .input('billing', sql.NVarChar(20), meta.billing_cycle || 'monthly')
         .input('cust', sql.NVarChar(100), session.customer || null)
         .input('sub', sql.NVarChar(100), session.subscription || null)

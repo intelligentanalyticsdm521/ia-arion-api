@@ -15,7 +15,7 @@
  */
 
 import { Router } from 'express';
-import { getCatalog, getStripePriceId, getPlan } from '../../lib/pricing.js';
+import { getCatalog, getStripePriceId, getPlan, getStripeCatalog, buildSignupLineItems } from '../../lib/pricing.js';
 import { getStripeClient, ensureCustomer, idempotencyKey } from '../../lib/stripe.js';
 
 const router = Router();
@@ -26,13 +26,28 @@ const FREE_FIRST_YEAR_COUPON_ID = process.env.STRIPE_DOMAIN_FREE_FIRST_YEAR_COUP
 // ---------------------------------------------------------------------------
 // GET /catalog — public, used by signup plan-picker UI
 // ---------------------------------------------------------------------------
-router.get('/catalog', (req, res) => {
+router.get('/catalog', async (req, res) => {
   // ?product=arion|oliver|spark (default arion — backward compatible)
   const product = String(req.query?.product || 'arion').toLowerCase();
-  res.json({
-    data: { product, plans: getCatalog(product) },
-    meta: { timestamp: new Date().toISOString() },
-  });
+  const cycle = req.query?.billing === 'annual' ? 'annual' : 'monthly';
+  try {
+    if (product === 'oliver' || product === 'spark') {
+      // Live from Stripe (source of truth) — names/amounts resolved by the
+      // catalog naming convention; no env vars, no drift.
+      const data = await getStripeCatalog(product, cycle);
+      return res.json({
+        data: product === 'spark' ? data : { product, plans: data },
+        meta: { timestamp: new Date().toISOString() },
+      });
+    }
+    res.json({
+      data: { product, plans: getCatalog(product) }, // ARION (env, unchanged)
+      meta: { timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[onboarding/catalog]', err);
+    res.status(503).json({ error: { code: 'CATALOG_UNAVAILABLE', message: err.message, status: 503 } });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -59,12 +74,16 @@ router.post('/create-session', async (req, res) => {
   if (!['arion', 'oliver', 'spark'].includes(product)) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'invalid product', status: 400 } });
   }
-  const planMeta = getPlan(product, plan);
-  if (!planMeta) {
-    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'invalid plan', status: 400 } });
-  }
   if (!['monthly', 'annual'].includes(billing_cycle)) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'billing_cycle must be monthly|annual', status: 400 } });
+  }
+  // ARION validates plan via env catalog; OLIVER/SPARK validate inside the
+  // Stripe-resolved line-item builder.
+  if (isArion) {
+    const planMeta = getPlan(product, plan);
+    if (!planMeta) {
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'invalid plan', status: 400 } });
+    }
   }
   // Domain choice only applies to ARION (it builds a website). OLIVER/SPARK
   // have no domain step — accept a missing/placeholder domain for them.
@@ -78,9 +97,26 @@ router.post('/create-session', async (req, res) => {
     return res.status(503).json({ error: { code: 'SERVICE_UNAVAILABLE', message: 'Stripe not configured', status: 503 } });
   }
 
-  const priceId = getStripePriceId(product, plan, billing_cycle);
-  if (!priceId) {
-    return res.status(503).json({ error: { code: 'SERVICE_UNAVAILABLE', message: `Stripe price not configured for ${product}/${plan}/${billing_cycle}`, status: 503 } });
+  // OLIVER/SPARK: Stripe-resolved (multi-line for SPARK). ARION: env price.
+  let resolvedLines = null;
+  if (!isArion) {
+    try {
+      const sel = product === 'spark'
+        ? { volume: req.body?.volume, featureAddon: req.body?.featureAddon,
+            leads: req.body?.leads, leadsSelected: req.body?.leadsSelected }
+        : { plan };
+      const built = await buildSignupLineItems(product, sel, billing_cycle);
+      resolvedLines = built.line_items;
+    } catch (e) {
+      const status = e.code === 'PRICE_UNAVAILABLE' ? 503 : 400;
+      return res.status(status).json({ error: { code: e.code || 'VALIDATION_ERROR', message: e.message, status } });
+    }
+  } else {
+    const priceId = getStripePriceId(product, plan, billing_cycle);
+    if (!priceId) {
+      return res.status(503).json({ error: { code: 'SERVICE_UNAVAILABLE', message: `Stripe price not configured for ${product}/${plan}/${billing_cycle}`, status: 503 } });
+    }
+    resolvedLines = [{ price: priceId, quantity: 1 }];
   }
 
   try {
@@ -88,13 +124,11 @@ router.post('/create-session', async (req, res) => {
     const customer = await ensureCustomer({
       email,
       name,
-      metadata: { source: `${product}_signup`, product, plan, billing_cycle },
+      metadata: { source: `${product}_signup`, product, plan: plan || req.body?.volume || '', billing_cycle },
     });
 
-    // 2. Build line items: plan subscription + (optional) domain registration
-    const lineItems = [
-      { price: priceId, quantity: 1 },
-    ];
+    // 2. Line items (ARION may append a one-time domain line below)
+    const lineItems = [...resolvedLines];
 
     let domainLineApplied = false;
     if (isArion && dom.mode === 'purchase' && dom.name) {
@@ -128,6 +162,20 @@ router.post('/create-session', async (req, res) => {
       discounts.push({ coupon: FREE_FIRST_YEAR_COUPON_ID });
     }
 
+    // Stripe metadata must be strings. Carry the full signup selection so
+    // the webhook can record it without DB lookups.
+    const signupMeta = {
+      product,
+      plan: String(plan || ''),
+      billing_cycle,
+      domain_mode: dom.mode || '',
+      domain_name: dom.name || '',
+      volume: String(req.body?.volume || ''),
+      feature_addon: String(req.body?.featureAddon || ''),
+      leads: String(req.body?.leads || ''),
+      leads_selected: String(req.body?.leadsSelected || ''),
+    };
+
     // 4. Create the Checkout session
     const session = await stripe.checkout.sessions.create(
       {
@@ -140,24 +188,10 @@ router.post('/create-session', async (req, res) => {
         billing_address_collection: 'required',
         // Carry signup intent into the subscription metadata so the webhook
         // handler can reconstruct the onboarding context without DB lookups.
-        subscription_data: {
-          metadata: {
-            product,
-            plan,
-            billing_cycle,
-            domain_mode: dom.mode,
-            domain_name: dom.name || '',
-          },
-        },
-        metadata: {
-          product,
-          plan,
-          billing_cycle,
-          domain_mode: dom.mode,
-          domain_name: dom.name || '',
-        },
+        subscription_data: { metadata: signupMeta },
+        metadata: signupMeta,
       },
-      { idempotencyKey: idempotencyKey('checkout', product, email, plan, billing_cycle, dom.name || '') }
+      { idempotencyKey: idempotencyKey('checkout', product, email, plan || req.body?.volume || '', billing_cycle, dom.name || '') }
     );
 
     return res.json({
