@@ -32,14 +32,12 @@ router.get('/catalog', async (req, res) => {
   const cycle = req.query?.billing === 'annual' ? 'annual' : 'monthly';
   try {
     if (product === 'oliver' || product === 'spark') {
-      // Live from Stripe (source of truth) — names/amounts resolved by the
-      // catalog naming convention; no env vars, no drift.
-      const data = await getStripeCatalog(product, cycle);
-      return res.json({
-        data: product === 'spark' ? data : { product, plans: data },
-        meta: { timestamp: new Date().toISOString() },
+      // SUPERSEDED — OLIVER/SPARK catalog is served by oliver-api /signup/catalog.
+      return res.status(410).json({
+        error: { code: 'MOVED', status: 410, message: 'Use oliver-api /signup/catalog for OLIVER/SPARK.' },
       });
     }
+    void getStripeCatalog; // retained import; ARION path below unchanged
     res.json({
       data: { product, plans: getCatalog(product) }, // ARION (env, unchanged)
       meta: { timestamp: new Date().toISOString() },
@@ -66,6 +64,15 @@ router.post('/create-session', async (req, res) => {
   // is byte-for-byte unchanged. oliver|spark are the new self-serve products.
   const product = String(req.body?.product || 'arion').toLowerCase();
   const isArion = product === 'arion';
+
+  // SUPERSEDED: OLIVER/SPARK self-serve runs through oliver-api (the single
+  // Stripe owner). arion-api only handles its own ARION website signup.
+  if (product !== 'arion') {
+    return res.status(410).json({
+      error: { code: 'MOVED', status: 410,
+        message: 'OLIVER/SPARK signup is handled by oliver-api /signup/checkout. This endpoint is ARION-only.' },
+    });
+  }
 
   // Validation
   if (!email || typeof email !== 'string') {
