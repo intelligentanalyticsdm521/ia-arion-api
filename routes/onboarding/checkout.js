@@ -190,8 +190,11 @@ router.post('/create-session', async (req, res) => {
         customer: customer.id,
         line_items: lineItems,
         ...(discounts.length ? { discounts } : { allow_promotion_codes: true }),
-        success_url: `${PORTAL_URL}/signup/onboarding?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${PORTAL_URL}/signup?cancelled=1`,
+        // Portal routes renamed /signup → /pricing on 2026-05-20. Old
+        // /signup paths still 301 client-side, so sessions created
+        // before this change still resolve.
+        success_url: `${PORTAL_URL}/pricing/onboarding?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${PORTAL_URL}/pricing?cancelled=1`,
         billing_address_collection: 'required',
         // Carry signup intent into the subscription metadata so the webhook
         // handler can reconstruct the onboarding context without DB lookups.
