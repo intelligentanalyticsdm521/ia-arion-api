@@ -8,6 +8,7 @@ import { redeemProvisionCode } from '../lib/provisionCodes.js';
 import { triggerOnboardingPageSpeed, getSiteForTenant } from './arion.js';
 import { plugin as pluginApiFull } from '../lib/pluginClient.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
+import { upsertSparkContact } from '../lib/sparkContactSync.js';
 
 const router = Router();
 
@@ -68,6 +69,16 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
              @firstName, @lastName, @email, @phone, @message, @rawFields,
              @utmSource, @utmMedium, @utmCampaign, 0, SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET())
         `);
+
+      // Single-source-of-truth contact write (founder decision 2026-05-25):
+      // every form submission also lands in lumen.contact so SPARK is the
+      // canonical CRM. Idempotent — won't duplicate by (tenant_id, email).
+      await upsertSparkContact(transaction, {
+        tenantId,
+        firstName: first_name, lastName: last_name,
+        email, phone,
+        source: 'arion_form',
+      });
 
       await firePlatformEvent(transaction, {
         tenantId,
@@ -161,6 +172,20 @@ router.post('/bookings/submit', requireSiteToken, async (req, res) => {
              'new', 0, SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET())
         `);
 
+      // Single-source-of-truth contact write — pairs with the same call
+      // in /forms/submit. Booking forms additionally carry an address so
+      // we backfill the structured address fields on lumen.contact.
+      await upsertSparkContact(transaction, {
+        tenantId,
+        firstName: first_name, lastName: last_name,
+        email, phone,
+        addressStreet: address_line_1,
+        addressCity: city,
+        addressState: state,
+        addressZip: postal_code,
+        source: 'arion_booking',
+      });
+
       await firePlatformEvent(transaction, {
         tenantId,
         eventType: 'arion.booking.requested',
@@ -240,6 +265,14 @@ router.post('/webhooks/site-event', requireSiteToken, async (req, res) => {
                @firstName, @lastName, @email, @phone, @message, @rawFields,
                @utmSource, @utmMedium, @utmCampaign, 0, SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET())
           `);
+
+        // Single-source-of-truth contact write (founder decision 2026-05-25)
+        await upsertSparkContact(transaction, {
+          tenantId,
+          firstName: payload.first_name, lastName: payload.last_name,
+          email: payload.email, phone: payload.phone,
+          source: 'arion_form',
+        });
 
         payload.submission_id = submissionId;
       }
