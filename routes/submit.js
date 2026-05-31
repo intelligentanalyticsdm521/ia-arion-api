@@ -132,12 +132,52 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
       // Single-source-of-truth contact write (founder decision 2026-05-25):
       // every form submission also lands in lumen.contact so SPARK is the
       // canonical CRM. Idempotent — won't duplicate by (tenant_id, email).
-      await upsertSparkContact(transaction, {
+      // F-128: upsertSparkContact ALSO applies lifecycle:lead + source:web_form
+      // tags + writes a contact.created entry to lumen.contact_activity
+      // when it creates a NEW contact.
+      const contactUuid = await upsertSparkContact(transaction, {
         tenantId,
         firstName: first_name, lastName: last_name,
         email, phone,
         source: 'arion_form',
       });
+
+      // F-128 — write a form.submitted activity row regardless of whether
+      // the contact is new or existing (returning visitors get the timeline
+      // entry too). Best-effort inside the same tx — if it fails the form
+      // submission still succeeds.
+      if (contactUuid && (email || phone)) {
+        try {
+          const tenantLower = String(tenantId).toLowerCase();
+          await new sql.Request(transaction)
+            .input('tid', sql.NVarChar, tenantLower)
+            .input('uuid', sql.UniqueIdentifier, contactUuid)
+            .input('subId', sql.NVarChar, submissionId)
+            .input('summary', sql.NVarChar,
+              `Submitted ${form_type || 'contact'} form${form_id ? ` (${form_id})` : ''}`)
+            .input('meta', sql.NVarChar,
+              JSON.stringify({ form_id, form_type, utm_source, utm_medium, utm_campaign }))
+            .query(`
+              IF NOT EXISTS (
+                SELECT 1 FROM lumen.contact_activity
+                WHERE LOWER(tenant_id) = @tid
+                  AND activity_type = 'form.submitted'
+                  AND ref_id = @subId
+              )
+              BEGIN
+                INSERT INTO lumen.contact_activity
+                  (tenant_id, contact_id, product, activity_type, summary,
+                   ref_type, ref_id, metadata_json, occurred_at)
+                SELECT @tid, c.id, 'arion', 'form.submitted', @summary,
+                       'form_submission', @subId, @meta, SYSUTCDATETIME()
+                FROM lumen.contact c
+                WHERE LOWER(c.tenant_id) = @tid
+                  AND c.legacy_oliver_uuid = @uuid;
+              END`);
+        } catch (actErr) {
+          console.warn('[submit:form] activity write failed (non-fatal):', actErr.message);
+        }
+      }
 
       await firePlatformEvent(transaction, {
         tenantId,
