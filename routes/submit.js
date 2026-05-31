@@ -12,14 +12,73 @@ import { upsertSparkContact } from '../lib/sparkContactSync.js';
 
 const router = Router();
 
+// 2026-05-31 — F-125 backwards-compat shim for the WordPress plugin
+// (intelligent-analytics v2.0.13). The plugin sends a flat object with a
+// `fields: {Label: Value}` map (Elementor-style) and DOESN'T extract
+// email/first_name/last_name/phone to top-level. arion-api previously
+// validated `if (!email && !phone) return 400` and dropped every plugin
+// submission silently (plugin uses non-blocking wp_remote_post, never
+// sees the response). This shim extracts the canonical contact fields
+// from the labelled map so plugin submissions land correctly without
+// needing a plugin redeploy.
+function extractContactFieldsFromMap(fieldsMap) {
+  if (!fieldsMap || typeof fieldsMap !== 'object') return {};
+
+  // Case-insensitive label → canonical-field lookup. First match wins.
+  const patterns = {
+    email:      /^(e[- ]?mail|email|email address|your email|work email)$/i,
+    first_name: /^(first[- ]?name|first|fname|given name)$/i,
+    last_name:  /^(last[- ]?name|last|lname|surname|family name)$/i,
+    full_name:  /^(name|full name|your name|contact name)$/i,
+    phone:      /^(phone|phone number|telephone|tel|mobile|cell|cell phone)$/i,
+    message:    /^(message|comments?|notes?|inquiry|details|how can we help|how can we help\??)$/i,
+  };
+
+  const out = {};
+  for (const [label, value] of Object.entries(fieldsMap)) {
+    if (value === '' || value == null) continue;
+    for (const [canonical, re] of Object.entries(patterns)) {
+      if (re.test(String(label).trim()) && !out[canonical]) {
+        out[canonical] = String(value).trim();
+        break;
+      }
+    }
+  }
+
+  // If we got a full_name but no first/last, split on first whitespace.
+  if (out.full_name && !out.first_name) {
+    const parts = out.full_name.split(/\s+/);
+    out.first_name = parts.shift();
+    if (parts.length && !out.last_name) out.last_name = parts.join(' ');
+  }
+  delete out.full_name;
+
+  return out;
+}
+
 router.post('/forms/submit', requireSiteToken, async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.site.site_id;
-  const {
+  let {
     form_id, form_type = 'contact', submission_key,
     email, first_name, last_name, phone, message,
-    raw_fields, utm_source, utm_medium, utm_campaign
+    raw_fields, fields,            // accept plugin's `fields` as raw_fields alias
+    utm_source, utm_medium, utm_campaign
   } = req.body;
+
+  // Plugin-shape backfill: pull canonical contact fields out of the
+  // Elementor-style label map if the caller didn't send them top-level.
+  if (fields && (!email && !first_name && !last_name && !phone)) {
+    const extracted = extractContactFieldsFromMap(fields);
+    email      = email      || extracted.email      || null;
+    first_name = first_name || extracted.first_name || null;
+    last_name  = last_name  || extracted.last_name  || null;
+    phone      = phone      || extracted.phone      || null;
+    message    = message    || extracted.message    || null;
+  }
+  // Store the full submission either way so we don't lose data the
+  // pattern matcher didn't recognize.
+  if (!raw_fields && fields) raw_fields = fields;
 
   if (!email && !phone) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'At least email or phone is required', status: 400 } });
