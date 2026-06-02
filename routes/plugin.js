@@ -28,6 +28,7 @@ import { BlobServiceClient } from '@azure/storage-blob';
 import { DefaultAzureCredential } from '@azure/identity';
 import { getServicesPool } from '../db/servicesPool.js';
 import { hashSiteToken } from '../lib/siteToken.js';
+import { hashProvisionCode } from '../lib/provisionCodes.js';
 import { requireSiteToken } from '../middleware/requireSiteToken.js';
 
 const router = Router();
@@ -155,13 +156,21 @@ router.get('/download', async (req, res) => {
     const headerSiteId = req.headers['x-site-id'] || null;
 
     if (provisionCode) {
-      // Validate provision code exists + not expired
+      // Validate provision code against arion.site_provision_code (the
+      // canonical table from migration 010). Codes are stored as SHA-256
+      // hashes, never raw. Hash here and compare. The download endpoint
+      // does NOT mark the code as redeemed — that happens when the plugin
+      // self-redeems on first admin_init via the /provision/redeem route.
+      // We just need a valid + unexpired + unredeemed + unrevoked row.
+      const codeHash = hashProvisionCode(provisionCode);
       const r = await pool.request()
-        .input('code', sql.NVarChar(100), provisionCode)
+        .input('codeHash', sql.NVarChar(64), codeHash)
         .query(`
           SELECT TOP 1 site_id, tenant_id
-          FROM arion.provision_code
-          WHERE code = @code AND expires_at > SYSUTCDATETIME()`);
+          FROM arion.site_provision_code
+          WHERE code_hash = @codeHash
+            AND expires_at > SYSDATETIMEOFFSET()
+            AND revoked_at IS NULL`);
       if (!r.recordset[0]) {
         return res.status(403).json({ error: { code: 'INVALID_PROVISION_CODE', message: 'Invalid or expired provision code', status: 403 } });
       }
