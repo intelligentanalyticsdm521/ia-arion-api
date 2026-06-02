@@ -37,16 +37,36 @@ const CONTAINER = process.env.IA_PLUGIN_CONTAINER || 'plugins';
 const API_BASE = process.env.ARION_API_BASE_URL
   || 'https://app-arion-api-prod-e6fuc9gzd8f3hqfe.centralus-01.azurewebsites.net';
 
-// Blob client uses the function app's managed identity. The MI needs
-// "Storage Blob Data Reader" role on the storage account (granted via
-// Azure portal — one-time founder action).
+// Blob auth — TWO modes, picked at startup:
+//
+//   1. Connection-string mode (preferred for prod today)
+//      If process.env.IA_PLUGIN_STORAGE_CONNECTION is set, use it.
+//      This is what we ship in prod because granting MI a blob-data role
+//      requires Owner / User Access Administrator, which the founder
+//      Contributor account doesn't have. The connection string is stored
+//      as a KV secret (STIADMPROD-CONNECTION-STRING) and pulled in via a
+//      KV reference on this app's settings.
+//
+//   2. Managed-identity mode (default fallback)
+//      Used when no connection string is set — requires the MI to have
+//      "Storage Blob Data Reader" on the storage account. Cleaner long-
+//      term; switch back to this once role is grantable.
+//
+// Either way, only this server's outbound IP needs to be on the storage
+// account's firewall allow list (storage stays default-deny + AzureServices
+// bypass + per-IP allow).
 let _blobClient = null;
 function getBlobClient() {
   if (_blobClient) return _blobClient;
-  _blobClient = new BlobServiceClient(
-    `https://${STORAGE_ACCOUNT}.blob.core.windows.net`,
-    new DefaultAzureCredential()
-  );
+  const connStr = process.env.IA_PLUGIN_STORAGE_CONNECTION || '';
+  if (connStr.startsWith('DefaultEndpointsProtocol=')) {
+    _blobClient = BlobServiceClient.fromConnectionString(connStr);
+  } else {
+    _blobClient = new BlobServiceClient(
+      `https://${STORAGE_ACCOUNT}.blob.core.windows.net`,
+      new DefaultAzureCredential()
+    );
+  }
   return _blobClient;
 }
 
