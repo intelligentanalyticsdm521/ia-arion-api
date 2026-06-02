@@ -19,6 +19,7 @@ import onboardingSubmitRouter from './routes/onboarding/submit.js';
 import onboardingStatusRouter from './routes/onboarding/status.js';
 import onboardingSessionInfoRouter from './routes/onboarding/session-info.js';
 import provisioningRouter from './routes/provisioning.js';
+import pluginRouter from './routes/plugin.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -97,6 +98,14 @@ app.use('/onboarding/session-info', onboardingSessionInfoRouter);
 // or the PROVISIONER_SHARED_SECRET header for worker callbacks).
 // Called by the IA Plugin's bootstrap class on a freshly-provisioned client site.
 app.use('/provisioning', provisioningRouter);
+
+// F-139 — IA Plugin distribution gateway. /plugin/manifest (site-token auth)
+// + /plugin/download (provision_code OR site-token auth). Streams the plugin
+// .zip from PRIVATE blob storage (stiadmprod/plugins/) via arion-api's
+// managed identity. Mounted at root so install-time WP-CLI calls don't need
+// an auth header — just the ?token=<provision_code> query string.
+app.use('/plugin', pluginRouter);
+
 app.use('/arion', requireAuth, tenantResolution, actingTenantGuard, requireArionAccess, arionRouter);
 
 app.use((req, res) => res.status(404).json({ error: 'not_found', method: req.method, path: req.path }));

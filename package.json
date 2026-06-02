@@ -10,6 +10,7 @@
   "dependencies": {
     "@azure/identity": "^4.13.0",
     "@azure/keyvault-secrets": "^4.11.2",
+    "@azure/storage-blob": "^12.31.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
