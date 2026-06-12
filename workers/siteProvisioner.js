@@ -106,6 +106,18 @@ async function runJob(job) {
     await reportProgress(job.jobId, 'ai_builder_finalize', {});
     await finalizeAiBuilder(page);
 
+    // F-onboarding-prep — remove Hostinger default plugins BEFORE installing
+    // IA. Keeps the client's plugin list clean and avoids conflicts (e.g.
+    // Hostinger AI Assistant overlay competing with IA's admin UI). Best-
+    // effort: a single removal failure does NOT abort the job.
+    await reportProgress(job.jobId, 'plugin_cleanup', {});
+    try {
+      const cleanup = await removeDefaultPlugins(page, job);
+      await reportProgress(job.jobId, 'plugin_cleanup_result', cleanup);
+    } catch (cleanupErr) {
+      console.warn('[provisioner] removeDefaultPlugins crashed (continuing):', cleanupErr.message);
+    }
+
     await reportProgress(job.jobId, 'plugin_deploy', {});
     await uploadPluginViaUi(page, job);
 
@@ -264,6 +276,103 @@ async function finalizeAiBuilder(page) {
  *   4. Click "Install Now"
  *   5. Wait for "Activate Plugin" link, click it
  */
+/**
+ * Remove Hostinger default plugins the client doesn't need.
+ *
+ * Why this exists: a fresh Hostinger WP install ships with several plugins
+ * the founder considers bloat (per locked decision — see
+ * reference_oliver_tier_matrix.md and 2026-06-12 onboarding requirement).
+ * Removing them keeps the client's plugin list clean and avoids the IA
+ * plugin sharing CSS/JS hooks with caching plugins that conflict.
+ *
+ * Configurable via env var IA_HOSTINGER_REMOVE_PLUGINS (comma-separated
+ * plugin SLUGS — same string as in the wp-admin URL, e.g. "hostinger" or
+ * "hostinger-easy-onboarding"). Default kill list below.
+ *
+ * NOT removed by default (the founder can extend the list if they want):
+ *   - litespeed-cache : actively useful for caching; bloated only if unused
+ *   - akismet         : WP-shipped anti-spam, security tool
+ *
+ * Each removal is best-effort. A missing plugin is skipped silently. A
+ * single removal failure does NOT abort the whole provisioning job — the
+ * worker logs the failure and continues so the client still gets the IA
+ * plugin installed and the site usable.
+ */
+const DEFAULT_REMOVE_SLUGS = [
+  'hostinger',                    // Hostinger Tools
+  'hostinger-ai-assistant',       // Hostinger AI Assistant
+  'hostinger-easy-onboarding',    // Hostinger Easy Onboarding wizard
+  'hello-dolly',                  // WP default decorative plugin
+];
+
+async function removeDefaultPlugins(page, job) {
+  const envList = (process.env.IA_HOSTINGER_REMOVE_PLUGINS || '').trim();
+  const slugs = envList
+    ? envList.split(',').map(s => s.trim()).filter(Boolean)
+    : DEFAULT_REMOVE_SLUGS;
+
+  if (!slugs.length) return { removed: [], skipped: [], failed: [] };
+
+  const removed = [];
+  const skipped = [];
+  const failed = [];
+
+  // Land on plugins.php once. WP-admin lists every plugin with both a
+  // Deactivate link and (after deactivation) a Delete link — each carrying
+  // its own CSRF nonce in the href.
+  await page.goto(job.wpAdminUrl.replace(/\/$/, '') + '/plugins.php', {
+    waitUntil: 'domcontentloaded',
+    timeout: 30_000,
+  });
+
+  for (const slug of slugs) {
+    try {
+      // WP renders each plugin row as <tr data-slug="<slug>"> on modern
+      // versions, falling back to id="<slug>" on older themes. Match both.
+      const rowSel = `tr[data-slug="${slug}"], tr#${slug}`;
+      const row = page.locator(rowSel).first();
+      if (!(await row.isVisible().catch(() => false))) {
+        skipped.push({ slug, reason: 'not installed' });
+        continue;
+      }
+
+      // 1. Deactivate (if active). Inactive plugins skip straight to delete.
+      const deactivate = row.locator('a:has-text("Deactivate")').first();
+      if (await deactivate.isVisible().catch(() => false)) {
+        await deactivate.click();
+        await page.waitForLoadState('domcontentloaded');
+        // After reload the row may have moved — re-locate.
+      }
+
+      // 2. Delete. WP shows a confirm() JS dialog → accept it.
+      page.once('dialog', async (d) => { await d.accept(); });
+      const rowAfter = page.locator(rowSel).first();
+      const del = rowAfter.locator('a:has-text("Delete")').first();
+      if (!(await del.isVisible().catch(() => false))) {
+        // Some Hostinger plugins are "must-use" or hidden from delete.
+        failed.push({ slug, reason: 'no Delete link' });
+        continue;
+      }
+      await del.click();
+      await page.waitForLoadState('domcontentloaded');
+
+      // 3. After delete WP either reloads the table or shows a success
+      // message. Either way, verify the row is gone.
+      const stillThere = await page.locator(rowSel).first().isVisible().catch(() => false);
+      if (stillThere) {
+        failed.push({ slug, reason: 'row still present after delete' });
+      } else {
+        removed.push(slug);
+      }
+    } catch (e) {
+      console.warn(`[removeDefaultPlugins] ${slug} failed:`, e.message);
+      failed.push({ slug, reason: e.message });
+    }
+  }
+
+  return { removed, skipped, failed };
+}
+
 async function uploadPluginViaUi(page, job) {
   const archiveUrl = process.env.IA_PLUGIN_ARCHIVE_URL;
   if (!archiveUrl) {
