@@ -152,36 +152,62 @@ router.get('/posts', async (req, res) => {
       });
     }
 
-    // Resolve category name → id (WP wants id, not name). If the caller
-    // didn't pass a category, skip the filter entirely.
+    // Resolve "Newsletter" against BOTH categories and tags, since WP exposes
+    // them as separate taxonomies. Users who organize newsletters via tags
+    // (more common for ad-hoc posting) won't have anything in a category,
+    // and vice versa. We query both, then run two separate /posts queries
+    // (one per matching taxonomy) and merge — WP's /posts endpoint doesn't
+    // take a category-OR-tag filter, only category-AND-tag.
     let categoryId = null;
+    let tagId = null;
     if (category) {
-      const catRes = await wpGet(host, '/categories', { search: category, per_page: '10' });
-      if (!catRes.ok) {
+      const wanted = category.toLowerCase();
+      const pickMatch = (list) => list?.find(x => String(x.slug || '').toLowerCase() === wanted)
+                              || list?.find(x => String(x.name || '').toLowerCase() === wanted)
+                              || list?.find(x => x.count > 0)
+                              || list?.[0];
+
+      const [catRes, tagRes] = await Promise.all([
+        wpGet(host, '/categories', { search: category, per_page: '10' }),
+        wpGet(host, '/tags',       { search: category, per_page: '10' }),
+      ]);
+      if (!catRes.ok && !tagRes.ok) {
         return res.status(502).json({
-          error: 'wp_categories_failed',
-          plugin_status: catRes.status === 404 ? 'wp_rest_disabled' : 'error',
-          details: catRes.errorText,
+          error: 'wp_taxonomy_failed',
+          plugin_status: catRes.status === 404 && tagRes.status === 404 ? 'wp_rest_disabled' : 'error',
+          details: catRes.errorText || tagRes.errorText,
         });
       }
-      // Match by slug exact first, then name exact, then any "newsletter"-ish hit
-      const wanted = category.toLowerCase();
-      const exact = catRes.data?.find(c => String(c.slug || '').toLowerCase() === wanted)
-                 || catRes.data?.find(c => String(c.name || '').toLowerCase() === wanted)
-                 || catRes.data?.[0];
-      categoryId = exact?.id || null;
+      categoryId = pickMatch(catRes.data)?.id || null;
+      tagId      = pickMatch(tagRes.data)?.id || null;
     }
 
-    const postsQuery = { per_page: String(limit), status: 'publish', orderby: 'date', order: 'desc' };
-    if (categoryId) postsQuery.categories = String(categoryId);
-    const postsRes = await wpGet(host, '/posts', postsQuery);
-    if (!postsRes.ok) {
+    // Build a single combined post list. Run each filter as its own query and
+    // dedupe by post id. If neither taxonomy matched, fall through to recent
+    // posts (no filter) so the modal isn't empty for a brand-new tenant.
+    const baseQuery = { per_page: String(limit), status: 'publish', orderby: 'date', order: 'desc' };
+    const queries = [];
+    if (categoryId) queries.push({ ...baseQuery, categories: String(categoryId) });
+    if (tagId)      queries.push({ ...baseQuery, tags: String(tagId) });
+    if (queries.length === 0) queries.push(baseQuery);
+
+    const results = await Promise.all(queries.map(q => wpGet(host, '/posts', q)));
+    const firstError = results.find(r => !r.ok);
+    if (firstError && results.every(r => !r.ok)) {
       return res.status(502).json({
         error: 'wp_posts_failed',
-        plugin_status: postsRes.status === 404 ? 'wp_rest_disabled' : 'error',
-        details: postsRes.errorText,
+        plugin_status: firstError.status === 404 ? 'wp_rest_disabled' : 'error',
+        details: firstError.errorText,
       });
     }
+    const merged = new Map();
+    for (const r of results) {
+      if (!r.ok) continue;
+      for (const p of (r.data || [])) {
+        if (!merged.has(p.id)) merged.set(p.id, p);
+      }
+    }
+    const postsRes = { ok: true, data: Array.from(merged.values()).slice(0, limit) };
 
     // Normalize to the shape SparkNewsletterPage expects
     const posts = (postsRes.data || []).map(p => ({
