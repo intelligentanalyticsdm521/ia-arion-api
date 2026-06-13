@@ -133,7 +133,15 @@ async function wpGet(host, path, query = {}) {
 
 router.get('/posts', async (req, res) => {
   const tenantId = req.tenant.tenantId;
-  const category = (req.query.category || '').toString().trim();
+  // 2026-06-13: per-tenant taxonomy override. Default is `both` taxonomies
+  // (category OR tag) matching the term "newsletter". Caller can pass:
+  //   - taxonomy_type=category|tag|both (default 'both')
+  //   - taxonomy_value=<term>           (default 'newsletter')
+  //   - Legacy: ?category=X is kept for backward compat. If provided we
+  //     treat it as taxonomy_type=both, taxonomy_value=X.
+  const legacyCategory = (req.query.category || '').toString().trim();
+  const taxonomyType  = (req.query.taxonomy_type || (legacyCategory ? 'both' : 'both')).toString().toLowerCase();
+  const taxonomyValue = (req.query.taxonomy_value || legacyCategory || 'newsletter').toString().trim();
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
   try {
     const pool = await getServicesPool();
@@ -152,34 +160,38 @@ router.get('/posts', async (req, res) => {
       });
     }
 
-    // Resolve "Newsletter" against BOTH categories and tags, since WP exposes
-    // them as separate taxonomies. Users who organize newsletters via tags
-    // (more common for ad-hoc posting) won't have anything in a category,
-    // and vice versa. We query both, then run two separate /posts queries
-    // (one per matching taxonomy) and merge — WP's /posts endpoint doesn't
-    // take a category-OR-tag filter, only category-AND-tag.
+    // Resolve the taxonomy term against WP. Type controls which side(s) of
+    // the taxonomy we query — caller-configured per tenant.
     let categoryId = null;
     let tagId = null;
-    if (category) {
-      const wanted = category.toLowerCase();
+    if (taxonomyValue) {
+      const wanted = taxonomyValue.toLowerCase();
       const pickMatch = (list) => list?.find(x => String(x.slug || '').toLowerCase() === wanted)
                               || list?.find(x => String(x.name || '').toLowerCase() === wanted)
                               || list?.find(x => x.count > 0)
                               || list?.[0];
 
-      const [catRes, tagRes] = await Promise.all([
-        wpGet(host, '/categories', { search: category, per_page: '10' }),
-        wpGet(host, '/tags',       { search: category, per_page: '10' }),
-      ]);
-      if (!catRes.ok && !tagRes.ok) {
+      const tasks = [];
+      if (taxonomyType === 'category' || taxonomyType === 'both') {
+        tasks.push(wpGet(host, '/categories', { search: taxonomyValue, per_page: '10' }).then(r => ({ kind: 'cat', r })));
+      }
+      if (taxonomyType === 'tag' || taxonomyType === 'both') {
+        tasks.push(wpGet(host, '/tags', { search: taxonomyValue, per_page: '10' }).then(r => ({ kind: 'tag', r })));
+      }
+      const taskResults = await Promise.all(tasks);
+      const failures = taskResults.filter(t => !t.r.ok);
+      if (failures.length === taskResults.length && taskResults.length > 0) {
         return res.status(502).json({
           error: 'wp_taxonomy_failed',
-          plugin_status: catRes.status === 404 && tagRes.status === 404 ? 'wp_rest_disabled' : 'error',
-          details: catRes.errorText || tagRes.errorText,
+          plugin_status: failures[0].r.status === 404 ? 'wp_rest_disabled' : 'error',
+          details: failures[0].r.errorText,
         });
       }
-      categoryId = pickMatch(catRes.data)?.id || null;
-      tagId      = pickMatch(tagRes.data)?.id || null;
+      for (const t of taskResults) {
+        if (!t.r.ok) continue;
+        if (t.kind === 'cat') categoryId = pickMatch(t.r.data)?.id || null;
+        if (t.kind === 'tag') tagId = pickMatch(t.r.data)?.id || null;
+      }
     }
 
     // Build a single combined post list. Run each filter as its own query and
