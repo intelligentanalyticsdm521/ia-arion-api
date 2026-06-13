@@ -13,6 +13,7 @@ import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
 import { pluginGet, pluginPost } from '../../lib/pluginClient.js';
+import { resolveSiteHost } from '../../lib/pluginClient.js';
 
 const router = Router();
 
@@ -104,11 +105,36 @@ router.post('/publish-newsletter', async (req, res) => {
  * GET /arion/plugin/posts?category=Newsletter&limit=50
  * Returns recent WordPress posts from the tenant's primary site so SPARK
  * Newsletter Studio can offer an "Import from ARION" flow.
+ *
+ * 2026-06-13 fix: the IA plugin never registered a /posts REST route —
+ * SPARK's calls 404'd with "rest_no_route" every time. WordPress core
+ * already ships /wp-json/wp/v2/posts publicly for published content, no
+ * auth needed. We hit that directly, resolve the category by name → id
+ * via /wp/v2/categories?search=…, then return a normalized payload that
+ * matches the shape SparkNewsletterPage expects.
  */
+async function wpGet(host, path, query = {}) {
+  const qs = new URLSearchParams(query).toString();
+  const url = `https://${host}/wp-json/wp/v2${path}${qs ? '?' + qs : ''}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15_000);
+  try {
+    const r = await fetch(url, { headers: { Accept: 'application/json' }, signal: ctrl.signal });
+    const body = await r.text();
+    let data = null;
+    try { data = body ? JSON.parse(body) : null; } catch { /* not JSON */ }
+    return { ok: r.ok, status: r.status, data, errorText: !r.ok ? (data?.message || body || '').slice(0, 300) : null };
+  } catch (e) {
+    return { ok: false, status: 0, data: null, errorText: e.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 router.get('/posts', async (req, res) => {
   const tenantId = req.tenant.tenantId;
-  const category = (req.query.category || '').toString();
-  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50));
+  const category = (req.query.category || '').toString().trim();
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
   try {
     const pool = await getServicesPool();
     const site = await pickPrimarySite(pool, tenantId, req.query.site_id || null);
@@ -118,21 +144,63 @@ router.get('/posts', async (req, res) => {
         message: 'No ARION-managed WordPress site found for this tenant.',
       });
     }
-    const q = { limit: String(limit) };
-    if (category) q.category = category;
-    const r = await pluginGet(site, '/posts', { query: q, timeoutMs: 20_000 });
-    if (!r.ok) {
-      return res.status(502).json({
-        error: 'plugin_call_failed',
-        plugin_status: r.pluginStatus,
-        details: r.errorText || null,
+    const host = resolveSiteHost(site);
+    if (!host) {
+      return res.status(404).json({
+        error: 'no_site_host',
+        message: 'Site row has no domain or wp_admin_url configured.',
       });
     }
+
+    // Resolve category name → id (WP wants id, not name). If the caller
+    // didn't pass a category, skip the filter entirely.
+    let categoryId = null;
+    if (category) {
+      const catRes = await wpGet(host, '/categories', { search: category, per_page: '10' });
+      if (!catRes.ok) {
+        return res.status(502).json({
+          error: 'wp_categories_failed',
+          plugin_status: catRes.status === 404 ? 'wp_rest_disabled' : 'error',
+          details: catRes.errorText,
+        });
+      }
+      // Match by slug exact first, then name exact, then any "newsletter"-ish hit
+      const wanted = category.toLowerCase();
+      const exact = catRes.data?.find(c => String(c.slug || '').toLowerCase() === wanted)
+                 || catRes.data?.find(c => String(c.name || '').toLowerCase() === wanted)
+                 || catRes.data?.[0];
+      categoryId = exact?.id || null;
+    }
+
+    const postsQuery = { per_page: String(limit), status: 'publish', orderby: 'date', order: 'desc' };
+    if (categoryId) postsQuery.categories = String(categoryId);
+    const postsRes = await wpGet(host, '/posts', postsQuery);
+    if (!postsRes.ok) {
+      return res.status(502).json({
+        error: 'wp_posts_failed',
+        plugin_status: postsRes.status === 404 ? 'wp_rest_disabled' : 'error',
+        details: postsRes.errorText,
+      });
+    }
+
+    // Normalize to the shape SparkNewsletterPage expects
+    const posts = (postsRes.data || []).map(p => ({
+      post_id: p.id,
+      title: (p.title?.rendered || '').replace(/<[^>]+>/g, '').trim(),
+      excerpt: (p.excerpt?.rendered || '').replace(/<[^>]+>/g, '').trim().slice(0, 300),
+      post_url: p.link,
+      published_at: p.date_gmt ? p.date_gmt + 'Z' : p.date,
+      categories: Array.isArray(p.categories) ? p.categories : [],
+      issue_number: null,
+      edition_date: null,
+      from_spark: false,
+    }));
+
     return res.json({
       ok: true,
       site_id: site.site_id,
-      posts: r.data?.posts || [],
-      count: r.data?.count || 0,
+      posts,
+      count: posts.length,
     });
   } catch (err) {
     console.error('[arion/plugin/posts]', err);
