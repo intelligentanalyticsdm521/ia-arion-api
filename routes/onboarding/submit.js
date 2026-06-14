@@ -33,7 +33,17 @@ import {
   enableDomainLock,
   enablePrivacyProtection,
 } from '../../lib/hostinger.js';
-import { finishWpSetup, applyBranding } from '../../lib/hostingerSsh.js';
+import {
+  stripHostingerOnboardingPlugins,
+  createClientEditor,
+  applyBranding,
+} from '../../lib/hostingerSsh.js';
+import { installPluginsForTier } from '../../lib/pluginStack.js';
+import { driveKodeeBuild } from '../../lib/browserDriver.js';
+import {
+  sendOnboardingWelcomeEmail,
+  generateSetupToken,
+} from '../../lib/welcomeEmail.js';
 import { createJob, transitionState, getLatestJobForSite } from '../../lib/provisioningJobs.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
 import { updateSharedProfile } from '../../db/platformPool.js';
@@ -263,10 +273,8 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // 12. SSH wp-cli post-install: add client editor, install Elementor + IA
-    //     Plugin. The WP install needs a few seconds to finish copying files —
-    //     wait until wp-login responds before attempting wp-cli. If WP doesn't
-    //     come up at all, fail loud — silent failures here ship broken sites.
+    // 12. Wait for WordPress to come online so subsequent steps can talk to it.
+    //     Fail loud if it doesn't — silent failures here ship broken sites.
     const wpReady = await waitForWpReady(domain.domain);
     if (!wpReady) {
       return res.status(502).json({
@@ -278,14 +286,60 @@ router.post('/', async (req, res) => {
       });
     }
 
-    await finishWpSetup({
+    // 13. Build the questionnaire-derived AI prompt. Capped at 2000 chars per
+    //     Hostinger's Kodee limit — promptBuilder.js handles truncation.
+    const { prompt: aiPrompt } = buildAiPrompt(answers);
+
+    // 14. Drive Hostinger's Kodee AI WordPress builder via the browser-driver
+    //     Container App. Kodee is wp-admin-only (no public API), so we paste
+    //     our prompt into its wizard and wait. The driver returns when Kodee
+    //     reports "done" or after a 5-minute hard timeout. Soft failures
+    //     (status: 'failed') get logged but don't block the rest of the flow;
+    //     ops can re-trigger Kodee manually if it didn't take.
+    let kodeeResult;
+    try {
+      kodeeResult = await driveKodeeBuild({
+        domain: domain.domain,
+        adminLogin,
+        adminPassword,
+        prompt: aiPrompt,
+      });
+    } catch (drvErr) {
+      console.error('[onboarding/submit] browser-driver call failed:', drvErr.message);
+      kodeeResult = { status: 'failed', duration_ms: 0, screenshots: [], error: drvErr.message };
+    }
+    if (kodeeResult.status !== 'completed') {
+      console.warn(`[onboarding/submit] Kodee did not complete cleanly: ${kodeeResult.error || 'unknown'} — continuing with stack install anyway`);
+    }
+
+    // 15. Now that Kodee is finished (or skipped), strip Hostinger's stock
+    //     onboarding plugins so they don't intercept wp-admin once the
+    //     customer logs in.
+    await stripHostingerOnboardingPlugins(domain.domain);
+
+    // 16. Create the client's editor-level WP user.
+    await createClientEditor({
       domain: domain.domain,
       clientEmail: session.email,
       clientFirstName: (answers.contactFirstName || '').toString() || answers.businessName,
       clientLastName: (answers.contactLastName || '').toString() || '',
-      pluginDownloadUrl,
     });
 
+    // 17. Install the Golden Master plugin stack for this tenant's tier. The
+    //     matrix lives in lib/pluginStack.js — mirrored in
+    //     reference_arion_plugin_stack.md. WooCommerce gates on
+    //     answers.installShop (questionnaire Page 4 question).
+    const tier = (answers.tier || session.tier || 'lite').toLowerCase();
+    const installShop = answers.installShop === true || answers.needsShop === true;
+    const stackResult = await installPluginsForTier({
+      domain: domain.domain,
+      tier,
+      installShop,
+      iaPluginDownloadUrl: pluginDownloadUrl,
+    });
+
+    // 18. Apply branding via SSH wp-cli — overrides anything Kodee chose with
+    //     the colors the customer specified in the questionnaire.
     await applyBranding({
       domain: domain.domain,
       brandName: answers.businessName,
@@ -294,10 +348,11 @@ router.post('/', async (req, res) => {
       accentColor: answers.accentColor,
     });
 
-    // 13. Build the AI prompt and stash it on the site for the IA Plugin to read.
-    const { prompt: aiPrompt } = buildAiPrompt(answers);
+    // 19. Generate the CIAM activation token for the welcome email link. The
+    //     Portal /welcome route will exchange it via platform-api.
+    const setupToken = generateSetupToken();
 
-    // 14. Final state — site is ready. Provisioning details captured for ops.
+    // 20. Final state — site is ready. Provisioning details captured for ops.
     const provisioningDetails = {
       hostinger_username: hostingerUsername,
       wp_admin_login: adminLogin,
@@ -308,6 +363,14 @@ router.post('/', async (req, res) => {
       provisioned_at: new Date().toISOString(),
       provision_code: provisionCode,
       ai_prompt_chars: aiPrompt.length,
+      tier,
+      install_shop: installShop,
+      plugins_installed: stackResult.installed,
+      plugins_skipped: stackResult.skipped,
+      kodee_status: kodeeResult.status,
+      kodee_duration_ms: kodeeResult.duration_ms,
+      kodee_error: kodeeResult.error || null,
+      welcome_token: setupToken, // stored so platform-api can verify on /welcome
     };
 
     await pool.request()
@@ -322,6 +385,27 @@ router.post('/', async (req, res) => {
         WHERE site_id = @siteId
       `);
 
+    // 21. Send the "your site is ready + activate your portal" email. Best
+    //     effort — a failed send does not block. Ops can re-send via the
+    //     admin console using the welcome_token stored above.
+    try {
+      const emailRes = await sendOnboardingWelcomeEmail({
+        toEmail: session.email,
+        firstName: answers.contactFirstName || answers.firstName || '',
+        brandName: answers.businessName,
+        tenantId: session.tenant_id,
+        wpAdminUrl,
+        wpAdminLogin: adminLogin,
+        wpAdminPassword: adminPassword,
+        setupToken,
+      });
+      if (!emailRes.ok) {
+        console.warn('[onboarding/submit] welcome email failed:', emailRes.error);
+      }
+    } catch (emailErr) {
+      console.error('[onboarding/submit] welcome email threw:', emailErr.message);
+    }
+
     return res.status(200).json({
       data: {
         site_id: session.site_id,
@@ -330,6 +414,8 @@ router.post('/', async (req, res) => {
         wp_admin_url: wpAdminUrl,
         provisioning_state: 'ready',
         provision_code: provisionCode,
+        plugins_installed: stackResult.installed,
+        kodee_status: kodeeResult.status,
       },
       meta: { timestamp: new Date().toISOString() },
     });
