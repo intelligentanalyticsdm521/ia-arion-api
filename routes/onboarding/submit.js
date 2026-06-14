@@ -36,6 +36,7 @@ import {
 import {
   stripHostingerOnboardingPlugins,
   createClientEditor,
+  ensureAdminPassword,
   applyBranding,
 } from '../../lib/hostingerSsh.js';
 import { installPluginsForTier } from '../../lib/pluginStack.js';
@@ -285,6 +286,18 @@ router.post('/', async (req, res) => {
         },
       });
     }
+
+    // 12.5 Ensure the iaadmin password in WP matches the one we just
+    //      generated. Needed because installWordPress is idempotent at the
+    //      Hostinger API level — on retry it returns "already installed"
+    //      without setting a new password, so the password from THIS run
+    //      never reaches WP. The browser-driver needs working creds to log in.
+    await ensureAdminPassword({
+      domain: domain.domain,
+      adminLogin,
+      adminEmail,
+      adminPassword,
+    });
 
     // 13. Build the questionnaire-derived AI prompt. Capped at 2000 chars per
     //     Hostinger's Kodee limit — promptBuilder.js handles truncation.
