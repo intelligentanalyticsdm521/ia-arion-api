@@ -335,7 +335,7 @@ router.get('/paid/:slug', async (req, res) => {
       .input('th', sql.NVarChar(80), tokenHash)
       .query(`
         SELECT TOP 1 site_id, tenant_id, expires_at, consumed_at
-        FROM arion.provision_code
+        FROM arion.site_provision_code
         WHERE code_hash = @th
       `);
     const row = r.recordset[0];
