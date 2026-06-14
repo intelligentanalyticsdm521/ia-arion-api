@@ -230,66 +230,69 @@ router.post('/', async (req, res) => {
         WHERE site_id = @siteId
       `);
 
-    // 10. Hostinger API: createDatabase (skip if Hostinger reported domain
-    //     already in use — we assume the DB exists from a prior run).
-    if (!wpCreate.data?.alreadyInUse) {
-      const dbRes = await createDatabase({
-        username: hostingerUsername,
-        name: dbName,
-        user: dbUser,
-        password: dbPassword,
-        websiteDomain: domain.domain,
+    // 10. Hostinger API: createDatabase. Always attempt — if Hostinger says
+    //     "already exists" we swallow the per-call error so a partial-retry
+    //     can progress. Surface anything else.
+    const dbRes = await createDatabase({
+      username: hostingerUsername,
+      name: dbName,
+      user: dbUser,
+      password: dbPassword,
+      websiteDomain: domain.domain,
+    });
+    if (!dbRes.ok && !isAlreadyExistsError(dbRes.error)) {
+      return res.status(502).json({
+        error: { code: 'DB_CREATE_FAILED', message: dbRes.error, status: 502 },
       });
-      if (!dbRes.ok) {
-        return res.status(502).json({
-          error: { code: 'DB_CREATE_FAILED', message: dbRes.error, status: 502 },
-        });
-      }
+    }
 
-      // 11. Hostinger API: installWordPress
-      const wpInstall = await installWordPress({
-        username: hostingerUsername,
-        domain: domain.domain,
-        siteTitle: answers.businessName,
-        credentials: {
-          email: adminEmail,
-          login: adminLogin,
-          password: adminPassword,
-        },
+    // 11. Hostinger API: installWordPress. Same idempotency rule.
+    const wpInstall = await installWordPress({
+      username: hostingerUsername,
+      domain: domain.domain,
+      siteTitle: answers.businessName,
+      credentials: {
+        email: adminEmail,
+        login: adminLogin,
+        password: adminPassword,
+      },
+    });
+    if (!wpInstall.ok && !isAlreadyExistsError(wpInstall.error)) {
+      return res.status(502).json({
+        error: { code: 'WP_INSTALL_FAILED', message: wpInstall.error, status: 502 },
       });
-      if (!wpInstall.ok) {
-        return res.status(502).json({
-          error: { code: 'WP_INSTALL_FAILED', message: wpInstall.error, status: 502 },
-        });
-      }
     }
 
     // 12. SSH wp-cli post-install: add client editor, install Elementor + IA
     //     Plugin. The WP install needs a few seconds to finish copying files —
-    //     finishWpSetup is retried by the caller via a short waitForWpReady poll.
-    await waitForWpReady(domain.domain);
-
-    try {
-      await finishWpSetup({
-        domain: domain.domain,
-        clientEmail: session.email,
-        clientFirstName: (answers.contactFirstName || '').toString() || answers.businessName,
-        clientLastName: (answers.contactLastName || '').toString() || '',
-        pluginDownloadUrl,
+    //     wait until wp-login responds before attempting wp-cli. If WP doesn't
+    //     come up at all, fail loud — silent failures here ship broken sites.
+    const wpReady = await waitForWpReady(domain.domain);
+    if (!wpReady) {
+      return res.status(502).json({
+        error: {
+          code: 'WP_NOT_READY',
+          message: `WordPress did not respond at https://${domain.domain}/wp-login.php within 2 minutes. Install may have failed or DNS is still propagating.`,
+          status: 502,
+        },
       });
-
-      await applyBranding({
-        domain: domain.domain,
-        brandName: answers.businessName,
-        primaryColor: answers.primaryColor,
-        secondaryColor: answers.secondaryColor,
-        accentColor: answers.accentColor,
-      });
-    } catch (sshErr) {
-      console.error('[onboarding/submit] SSH/wp-cli error:', sshErr);
-      // Continue — partial setup is better than rolling back the whole flow.
-      // The site exists; admin can finish setup manually.
     }
+
+    await finishWpSetup({
+      domain: domain.domain,
+      clientEmail: session.email,
+      clientFirstName: (answers.contactFirstName || '').toString() || answers.businessName,
+      clientLastName: (answers.contactLastName || '').toString() || '',
+      pluginDownloadUrl,
+    });
+
+    await applyBranding({
+      domain: domain.domain,
+      brandName: answers.businessName,
+      primaryColor: answers.primaryColor,
+      secondaryColor: answers.secondaryColor,
+      accentColor: answers.accentColor,
+    });
 
     // 13. Build the AI prompt and stash it on the site for the IA Plugin to read.
     const { prompt: aiPrompt } = buildAiPrompt(answers);
@@ -421,6 +424,25 @@ async function waitForWpReady(domain, timeoutMs = 120_000) {
   }
   console.warn(`[onboarding/submit] waitForWpReady gave up after ${timeoutMs}ms for ${domain}`);
   return false;
+}
+
+/**
+ * Treat Hostinger "already exists" / "in use" / 409-style messages as
+ * non-failures so partial-retry runs of /submit can progress. Anything else
+ * (auth, validation, server error) should still bubble.
+ *
+ * The Hostinger API surfaces these as 4xx with a body like:
+ *   { message: "Domain already in use", ... }
+ *   { message: "Database already exists", ... }
+ *   { message: "WordPress is already installed", ... }
+ *
+ * Our `request()` lifts those into the `error` string of the result envelope.
+ */
+function isAlreadyExistsError(err) {
+  const s = String(err || '').toLowerCase();
+  return s.includes('already in use')
+    || s.includes('already exists')
+    || s.includes('already installed');
 }
 
 /**
