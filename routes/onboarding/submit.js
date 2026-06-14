@@ -170,7 +170,15 @@ router.post('/', async (req, res) => {
     // worker creating them via wp-cli over SSH (no Hostinger API path exists).
     const websiteId = wpCreate.data?.domain || domain.domain;
     const wpAdminUrl = `https://${domain.domain}/wp-admin/`;
-    const adminPassword = '';   // worker will mint via wp-cli + bcrypt
+    // TODO(GAP): Hostinger has no API for fetching/setting WP admin creds.
+    // The Playwright worker logs into wp-admin first (Step 1) — it needs a
+    // valid password. Right now we send a placeholder that will fail login.
+    // The fix is: SSH into Hostinger (using ARION-HOSTINGER-SSH-* secrets)
+    // and run `wp user update <user> --user_pass=<known>` before dispatching.
+    // For now the worker will reach wp_login, see "incorrect password," and
+    // report a clean failure — better than silently being non-functional.
+    const adminPassword = process.env.ARION_WP_ADMIN_PASSWORD_FALLBACK
+                       || generatePassword();
     const wpUser = session.email;
 
     // Persist what we know about the new WP install
