@@ -550,16 +550,39 @@ function isAlreadyExistsError(err) {
 }
 
 /**
- * Generate a strong WP admin password.
- * 16 chars, mixed case + digits + symbols, easy to copy-paste.
+ * Generate a strong WP admin / DB password. Hostinger's DB API rejects
+ * passwords that lack at least one digit (HTTP 422 "password field must
+ * contain at least one number"), so we guarantee one upper + one lower +
+ * one digit + one symbol regardless of random luck.
+ *
+ * 20 chars total. Avoids visually-ambiguous chars (0/O, 1/l/I).
  */
 function generatePassword() {
-  const charset = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%^&*';
-  let out = '';
-  const buf = new Uint32Array(20);
+  const upper   = 'ABCDEFGHJKMNPQRSTUVWXYZ';
+  const lower   = 'abcdefghijkmnpqrstuvwxyz';
+  const digits  = '23456789';
+  const symbols = '!@#$%^&*';
+  const all     = upper + lower + digits + symbols;
+
+  function pick(set) {
+    const buf = new Uint32Array(1);
+    crypto.getRandomValues(buf);
+    return set[buf[0] % set.length];
+  }
+
+  // Guarantee one of each category, then fill the rest from the full set.
+  const chars = [pick(upper), pick(lower), pick(digits), pick(symbols)];
+  for (let i = chars.length; i < 20; i++) chars.push(pick(all));
+
+  // Fisher-Yates shuffle so the required-category chars aren't always
+  // at positions 0-3 (some password validators look at position).
+  const buf = new Uint32Array(chars.length);
   crypto.getRandomValues(buf);
-  for (let i = 0; i < 20; i++) out += charset[buf[i] % charset.length];
-  return out;
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = buf[i] % (i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
 }
 
 export default router;
