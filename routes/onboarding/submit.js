@@ -429,7 +429,9 @@ router.post('/', async (req, res) => {
         provisioning_state: 'ready',
         provision_code: provisionCode,
         plugins_installed: stackResult.installed,
+        plugins_skipped: stackResult.skipped,
         kodee_status: kodeeResult.status,
+        kodee_error: kodeeResult.error || null,
       },
       meta: { timestamp: new Date().toISOString() },
     });
