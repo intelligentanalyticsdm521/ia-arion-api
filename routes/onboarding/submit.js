@@ -151,10 +151,16 @@ router.post('/', async (req, res) => {
     if (!wpCreate.ok) {
       return res.status(502).json({ error: { code: 'WP_CREATE_FAILED', message: wpCreate.error, status: 502 } });
     }
-    const websiteId = wpCreate.data?.website_id || wpCreate.data?.id;
-    const wpAdminUrl = wpCreate.data?.wp_admin_url || `https://${domain.domain}/wp-admin/`;
-    const adminPassword = wpCreate.data?.admin_password || '';
-    const wpUser = wpCreate.data?.admin_username || session.email;
+    // Hostinger's POST /api/hosting/v1/websites response shape (verified 2026-06-14):
+    //   { domain, vhost_type, is_enabled, username, client_id, order_id, created_at, root_directory, parent_domain }
+    // No website_id / id / admin_password / admin_username at this layer.
+    // Persist `domain` as our durable site identifier and the username + client_id
+    // for downstream SSH/WP-CLI flows that need them. WP admin creds come from the
+    // worker creating them via wp-cli over SSH (no Hostinger API path exists).
+    const websiteId = wpCreate.data?.domain || domain.domain;
+    const wpAdminUrl = `https://${domain.domain}/wp-admin/`;
+    const adminPassword = '';   // worker will mint via wp-cli + bcrypt
+    const wpUser = session.email;
 
     // Persist what we know about the new WP install
     await pool.request()
