@@ -149,7 +149,18 @@ router.post('/', async (req, res) => {
       datacenterCode: process.env.HOSTINGER_DEFAULT_DATACENTER || undefined,
     });
     if (!wpCreate.ok) {
-      return res.status(502).json({ error: { code: 'WP_CREATE_FAILED', message: wpCreate.error, status: 502 } });
+      // Hostinger returns 422 "Domain already in use" when a website for this
+      // domain already exists on the account. That's not a failure for our
+      // flow — it means /submit is being re-tried after partial completion,
+      // or the operator already provisioned the domain manually. Continue
+      // with what we know about the existing install.
+      const alreadyInUse = String(wpCreate.error || '').includes('Domain already in use');
+      if (!alreadyInUse) {
+        return res.status(502).json({ error: { code: 'WP_CREATE_FAILED', message: wpCreate.error, status: 502 } });
+      }
+      // Fall through with an empty wpCreate.data — websiteId derives to the
+      // domain itself per the shape-mismatch fix.
+      wpCreate.data = wpCreate.data || { domain: domain.domain };
     }
     // Hostinger's POST /api/hosting/v1/websites response shape (verified 2026-06-14):
     //   { domain, vhost_type, is_enabled, username, client_id, order_id, created_at, root_directory, parent_domain }
