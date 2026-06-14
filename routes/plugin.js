@@ -276,6 +276,103 @@ router.get('/download', async (req, res) => {
   }
 });
 
+// ── GET /plugin/paid/:slug ──────────────────────────────────────────────
+// Streams a paid third-party plugin (e.g. elementor-pro) from the same
+// plugins container. Token-gated like /download. The blob path is
+// `<slug>/<slug>-latest.zip`. Used by the onboarding plugin-stack installer
+// so wp-cli on the Hostinger box pulls the .zip from arion-api instead of
+// directly from blob storage (sidesteps SAS-version + egress-IP issues).
+//
+// Auth: ?token=<provision_code>. Only an active, unconsumed provision
+// code can fetch the .zip.
+//
+// Uses StorageSharedKeyCredential built from the KV secret
+// STIADMPROD-ACCOUNT-KEY so we don't depend on managed-identity RBAC
+// against the storage account (which the founder account can't grant).
+import { StorageSharedKeyCredential as _SSC, BlobServiceClient as _BSC } from '@azure/storage-blob';
+import { SecretClient as _SecretClient } from '@azure/keyvault-secrets';
+import { DefaultAzureCredential as _DAC } from '@azure/identity';
+import { hashProvisionCode as _hpc } from '../lib/provisionCodes.js';
+
+const _KV_URI = process.env.KEY_VAULT_URI || 'https://kv-iadm-prod.vault.azure.net/';
+let _kvForPaid = null;
+function _kv() {
+  if (!_kvForPaid) _kvForPaid = new _SecretClient(_KV_URI, new _DAC());
+  return _kvForPaid;
+}
+
+let _paidBlobClient = null;
+async function _getPaidBlobClient() {
+  if (_paidBlobClient) return _paidBlobClient;
+  const fromEnv = process.env.STIADMPROD_ACCOUNT_KEY;
+  let key;
+  if (fromEnv && fromEnv.length > 30 && !fromEnv.startsWith('@Microsoft.KeyVault')) {
+    key = fromEnv;
+  } else {
+    const secret = await _kv().getSecret('STIADMPROD-ACCOUNT-KEY');
+    key = secret.value;
+  }
+  const cred = new _SSC(STORAGE_ACCOUNT, key);
+  _paidBlobClient = new _BSC(`https://${STORAGE_ACCOUNT}.blob.core.windows.net`, cred);
+  return _paidBlobClient;
+}
+
+router.get('/paid/:slug', async (req, res) => {
+  const { slug } = req.params;
+  const token = (req.query.token || '').toString().trim();
+
+  if (!/^[a-z0-9-]+$/.test(slug)) {
+    return res.status(400).json({ error: { code: 'BAD_SLUG', message: 'slug must be lowercase alphanumeric + hyphens', status: 400 } });
+  }
+  if (!token) {
+    return res.status(401).json({ error: { code: 'TOKEN_REQUIRED', message: 'provision code required as ?token=', status: 401 } });
+  }
+
+  try {
+    const pool = await getServicesPool();
+    const tokenHash = _hpc(token);
+    const r = await pool.request()
+      .input('th', sql.NVarChar(80), tokenHash)
+      .query(`
+        SELECT TOP 1 site_id, tenant_id, expires_at, consumed_at
+        FROM arion.provision_code
+        WHERE code_hash = @th
+      `);
+    const row = r.recordset[0];
+    if (!row) {
+      return res.status(401).json({ error: { code: 'TOKEN_INVALID', status: 401 } });
+    }
+    if (row.expires_at && new Date(row.expires_at) < new Date()) {
+      return res.status(401).json({ error: { code: 'TOKEN_EXPIRED', status: 401 } });
+    }
+
+    const blobPath = `${slug}/${slug}-latest.zip`;
+    const svc = await _getPaidBlobClient();
+    const blob = svc.getContainerClient(CONTAINER).getBlobClient(blobPath);
+    let props;
+    try {
+      props = await blob.getProperties();
+    } catch (probeErr) {
+      return res.status(404).json({ error: { code: 'PLUGIN_NOT_FOUND', message: `No blob at ${blobPath}: ${probeErr.message}`, status: 404 } });
+    }
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Length', String(props.contentLength || 0));
+    res.setHeader('Content-Disposition', `attachment; filename="${slug}-latest.zip"`);
+
+    const dlRes = await blob.download();
+    await new Promise((resolve, reject) => {
+      dlRes.readableStreamBody.pipe(res);
+      dlRes.readableStreamBody.on('end', resolve);
+      dlRes.readableStreamBody.on('error', reject);
+    });
+  } catch (err) {
+    console.error('[plugin/paid]', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+    }
+  }
+});
+
 // ── GET /plugin/versions ────────────────────────────────────────────────
 // Admin-style endpoint: list all published versions per channel. Useful for
 // the Portal's "plugin releases" admin view + founder visibility.

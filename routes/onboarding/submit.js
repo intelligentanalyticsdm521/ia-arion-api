@@ -349,6 +349,7 @@ router.post('/', async (req, res) => {
       tier,
       installShop,
       iaPluginDownloadUrl: pluginDownloadUrl,
+      provisionCode,
     });
 
     // 18. Apply branding via SSH wp-cli — overrides anything Kodee chose with
