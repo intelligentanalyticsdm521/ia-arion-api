@@ -442,7 +442,9 @@ function isAlreadyExistsError(err) {
   const s = String(err || '').toLowerCase();
   return s.includes('already in use')
     || s.includes('already exists')
-    || s.includes('already installed');
+    || s.includes('already installed')
+    || s.includes('must be unique')      // Hostinger DB-name collision phrasing
+    || s.includes('name is taken');
 }
 
 /**
