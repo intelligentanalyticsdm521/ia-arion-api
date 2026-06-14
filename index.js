@@ -18,6 +18,7 @@ import onboardingWebhookRouter from './routes/onboarding/webhook.js';
 import onboardingSubmitRouter from './routes/onboarding/submit.js';
 import onboardingStatusRouter from './routes/onboarding/status.js';
 import onboardingSessionInfoRouter from './routes/onboarding/session-info.js';
+import onboardingActivateRouter from './routes/onboarding/activate.js';
 import provisioningRouter from './routes/provisioning.js';
 import pluginRouter from './routes/plugin.js';
 
@@ -94,6 +95,7 @@ app.use('/onboarding/checkout', onboardingCheckoutRouter);
 app.use('/onboarding/submit', onboardingSubmitRouter);
 app.use('/onboarding/status', onboardingStatusRouter);
 app.use('/onboarding/session-info', onboardingSessionInfoRouter);
+app.use('/onboarding/activate', onboardingActivateRouter);
 // Provisioning endpoints (no JWT auth — authenticated via single-use provisioning code in body
 // or the PROVISIONER_SHARED_SECRET header for worker callbacks).
 // Called by the IA Plugin's bootstrap class on a freshly-provisioned client site.
