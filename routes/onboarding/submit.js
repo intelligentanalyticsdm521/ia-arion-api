@@ -28,13 +28,20 @@ import {
   purchaseDomain,
   createWhoisProfile,
   createWebsite,
+  createDatabase,
+  installWordPress,
   enableDomainLock,
   enablePrivacyProtection,
 } from '../../lib/hostinger.js';
+import { finishWpSetup, applyBranding } from '../../lib/hostingerSsh.js';
 import { createJob, transitionState, getLatestJobForSite } from '../../lib/provisioningJobs.js';
-import { dispatchJob } from '../../lib/workerClient.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
 import { updateSharedProfile } from '../../db/platformPool.js';
+
+// arion-api base URL (so the IA Plugin gets a valid download URL inside wp-cli).
+// Tries env first, then falls back to the prod hostname.
+const ARION_API_BASE = (process.env.ARION_API_BASE_URL
+  || 'https://app-arion-api-prod-e6fuc9gzd8f3hqfe.centralus-01.azurewebsites.net').replace(/\/+$/, '');
 
 const router = Router();
 
@@ -164,24 +171,46 @@ router.post('/', async (req, res) => {
     }
     // Hostinger's POST /api/hosting/v1/websites response shape (verified 2026-06-14):
     //   { domain, vhost_type, is_enabled, username, client_id, order_id, created_at, root_directory, parent_domain }
-    // No website_id / id / admin_password / admin_username at this layer.
-    // Persist `domain` as our durable site identifier and the username + client_id
-    // for downstream SSH/WP-CLI flows that need them. WP admin creds come from the
-    // worker creating them via wp-cli over SSH (no Hostinger API path exists).
+    // We need `username` for the next two API calls (createDatabase + installWordPress).
+    const hostingerUsername = wpCreate.data?.username
+      || process.env.HOSTINGER_DEFAULT_USERNAME
+      || null;
     const websiteId = wpCreate.data?.domain || domain.domain;
     const wpAdminUrl = `https://${domain.domain}/wp-admin/`;
-    // TODO(GAP): Hostinger has no API for fetching/setting WP admin creds.
-    // The Playwright worker logs into wp-admin first (Step 1) — it needs a
-    // valid password. Right now we send a placeholder that will fail login.
-    // The fix is: SSH into Hostinger (using ARION-HOSTINGER-SSH-* secrets)
-    // and run `wp user update <user> --user_pass=<known>` before dispatching.
-    // For now the worker will reach wp_login, see "incorrect password," and
-    // report a clean failure — better than silently being non-functional.
-    const adminPassword = process.env.ARION_WP_ADMIN_PASSWORD_FALLBACK
-                       || generatePassword();
-    const wpUser = session.email;
 
-    // Persist what we know about the new WP install
+    if (!hostingerUsername) {
+      return res.status(500).json({
+        error: {
+          code: 'NO_HOSTINGER_USERNAME',
+          message: 'createWebsite did not return a username and HOSTINGER_DEFAULT_USERNAME is not set. Cannot proceed with DB + WP install.',
+          status: 500,
+        },
+      });
+    }
+
+    // 7. Issue provisioning code FIRST — the IA Plugin download URL embeds it.
+    const codeRes = await createProvisionCode(pool, {
+      tenantId: session.tenant_id,
+      siteId: session.site_id,
+      createdBy: 'onboarding_submit',
+      ttlDays: 14,
+    });
+    const provisionCode = codeRes.code;
+    const pluginDownloadUrl = `${ARION_API_BASE}/plugin/download?token=${encodeURIComponent(provisionCode)}`;
+
+    // 8. Generate credentials we'll need everywhere downstream. The DB user +
+    //    name get the username_ prefix automatically applied by Hostinger.
+    //    Keep names short (32 char limit including prefix in Hostinger MySQL).
+    const dbSuffix = String(session.tenant_id).slice(0, 8).toLowerCase().replace(/-/g, '');
+    const dbName = `arion_${dbSuffix}`.slice(0, 18);
+    const dbUser = `arion_${dbSuffix}`.slice(0, 18);
+    const dbPassword = generatePassword();
+
+    const adminLogin = 'iaadmin';
+    const adminPassword = generatePassword();
+    const adminEmail = process.env.IA_STAFF_ADMIN_EMAIL || 'info@intelligentanalyticsdm.com';
+
+    // 9. Persist initial site state (queued) before the long-running install calls.
     await pool.request()
       .input('siteId', sql.UniqueIdentifier, session.site_id)
       .input('websiteId', sql.NVarChar(80), String(websiteId || ''))
@@ -201,60 +230,104 @@ router.post('/', async (req, res) => {
         WHERE site_id = @siteId
       `);
 
-    // 7. Build the AI prompt from answers
-    const { prompt } = buildAiPrompt(answers);
+    // 10. Hostinger API: createDatabase (skip if Hostinger reported domain
+    //     already in use — we assume the DB exists from a prior run).
+    if (!wpCreate.data?.alreadyInUse) {
+      const dbRes = await createDatabase({
+        username: hostingerUsername,
+        name: dbName,
+        user: dbUser,
+        password: dbPassword,
+        websiteDomain: domain.domain,
+      });
+      if (!dbRes.ok) {
+        return res.status(502).json({
+          error: { code: 'DB_CREATE_FAILED', message: dbRes.error, status: 502 },
+        });
+      }
 
-    // 8. Issue a fresh provisioning code (or reuse existing pending one)
-    const codeRes = await createProvisionCode(pool, {
-      tenantId: session.tenant_id,
-      siteId: session.site_id,
-      createdBy: 'onboarding_submit',
-      ttlDays: 14,
-    });
+      // 11. Hostinger API: installWordPress
+      const wpInstall = await installWordPress({
+        username: hostingerUsername,
+        domain: domain.domain,
+        siteTitle: answers.businessName,
+        credentials: {
+          email: adminEmail,
+          login: adminLogin,
+          password: adminPassword,
+        },
+      });
+      if (!wpInstall.ok) {
+        return res.status(502).json({
+          error: { code: 'WP_INSTALL_FAILED', message: wpInstall.error, status: 502 },
+        });
+      }
+    }
 
-    // 9. Create the job + dispatch to worker
-    const payload = {
-      tenantId: session.tenant_id,
-      siteId: session.site_id,
-      domain: domain.domain,
-      websiteId,
-      wpAdminUrl,
-      wpUser,
-      wpPass: adminPassword,
-      prompt,
-      brandName: answers.businessName,
-      language: 'English',
-      provisionCode: codeRes.code,
-    };
+    // 12. SSH wp-cli post-install: add client editor, install Elementor + IA
+    //     Plugin. The WP install needs a few seconds to finish copying files —
+    //     finishWpSetup is retried by the caller via a short waitForWpReady poll.
+    await waitForWpReady(domain.domain);
 
-    const job = await createJob(pool, {
-      tenantId: session.tenant_id,
-      siteId: session.site_id,
-      signupSessionPk: session.session_pk,
-      payload,
-    });
-
-    await pool.request()
-      .input('sessionPk', sql.Int, session.session_pk)
-      .input('jobId', sql.UniqueIdentifier, job.job_id)
-      .query(`UPDATE arion.signup_session SET provisioning_job_id = @jobId WHERE session_pk = @sessionPk`);
-
-    // Fire-and-forget dispatch to worker; mark job as dispatched optimistically.
-    // If dispatch fails we transition to 'failed' so the UI surfaces the error.
-    dispatchJob({ jobId: job.job_id, ...payload })
-      .then(async (r) => {
-        if (r.ok) {
-          await transitionState(pool, job.job_id, 'dispatched', { message: 'queued in worker' });
-        } else {
-          await transitionState(pool, job.job_id, 'failed', { error: 'Worker dispatch failed: ' + r.error });
-        }
-      })
-      .catch((err) => {
-        console.error('[onboarding/submit] dispatch error:', err);
+    try {
+      await finishWpSetup({
+        domain: domain.domain,
+        clientEmail: session.email,
+        clientFirstName: (answers.contactFirstName || '').toString() || answers.businessName,
+        clientLastName: (answers.contactLastName || '').toString() || '',
+        pluginDownloadUrl,
       });
 
-    return res.status(202).json({
-      data: { job_id: job.job_id, state: 'queued' },
+      await applyBranding({
+        domain: domain.domain,
+        brandName: answers.businessName,
+        primaryColor: answers.primaryColor,
+        secondaryColor: answers.secondaryColor,
+        accentColor: answers.accentColor,
+      });
+    } catch (sshErr) {
+      console.error('[onboarding/submit] SSH/wp-cli error:', sshErr);
+      // Continue — partial setup is better than rolling back the whole flow.
+      // The site exists; admin can finish setup manually.
+    }
+
+    // 13. Build the AI prompt and stash it on the site for the IA Plugin to read.
+    const { prompt: aiPrompt } = buildAiPrompt(answers);
+
+    // 14. Final state — site is ready. Provisioning details captured for ops.
+    const provisioningDetails = {
+      hostinger_username: hostingerUsername,
+      wp_admin_login: adminLogin,
+      wp_admin_email: adminEmail,
+      wp_admin_password_set: true,
+      db_name_suffix: dbName,
+      db_user_suffix: dbUser,
+      provisioned_at: new Date().toISOString(),
+      provision_code: provisionCode,
+      ai_prompt_chars: aiPrompt.length,
+    };
+
+    await pool.request()
+      .input('siteId', sql.UniqueIdentifier, session.site_id)
+      .input('details', sql.NVarChar(sql.MAX), JSON.stringify(provisioningDetails))
+      .query(`
+        UPDATE arion.site
+        SET provisioning_state = 'ready',
+            provisioned_at = SYSUTCDATETIME(),
+            provisioning_details_json = @details,
+            updated_at = GETUTCDATE()
+        WHERE site_id = @siteId
+      `);
+
+    return res.status(200).json({
+      data: {
+        site_id: session.site_id,
+        tenant_id: session.tenant_id,
+        domain: domain.domain,
+        wp_admin_url: wpAdminUrl,
+        provisioning_state: 'ready',
+        provision_code: provisionCode,
+      },
       meta: { timestamp: new Date().toISOString() },
     });
   } catch (err) {
@@ -324,6 +397,30 @@ async function registerPurchasedDomain({ domain, whois, sessionEmail }) {
   enableDomainLock(domain).catch(() => {});
   enablePrivacyProtection(domain).catch(() => {});
   return { ok: true, order_id: purchase.data?.order_id };
+}
+
+/**
+ * Poll the public site URL until WordPress responds (wp-login.php exists).
+ * Hostinger's installWordPress is mostly synchronous but the WP files can
+ * take 10-30s to be readable post-install — this avoids racing the subsequent
+ * SSH/wp-cli calls.
+ *
+ * @param {string} domain
+ * @param {number} [timeoutMs=120_000]  — give up after 2 minutes
+ */
+async function waitForWpReady(domain, timeoutMs = 120_000) {
+  const start = Date.now();
+  const url = `https://${domain}/wp-login.php`;
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const res = await fetch(url, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(8000) });
+      // wp-login.php either 200s (form) or 302s (redirect to https). Either way it exists.
+      if (res.status === 200 || res.status === 302) return true;
+    } catch { /* not ready yet */ }
+    await new Promise((r) => setTimeout(r, 4000));
+  }
+  console.warn(`[onboarding/submit] waitForWpReady gave up after ${timeoutMs}ms for ${domain}`);
+  return false;
 }
 
 /**
