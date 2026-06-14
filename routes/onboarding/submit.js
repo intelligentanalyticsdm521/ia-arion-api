@@ -165,9 +165,9 @@ router.post('/', async (req, res) => {
       if (!alreadyInUse) {
         return res.status(502).json({ error: { code: 'WP_CREATE_FAILED', message: wpCreate.error, status: 502 } });
       }
-      // Fall through with an empty wpCreate.data — websiteId derives to the
-      // domain itself per the shape-mismatch fix.
-      wpCreate.data = wpCreate.data || { domain: domain.domain };
+      // Fall through with a stub data object and the alreadyInUse flag set so
+      // the createDatabase + installWordPress branch below knows to skip.
+      wpCreate.data = { domain: domain.domain, alreadyInUse: true };
     }
     // Hostinger's POST /api/hosting/v1/websites response shape (verified 2026-06-14):
     //   { domain, vhost_type, is_enabled, username, client_id, order_id, created_at, root_directory, parent_domain }
