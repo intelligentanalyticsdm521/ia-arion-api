@@ -1,6 +1,8 @@
 # Site Provisioner Worker — Azure Container App image.
 # Uses Microsoft's official Playwright image which ships Chromium + system deps.
-FROM mcr.microsoft.com/playwright:v1.48.0-jammy
+# Base bumped to v1.49.0 to match arion-api's package.json playwright version
+# (browser binary version is tied to the npm package version).
+FROM mcr.microsoft.com/playwright:v1.49.0-jammy
 
 WORKDIR /app
 
@@ -8,7 +10,10 @@ WORKDIR /app
 # (Container Apps deployment script can rsync the right subset, or we can
 # expand to the whole repo and trim with .dockerignore.)
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev --ignore-scripts
+# Drop --ignore-scripts so playwright's postinstall hook runs (creates bin links).
+# Chromium binaries come from the base image (v1.49.0 ships chromium-1148).
+RUN npm install --omit=dev \
+ && node node_modules/playwright/cli.js install chromium
 
 # Copy worker + the lib modules it imports
 COPY workers/ ./workers/
