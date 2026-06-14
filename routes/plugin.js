@@ -334,7 +334,7 @@ router.get('/paid/:slug', async (req, res) => {
     const r = await pool.request()
       .input('th', sql.NVarChar(80), tokenHash)
       .query(`
-        SELECT TOP 1 site_id, tenant_id, expires_at, consumed_at
+        SELECT TOP 1 site_id, tenant_id, expires_at, redeemed_at, revoked_at
         FROM arion.site_provision_code
         WHERE code_hash = @th
       `);
