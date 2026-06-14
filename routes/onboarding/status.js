@@ -35,7 +35,7 @@ router.get('/', async (req, res) => {
       .input('sessionId', sql.NVarChar(200), sessionId)
       .query(`
         SELECT TOP 1 ss.session_pk, ss.tenant_id, ss.site_id, ss.email, ss.domain_json,
-               s.domain, s.wp_admin_url, s.provisioning_state
+               s.domain, s.wp_admin_url, s.provisioning_state, s.provisioning_details_json
         FROM arion.signup_session ss
         JOIN arion.site s ON s.site_id = ss.site_id
         WHERE ss.stripe_session_id = @sessionId
@@ -45,6 +45,29 @@ router.get('/', async (req, res) => {
       return res.status(404).json({ error: { code: 'SESSION_NOT_FOUND', message: 'Signup session not found', status: 404 } });
     }
     const ctx = sessionRow.recordset[0];
+
+    // First check the new phase tracker fields in provisioning_details_json.
+    // If they're present (set by the async submit.js orchestrator), they're
+    // the authoritative source for progress — return them directly.
+    let phaseDetails = null;
+    try { phaseDetails = ctx.provisioning_details_json ? JSON.parse(ctx.provisioning_details_json) : null; } catch { /* noop */ }
+    if (phaseDetails?.current_phase) {
+      const wpLoginUrl2 = ctx.wp_admin_url ? rtrimSlash(ctx.wp_admin_url).replace(/\/wp-admin$/, '') + '/wp-login.php' : null;
+      const previewUrl2 = ctx.domain ? `https://${ctx.domain}` : null;
+      return res.json({
+        data: {
+          phase: phaseDetails.current_phase,
+          progress_percent: Number(phaseDetails.current_percent ?? 0),
+          message: phaseDetails.current_message || null,
+          error: phaseDetails.current_phase === 'failed' ? phaseDetails.current_message : null,
+          wp_admin_url: ctx.wp_admin_url || null,
+          wp_login_url: wpLoginUrl2,
+          preview_url: previewUrl2,
+          provisioning_state: ctx.provisioning_state || null,
+        },
+        meta: { timestamp: new Date().toISOString(), source: 'phase_tracker' },
+      });
+    }
 
     // 1. Check for BYOD-not-yet-propagated state. The UI flagged this case
     //    via /onboarding/submit returning 425 — we surface it here too in

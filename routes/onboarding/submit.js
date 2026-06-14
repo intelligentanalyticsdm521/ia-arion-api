@@ -48,6 +48,7 @@ import {
 import { createJob, transitionState, getLatestJobForSite } from '../../lib/provisioningJobs.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
 import { updateSharedProfile } from '../../db/platformPool.js';
+import { updatePhase, markFailed } from '../../lib/provisioningPhase.js';
 
 // arion-api base URL (so the IA Plugin gets a valid download URL inside wp-cli).
 // Tries env first, then falls back to the prod hostname.
@@ -240,10 +241,73 @@ router.post('/', async (req, res) => {
             updated_at = GETUTCDATE()
         WHERE site_id = @siteId
       `);
+    await updatePhase(pool, session.site_id, 'queued');
 
-    // 10. Hostinger API: createDatabase. Always attempt — if Hostinger says
-    //     "already exists" we swallow the per-call error so a partial-retry
-    //     can progress. Surface anything else.
+    // === ASYNC HANDOFF ===
+    // Everything up to here is fast (validation + cheap Hostinger account-
+    // level calls). The rest takes 5-15 minutes (Kodee browser-drive + plugin
+    // stack + branding). Return 202 immediately so the customer's browser
+    // gets to /pricing/status and shows the progress bar. The actual work
+    // runs in the background; status endpoint reads phase from arion.site.
+    res.status(202).json({
+      data: {
+        site_id: session.site_id,
+        tenant_id: session.tenant_id,
+        domain: domain.domain,
+        wp_admin_url: wpAdminUrl,
+        provisioning_state: 'queued',
+        status_url: `/onboarding/status?session_id=${encodeURIComponent(session_id)}`,
+        estimated_seconds: 900, // ~15 min worst case; UI shows "up to 60" for ARION
+      },
+      meta: { timestamp: new Date().toISOString() },
+    });
+
+    // Fire-and-forget orchestration. .unref()-style guard via process.nextTick
+    // isn't needed because Express keeps the worker alive; we just don't want
+    // to block the response.
+    setImmediate(async () => {
+      try {
+        await runProvisioningBackground({
+          pool, session, domain, answers, hostingerUsername, wpAdminUrl,
+        });
+      } catch (err) {
+        console.error('[onboarding/submit/background]', err);
+        try { await markFailed(pool, session.site_id, err); } catch { /* noop */ }
+      }
+    });
+    return;
+  } catch (err) {
+    console.error('[onboarding/submit]', err);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+/**
+ * Long-running orchestration body. Each step updates the provisioning phase
+ * on arion.site so the status endpoint can drive a progress bar.
+ */
+async function runProvisioningBackground({ pool, session, domain, answers, hostingerUsername, wpAdminUrl }) {
+    // 7. Issue provisioning code FIRST — the IA Plugin download URL embeds it.
+    const codeRes = await createProvisionCode(pool, {
+      tenantId: session.tenant_id,
+      siteId: session.site_id,
+      createdBy: 'onboarding_submit',
+      ttlDays: 14,
+    });
+    const provisionCode = codeRes.code;
+    const pluginDownloadUrl = `${ARION_API_BASE}/plugin/download?token=${encodeURIComponent(provisionCode)}`;
+
+    // 8. Generate credentials we'll need everywhere downstream.
+    const dbSuffix = String(session.tenant_id).slice(0, 8).toLowerCase().replace(/-/g, '');
+    const dbName = `arion_${dbSuffix}`.slice(0, 18);
+    const dbUser = `arion_${dbSuffix}`.slice(0, 18);
+    const dbPassword = generatePassword();
+    const adminLogin = 'iaadmin';
+    const adminPassword = generatePassword();
+    const adminEmail = process.env.IA_STAFF_ADMIN_EMAIL || 'info@intelligentanalyticsdm.com';
+
+    // 10. Hostinger API: createDatabase.
+    await updatePhase(pool, session.site_id, 'creating_database');
     const dbRes = await createDatabase({
       username: hostingerUsername,
       name: dbName,
@@ -252,12 +316,11 @@ router.post('/', async (req, res) => {
       websiteDomain: domain.domain,
     });
     if (!dbRes.ok && !isAlreadyExistsError(dbRes.error)) {
-      return res.status(502).json({
-        error: { code: 'DB_CREATE_FAILED', message: dbRes.error, status: 502 },
-      });
+      throw new Error(`DB_CREATE_FAILED: ${dbRes.error}`);
     }
 
     // 11. Hostinger API: installWordPress. Same idempotency rule.
+    await updatePhase(pool, session.site_id, 'installing_wordpress');
     const wpInstall = await installWordPress({
       username: hostingerUsername,
       domain: domain.domain,
@@ -269,29 +332,18 @@ router.post('/', async (req, res) => {
       },
     });
     if (!wpInstall.ok && !isAlreadyExistsError(wpInstall.error)) {
-      return res.status(502).json({
-        error: { code: 'WP_INSTALL_FAILED', message: wpInstall.error, status: 502 },
-      });
+      throw new Error(`WP_INSTALL_FAILED: ${wpInstall.error}`);
     }
 
     // 12. Wait for WordPress to come online so subsequent steps can talk to it.
-    //     Fail loud if it doesn't — silent failures here ship broken sites.
+    await updatePhase(pool, session.site_id, 'waiting_for_wp');
     const wpReady = await waitForWpReady(domain.domain);
     if (!wpReady) {
-      return res.status(502).json({
-        error: {
-          code: 'WP_NOT_READY',
-          message: `WordPress did not respond at https://${domain.domain}/wp-login.php within 2 minutes. Install may have failed or DNS is still propagating.`,
-          status: 502,
-        },
-      });
+      throw new Error(`WP_NOT_READY: WordPress did not respond at https://${domain.domain}/wp-login.php within 2 minutes.`);
     }
 
-    // 12.5 Ensure the iaadmin password in WP matches the one we just
-    //      generated. Needed because installWordPress is idempotent at the
-    //      Hostinger API level — on retry it returns "already installed"
-    //      without setting a new password, so the password from THIS run
-    //      never reaches WP. The browser-driver needs working creds to log in.
+    // 12.5 Ensure the iaadmin password in WP matches the one we just generated.
+    await updatePhase(pool, session.site_id, 'resetting_admin_password');
     await ensureAdminPassword({
       domain: domain.domain,
       adminLogin,
@@ -299,16 +351,12 @@ router.post('/', async (req, res) => {
       adminPassword,
     });
 
-    // 13. Build the questionnaire-derived AI prompt. Capped at 2000 chars per
-    //     Hostinger's Kodee limit — promptBuilder.js handles truncation.
+    // 13. Build the questionnaire-derived AI prompt.
     const { prompt: aiPrompt } = buildAiPrompt(answers);
 
     // 14. Drive Hostinger's Kodee AI WordPress builder via the browser-driver
-    //     Container App. Kodee is wp-admin-only (no public API), so we paste
-    //     our prompt into its wizard and wait. The driver returns when Kodee
-    //     reports "done" or after a 5-minute hard timeout. Soft failures
-    //     (status: 'failed') get logged but don't block the rest of the flow;
-    //     ops can re-trigger Kodee manually if it didn't take.
+    //     Container App. Soft-failure: don't block on errors here.
+    await updatePhase(pool, session.site_id, 'kodee_building');
     let kodeeResult;
     try {
       kodeeResult = await driveKodeeBuild({
@@ -325,12 +373,12 @@ router.post('/', async (req, res) => {
       console.warn(`[onboarding/submit] Kodee did not complete cleanly: ${kodeeResult.error || 'unknown'} — continuing with stack install anyway`);
     }
 
-    // 15. Now that Kodee is finished (or skipped), strip Hostinger's stock
-    //     onboarding plugins so they don't intercept wp-admin once the
-    //     customer logs in.
+    // 15. Strip Hostinger's stock onboarding plugins.
+    await updatePhase(pool, session.site_id, 'stripping_hostinger');
     await stripHostingerOnboardingPlugins(domain.domain);
 
     // 16. Create the client's editor-level WP user.
+    await updatePhase(pool, session.site_id, 'creating_editor_user');
     await createClientEditor({
       domain: domain.domain,
       clientEmail: session.email,
@@ -338,10 +386,8 @@ router.post('/', async (req, res) => {
       clientLastName: (answers.contactLastName || '').toString() || '',
     });
 
-    // 17. Install the Golden Master plugin stack for this tenant's tier. The
-    //     matrix lives in lib/pluginStack.js — mirrored in
-    //     reference_arion_plugin_stack.md. WooCommerce gates on
-    //     answers.installShop (questionnaire Page 4 question).
+    // 17. Install the Golden Master plugin stack for this tenant's tier.
+    await updatePhase(pool, session.site_id, 'installing_plugins');
     const tier = (answers.tier || session.tier || 'lite').toLowerCase();
     const installShop = answers.installShop === true || answers.needsShop === true;
     const stackResult = await installPluginsForTier({
@@ -352,8 +398,8 @@ router.post('/', async (req, res) => {
       provisionCode,
     });
 
-    // 18. Apply branding via SSH wp-cli — overrides anything Kodee chose with
-    //     the colors the customer specified in the questionnaire.
+    // 18. Apply branding via SSH wp-cli.
+    await updatePhase(pool, session.site_id, 'applying_branding');
     await applyBranding({
       domain: domain.domain,
       brandName: answers.businessName,
@@ -362,11 +408,14 @@ router.post('/', async (req, res) => {
       accentColor: answers.accentColor,
     });
 
-    // 19. Generate the CIAM activation token for the welcome email link. The
-    //     Portal /welcome route will exchange it via platform-api.
+    await updatePhase(pool, session.site_id, 'finishing_up');
+
+    // 19. Generate the CIAM activation token for the welcome email link.
     const setupToken = generateSetupToken();
 
     // 20. Final state — site is ready. Provisioning details captured for ops.
+    //     Preserves the current_phase/percent fields already on the row by
+    //     merging them in after writing the canonical details.
     const provisioningDetails = {
       hostinger_username: hostingerUsername,
       wp_admin_login: adminLogin,
@@ -384,7 +433,10 @@ router.post('/', async (req, res) => {
       kodee_status: kodeeResult.status,
       kodee_duration_ms: kodeeResult.duration_ms,
       kodee_error: kodeeResult.error || null,
-      welcome_token: setupToken, // stored so platform-api can verify on /welcome
+      welcome_token: setupToken,
+      current_phase: 'ready',
+      current_percent: 100,
+      current_message: 'Your site is ready!',
     };
 
     await pool.request()
@@ -399,9 +451,8 @@ router.post('/', async (req, res) => {
         WHERE site_id = @siteId
       `);
 
-    // 21. Send the "your site is ready + activate your portal" email. Best
-    //     effort — a failed send does not block. Ops can re-send via the
-    //     admin console using the welcome_token stored above.
+    // 21. Send the "your site is ready + activate your portal" email. Best-effort.
+    await updatePhase(pool, session.site_id, 'sending_welcome');
     try {
       const emailRes = await sendOnboardingWelcomeEmail({
         toEmail: session.email,
@@ -419,27 +470,8 @@ router.post('/', async (req, res) => {
     } catch (emailErr) {
       console.error('[onboarding/submit] welcome email threw:', emailErr.message);
     }
-
-    return res.status(200).json({
-      data: {
-        site_id: session.site_id,
-        tenant_id: session.tenant_id,
-        domain: domain.domain,
-        wp_admin_url: wpAdminUrl,
-        provisioning_state: 'ready',
-        provision_code: provisionCode,
-        plugins_installed: stackResult.installed,
-        plugins_skipped: stackResult.skipped,
-        kodee_status: kodeeResult.status,
-        kodee_error: kodeeResult.error || null,
-      },
-      meta: { timestamp: new Date().toISOString() },
-    });
-  } catch (err) {
-    console.error('[onboarding/submit]', err);
-    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
-  }
-});
+    await updatePhase(pool, session.site_id, 'ready');
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
