@@ -38,6 +38,7 @@ import {
   createClientEditor,
   ensureAdminPassword,
   applyBranding,
+  createFallbackPages,
 } from '../../lib/hostingerSsh.js';
 import { installPluginsForTier } from '../../lib/pluginStack.js';
 import { driveKodeeBuild } from '../../lib/browserDriver.js';
@@ -398,6 +399,20 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       provisionCode,
     });
 
+    // 17.5 Fallback content: if Kodee didn't generate any pages, seed 6 basic
+    //      pages from the questionnaire so the customer never lands on a bare
+    //      install. Cheap — ~10s of wp-cli — and idempotent. Only fires when
+    //      Kodee soft-failed (status !== 'completed' OR no pages exist).
+    let fallbackResult = { created: [], skipped: [], used: false };
+    if (kodeeResult.status !== 'completed') {
+      try {
+        fallbackResult = { ...(await createFallbackPages({ domain: domain.domain, answers })), used: true };
+        console.log(`[onboarding/submit] Kodee fallback pages created: ${fallbackResult.created.join(',')} (skipped: ${fallbackResult.skipped.join(',')})`);
+      } catch (fallbackErr) {
+        console.warn(`[onboarding/submit] fallback-page creation failed: ${fallbackErr.message.slice(0, 200)}`);
+      }
+    }
+
     // 18. Apply branding via SSH wp-cli.
     await updatePhase(pool, session.site_id, 'applying_branding');
     await applyBranding({
@@ -433,6 +448,8 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       kodee_status: kodeeResult.status,
       kodee_duration_ms: kodeeResult.duration_ms,
       kodee_error: kodeeResult.error || null,
+      fallback_pages_used: fallbackResult.used,
+      fallback_pages_created: fallbackResult.created,
       welcome_token: setupToken,
       current_phase: 'ready',
       current_percent: 100,
