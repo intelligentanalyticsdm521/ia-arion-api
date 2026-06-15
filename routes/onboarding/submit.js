@@ -489,7 +489,7 @@ async function registerPurchasedDomain({ domain, whois, sessionEmail }) {
  * take 10-30s to be readable post-install — this avoids racing the subsequent
  * SSH/wp-cli calls.
  */
-async function waitForWpReady(domain, timeoutMs = 120_000) {
+async function waitForWpReady(domain, timeoutMs = 300_000) {
   const start = Date.now();
   const url = `https://${domain}/wp-login.php`;
   while (Date.now() - start < timeoutMs) {
