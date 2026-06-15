@@ -27,21 +27,16 @@ import { verifyHostingerNameservers } from '../../lib/dnsVerifier.js';
 import {
   purchaseDomain,
   createWhoisProfile,
-  createWebsite,
-  createDatabase,
-  installWordPress,
   enableDomainLock,
   enablePrivacyProtection,
 } from '../../lib/hostinger.js';
 import {
   stripHostingerOnboardingPlugins,
   createClientEditor,
-  ensureAdminPassword,
   applyBranding,
-  createFallbackPages,
 } from '../../lib/hostingerSsh.js';
 import { installPluginsForTier } from '../../lib/pluginStack.js';
-import { driveKodeeBuild } from '../../lib/browserDriver.js';
+import { driveHpanelBuild } from '../../lib/browserDriver.js';
 import {
   sendOnboardingWelcomeEmail,
   generateSetupToken,
@@ -149,92 +144,20 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // 6. Create the WordPress install on Hostinger
-    // Hostinger schema: domain + order_id (integer) + optional datacenter_code.
-    // No admin_email/password fields — the WP admin user is created from the Hostinger
-    // account default. Credentials are retrieved from getWebsiteDetails() after creation.
-    const orderId = Number(process.env.HOSTINGER_DEFAULT_ORDER_ID || 0);
-    if (!orderId) {
-      return res.status(503).json({
-        error: {
-          code: 'NOT_CONFIGURED',
-          message: 'HOSTINGER_DEFAULT_ORDER_ID env var is not set. Run the Hostinger smoke test (scripts/smoke-test.js) to find your active hosting order ID.',
-          status: 503,
-        },
-      });
-    }
-    const wpCreate = await createWebsite({
-      domain: domain.domain,
-      orderId,
-      datacenterCode: process.env.HOSTINGER_DEFAULT_DATACENTER || undefined,
-    });
-    if (!wpCreate.ok) {
-      // Hostinger returns 422 "Domain already in use" when a website for this
-      // domain already exists on the account. That's not a failure for our
-      // flow — it means /submit is being re-tried after partial completion,
-      // or the operator already provisioned the domain manually. Continue
-      // with what we know about the existing install.
-      const alreadyInUse = String(wpCreate.error || '').includes('Domain already in use');
-      if (!alreadyInUse) {
-        return res.status(502).json({ error: { code: 'WP_CREATE_FAILED', message: wpCreate.error, status: 502 } });
-      }
-      // Fall through with a stub data object and the alreadyInUse flag set so
-      // the createDatabase + installWordPress branch below knows to skip.
-      wpCreate.data = { domain: domain.domain, alreadyInUse: true };
-    }
-    // Hostinger's POST /api/hosting/v1/websites response shape (verified 2026-06-14):
-    //   { domain, vhost_type, is_enabled, username, client_id, order_id, created_at, root_directory, parent_domain }
-    // We need `username` for the next two API calls (createDatabase + installWordPress).
-    const hostingerUsername = wpCreate.data?.username
-      || process.env.HOSTINGER_DEFAULT_USERNAME
-      || null;
-    const websiteId = wpCreate.data?.domain || domain.domain;
+    // 6. Persist initial site state (queued). The actual hosting slot + WP
+    //    install is created BY KODEE during the browser-driven hPanel flow,
+    //    not via REST API. The slot URL is what we already know — Hostinger's
+    //    AI builder lands at the same subdomain we tell it to use.
     const wpAdminUrl = `https://${domain.domain}/wp-admin/`;
-
-    if (!hostingerUsername) {
-      return res.status(500).json({
-        error: {
-          code: 'NO_HOSTINGER_USERNAME',
-          message: 'createWebsite did not return a username and HOSTINGER_DEFAULT_USERNAME is not set. Cannot proceed with DB + WP install.',
-          status: 500,
-        },
-      });
-    }
-
-    // 7. Issue provisioning code FIRST — the IA Plugin download URL embeds it.
-    const codeRes = await createProvisionCode(pool, {
-      tenantId: session.tenant_id,
-      siteId: session.site_id,
-      createdBy: 'onboarding_submit',
-      ttlDays: 14,
-    });
-    const provisionCode = codeRes.code;
-    const pluginDownloadUrl = `${ARION_API_BASE}/plugin/download?token=${encodeURIComponent(provisionCode)}`;
-
-    // 8. Generate credentials we'll need everywhere downstream. The DB user +
-    //    name get the username_ prefix automatically applied by Hostinger.
-    //    Keep names short (32 char limit including prefix in Hostinger MySQL).
-    const dbSuffix = String(session.tenant_id).slice(0, 8).toLowerCase().replace(/-/g, '');
-    const dbName = `arion_${dbSuffix}`.slice(0, 18);
-    const dbUser = `arion_${dbSuffix}`.slice(0, 18);
-    const dbPassword = generatePassword();
-
-    const adminLogin = 'iaadmin';
-    const adminPassword = generatePassword();
-    const adminEmail = process.env.IA_STAFF_ADMIN_EMAIL || 'info@intelligentanalyticsdm.com';
-
-    // 9. Persist initial site state (queued) before the long-running install calls.
     await pool.request()
       .input('siteId', sql.UniqueIdentifier, session.site_id)
-      .input('websiteId', sql.NVarChar(80), String(websiteId || ''))
       .input('wpAdminUrl', sql.NVarChar(500), wpAdminUrl)
       .input('domain', sql.NVarChar(253), domain.domain)
       .input('domainMode', sql.NVarChar(20), domain.mode)
       .input('primaryColor', sql.NVarChar(20), answers.primaryColor || null)
       .query(`
         UPDATE arion.site
-        SET hostinger_website_id = @websiteId,
-            wp_admin_url = @wpAdminUrl,
+        SET wp_admin_url = @wpAdminUrl,
             domain = @domain,
             domain_mode = @domainMode,
             branding_primary_color = @primaryColor,
@@ -245,11 +168,11 @@ router.post('/', async (req, res) => {
     await updatePhase(pool, session.site_id, 'queued');
 
     // === ASYNC HANDOFF ===
-    // Everything up to here is fast (validation + cheap Hostinger account-
-    // level calls). The rest takes 5-15 minutes (Kodee browser-drive + plugin
+    // Everything up to here is fast (validation + persistence). The hPanel
+    // browser flow takes 5-15 minutes (login + Kodee AI build + plugin
     // stack + branding). Return 202 immediately so the customer's browser
-    // gets to /pricing/status and shows the progress bar. The actual work
-    // runs in the background; status endpoint reads phase from arion.site.
+    // gets to the progress page. The actual work runs in the background;
+    // status endpoint reads phase from arion.site.
     res.status(202).json({
       data: {
         site_id: session.site_id,
@@ -269,7 +192,7 @@ router.post('/', async (req, res) => {
     setImmediate(async () => {
       try {
         await runProvisioningBackground({
-          pool, session, domain, answers, hostingerUsername, wpAdminUrl,
+          pool, session, domain, answers, wpAdminUrl,
         });
       } catch (err) {
         console.error('[onboarding/submit/background]', err);
@@ -287,7 +210,7 @@ router.post('/', async (req, res) => {
  * Long-running orchestration body. Each step updates the provisioning phase
  * on arion.site so the status endpoint can drive a progress bar.
  */
-async function runProvisioningBackground({ pool, session, domain, answers, hostingerUsername, wpAdminUrl }) {
+async function runProvisioningBackground({ pool, session, domain, answers, wpAdminUrl }) {
     // 7. Issue provisioning code FIRST — the IA Plugin download URL embeds it.
     const codeRes = await createProvisionCode(pool, {
       tenantId: session.tenant_id,
@@ -298,87 +221,56 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
     const provisionCode = codeRes.code;
     const pluginDownloadUrl = `${ARION_API_BASE}/plugin/download?token=${encodeURIComponent(provisionCode)}`;
 
-    // 8. Generate credentials we'll need everywhere downstream.
-    const dbSuffix = String(session.tenant_id).slice(0, 8).toLowerCase().replace(/-/g, '');
-    const dbName = `arion_${dbSuffix}`.slice(0, 18);
-    const dbUser = `arion_${dbSuffix}`.slice(0, 18);
-    const dbPassword = generatePassword();
+    // 8. Generate the WP admin credentials Kodee will set on the new site.
     const adminLogin = 'iaadmin';
     const adminPassword = generatePassword();
-    const adminEmail = process.env.IA_STAFF_ADMIN_EMAIL || 'info@intelligentanalyticsdm.com';
+    const adminEmail = answers.email || session.email || process.env.IA_STAFF_ADMIN_EMAIL || 'info@intelligentanalyticsdm.com';
 
-    // 10. Hostinger API: createDatabase.
-    await updatePhase(pool, session.site_id, 'creating_database');
-    const dbRes = await createDatabase({
-      username: hostingerUsername,
-      name: dbName,
-      user: dbUser,
-      password: dbPassword,
-      websiteDomain: domain.domain,
-    });
-    if (!dbRes.ok && !isAlreadyExistsError(dbRes.error)) {
-      throw new Error(`DB_CREATE_FAILED: ${dbRes.error}`);
-    }
-
-    // 11. Hostinger API: installWordPress. Same idempotency rule.
-    await updatePhase(pool, session.site_id, 'installing_wordpress');
-    const wpInstall = await installWordPress({
-      username: hostingerUsername,
-      domain: domain.domain,
-      siteTitle: answers.businessName,
-      credentials: {
-        email: adminEmail,
-        login: adminLogin,
-        password: adminPassword,
-      },
-    });
-    if (!wpInstall.ok && !isAlreadyExistsError(wpInstall.error)) {
-      throw new Error(`WP_INSTALL_FAILED: ${wpInstall.error}`);
-    }
-
-    // 12. Wait for WordPress to come online so subsequent steps can talk to it.
-    await updatePhase(pool, session.site_id, 'waiting_for_wp');
-    const wpReady = await waitForWpReady(domain.domain);
-    if (!wpReady) {
-      throw new Error(`WP_NOT_READY: WordPress did not respond at https://${domain.domain}/wp-login.php within 2 minutes.`);
-    }
-
-    // 12.5 Ensure the iaadmin password in WP matches the one we just generated.
-    await updatePhase(pool, session.site_id, 'resetting_admin_password');
-    await ensureAdminPassword({
-      domain: domain.domain,
-      adminLogin,
-      adminEmail,
-      adminPassword,
-    });
-
-    // 13. Build the questionnaire-derived AI prompt.
+    // 9. Build the questionnaire-derived AI prompt.
     const { prompt: aiPrompt } = buildAiPrompt(answers);
 
-    // 14. Drive Hostinger's Kodee AI WordPress builder via the browser-driver
-    //     Container App. Soft-failure: don't block on errors here.
+    // 10. Drive Hostinger's hPanel AI Website Builder via browser-driver Container
+    //     App. This step:
+    //       - logs into hpanel.hostinger.com as the master account
+    //       - clicks Add Website on a plan card with capacity
+    //       - selects WordPress
+    //       - sets the admin email + password we generated above
+    //       - chooses "Create a website with AI"
+    //       - fills the prompt + brand panels
+    //       - waits for Kodee to finish building
+    //     On completion, Hostinger has provisioned the WP install + database +
+    //     created the iaadmin user with our generated password. No further
+    //     site-creation calls needed.
+    await updatePhase(pool, session.site_id, 'hpanel_login');
     await updatePhase(pool, session.site_id, 'kodee_building');
     let kodeeResult;
     try {
-      kodeeResult = await driveKodeeBuild({
-        domain: domain.domain,
-        adminLogin,
-        adminPassword,
+      kodeeResult = await driveHpanelBuild({
+        subdomain: domain.domain,
+        wpAdminEmail: adminEmail,
+        wpAdminPassword: adminPassword,
         prompt: aiPrompt,
+        brandName: answers.businessName,
+        primaryColor: answers.primaryColor,
+        secondaryColor: answers.secondaryColor,
+        accentColor: answers.accentColor,
       });
     } catch (drvErr) {
       console.error('[onboarding/submit] browser-driver call failed:', drvErr.message);
       kodeeResult = { status: 'failed', duration_ms: 0, screenshots: [], error: drvErr.message };
     }
     if (kodeeResult.status !== 'completed') {
-      console.warn(`[onboarding/submit] Kodee did not complete cleanly: ${kodeeResult.error || 'unknown'} — continuing with stack install anyway`);
+      // Hard failure — without Kodee creating the site, we have nothing to
+      // SSH into. Mark failed and stop.
+      throw new Error(`HPANEL_BUILD_FAILED: ${kodeeResult.error || 'unknown'}`);
     }
 
-    // 15. Strip Hostinger's stock onboarding plugins.
+    // 11. Strip Hostinger's stock onboarding plugins. SSH wp-cli works against
+    //     the live WP install Kodee created.
     await updatePhase(pool, session.site_id, 'stripping_hostinger');
     await stripHostingerOnboardingPlugins(domain.domain);
 
-    // 16. Create the client's editor-level WP user.
+    // 12. Create the client's editor-level WP user.
     await updatePhase(pool, session.site_id, 'creating_editor_user');
     await createClientEditor({
       domain: domain.domain,
@@ -387,7 +279,7 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       clientLastName: (answers.contactLastName || '').toString() || '',
     });
 
-    // 17. Install the Golden Master plugin stack for this tenant's tier.
+    // 13. Install the Golden Master plugin stack for this tenant's tier.
     await updatePhase(pool, session.site_id, 'installing_plugins');
     const tier = (answers.tier || session.tier || 'lite').toLowerCase();
     const installShop = answers.installShop === true || answers.needsShop === true;
@@ -399,21 +291,9 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       provisionCode,
     });
 
-    // 17.5 Fallback content: if Kodee didn't generate any pages, seed 6 basic
-    //      pages from the questionnaire so the customer never lands on a bare
-    //      install. Cheap — ~10s of wp-cli — and idempotent. Only fires when
-    //      Kodee soft-failed (status !== 'completed' OR no pages exist).
-    let fallbackResult = { created: [], skipped: [], used: false };
-    if (kodeeResult.status !== 'completed') {
-      try {
-        fallbackResult = { ...(await createFallbackPages({ domain: domain.domain, answers })), used: true };
-        console.log(`[onboarding/submit] Kodee fallback pages created: ${fallbackResult.created.join(',')} (skipped: ${fallbackResult.skipped.join(',')})`);
-      } catch (fallbackErr) {
-        console.warn(`[onboarding/submit] fallback-page creation failed: ${fallbackErr.message.slice(0, 200)}`);
-      }
-    }
-
-    // 18. Apply branding via SSH wp-cli.
+    // 14. Apply branding via SSH wp-cli. Kodee will have set some colors based
+    //     on what we sent in the AI build panels, but the customer's exact
+    //     hex values from the questionnaire become the authoritative source.
     await updatePhase(pool, session.site_id, 'applying_branding');
     await applyBranding({
       domain: domain.domain,
@@ -425,19 +305,14 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
 
     await updatePhase(pool, session.site_id, 'finishing_up');
 
-    // 19. Generate the CIAM activation token for the welcome email link.
+    // 15. Generate the CIAM activation token for the welcome email link.
     const setupToken = generateSetupToken();
 
-    // 20. Final state — site is ready. Provisioning details captured for ops.
-    //     Preserves the current_phase/percent fields already on the row by
-    //     merging them in after writing the canonical details.
+    // 16. Final state — site is ready. Provisioning details captured for ops.
     const provisioningDetails = {
-      hostinger_username: hostingerUsername,
       wp_admin_login: adminLogin,
       wp_admin_email: adminEmail,
       wp_admin_password_set: true,
-      db_name_suffix: dbName,
-      db_user_suffix: dbUser,
       provisioned_at: new Date().toISOString(),
       provision_code: provisionCode,
       ai_prompt_chars: aiPrompt.length,
@@ -447,9 +322,7 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       plugins_skipped: stackResult.skipped,
       kodee_status: kodeeResult.status,
       kodee_duration_ms: kodeeResult.duration_ms,
-      kodee_error: kodeeResult.error || null,
-      fallback_pages_used: fallbackResult.used,
-      fallback_pages_created: fallbackResult.created,
+      kodee_final_url: kodeeResult.finalUrl || null,
       welcome_token: setupToken,
       current_phase: 'ready',
       current_percent: 100,
@@ -551,51 +424,6 @@ async function registerPurchasedDomain({ domain, whois, sessionEmail }) {
   enableDomainLock(domain).catch(() => {});
   enablePrivacyProtection(domain).catch(() => {});
   return { ok: true, order_id: purchase.data?.order_id };
-}
-
-/**
- * Poll the public site URL until WordPress responds (wp-login.php exists).
- * Hostinger's installWordPress is mostly synchronous but the WP files can
- * take 10-30s to be readable post-install — this avoids racing the subsequent
- * SSH/wp-cli calls.
- *
- * @param {string} domain
- * @param {number} [timeoutMs=120_000]  — give up after 2 minutes
- */
-async function waitForWpReady(domain, timeoutMs = 120_000) {
-  const start = Date.now();
-  const url = `https://${domain}/wp-login.php`;
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const res = await fetch(url, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(8000) });
-      // wp-login.php either 200s (form) or 302s (redirect to https). Either way it exists.
-      if (res.status === 200 || res.status === 302) return true;
-    } catch { /* not ready yet */ }
-    await new Promise((r) => setTimeout(r, 4000));
-  }
-  console.warn(`[onboarding/submit] waitForWpReady gave up after ${timeoutMs}ms for ${domain}`);
-  return false;
-}
-
-/**
- * Treat Hostinger "already exists" / "in use" / 409-style messages as
- * non-failures so partial-retry runs of /submit can progress. Anything else
- * (auth, validation, server error) should still bubble.
- *
- * The Hostinger API surfaces these as 4xx with a body like:
- *   { message: "Domain already in use", ... }
- *   { message: "Database already exists", ... }
- *   { message: "WordPress is already installed", ... }
- *
- * Our `request()` lifts those into the `error` string of the result envelope.
- */
-function isAlreadyExistsError(err) {
-  const s = String(err || '').toLowerCase();
-  return s.includes('already in use')
-    || s.includes('already exists')
-    || s.includes('already installed')
-    || s.includes('must be unique')      // Hostinger DB-name collision phrasing
-    || s.includes('name is taken');
 }
 
 /**
