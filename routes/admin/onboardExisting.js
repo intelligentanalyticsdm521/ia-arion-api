@@ -22,6 +22,7 @@ import { Router } from 'express';
 import sql from 'mssql';
 import { webcrypto as crypto } from 'node:crypto';
 import { getServicesPool } from '../../db/servicesPool.js';
+import { getPlatformPool } from '../../db/platformPool.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
 import { sendOnboardingWelcomeEmail, generateSetupToken } from '../../lib/welcomeEmail.js';
 
@@ -62,11 +63,12 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
   const push = (step, status, detail) => steps.push({ step, status, detail });
 
   try {
-    const pool = await getServicesPool();
+    const pool = await getServicesPool();        // arion.* schema
+    const platformPool = await getPlatformPool(); // core.* schema
 
-    // 1. Find or create tenant
+    // 1. Find or create tenant (core.tenants is in the platform DB)
     let tenantId;
-    const tenantHit = await pool.request()
+    const tenantHit = await platformPool.request()
       .input('email', sql.NVarChar(254), safeEmail)
       .input('domain', sql.NVarChar(253), safeDomain)
       .query(`
@@ -81,7 +83,7 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
       push('tenant', 'reused', `Found tenant ${tenantHit.recordset[0].full_name || tenantHit.recordset[0].name} (${tenantId})`);
     } else {
       tenantId = crypto.randomUUID();
-      await pool.request()
+      await platformPool.request()
         .input('tid', sql.UniqueIdentifier, tenantId)
         .input('name', sql.NVarChar(200), name)
         .input('fullName', sql.NVarChar(200), name)
@@ -95,9 +97,9 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
       push('tenant', 'created', `Created tenant ${name} (${tenantId})`);
     }
 
-    // 2. Find or create user
+    // 2. Find or create user (core.users is in the platform DB)
     let userId;
-    const userHit = await pool.request()
+    const userHit = await platformPool.request()
       .input('email', sql.NVarChar(254), safeEmail)
       .query('SELECT user_id FROM core.users WHERE email = @email');
     if (userHit.recordset.length > 0) {
@@ -106,7 +108,7 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
     } else {
       userId = crypto.randomUUID();
       const fullName = (firstName && lastName) ? `${firstName} ${lastName}` : safeEmail;
-      await pool.request()
+      await platformPool.request()
         .input('uid', sql.UniqueIdentifier, userId)
         .input('idpId', sql.UniqueIdentifier, IDENTITY_PROVIDER_ID)
         .input('extSub', sql.NVarChar(254), safeEmail)
@@ -122,13 +124,13 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
       push('user', 'created', `Created user ${safeEmail} (${userId})`);
     }
 
-    // 3. Link user → tenant
-    const linkHit = await pool.request()
+    // 3. Link user → tenant (core.tenant_users in platform DB)
+    const linkHit = await platformPool.request()
       .input('tid', sql.UniqueIdentifier, tenantId)
       .input('uid', sql.UniqueIdentifier, userId)
       .query('SELECT 1 AS h FROM core.tenant_users WHERE tenant_id = @tid AND user_id = @uid');
     if (linkHit.recordset.length === 0) {
-      await pool.request()
+      await platformPool.request()
         .input('tid', sql.UniqueIdentifier, tenantId)
         .input('uid', sql.UniqueIdentifier, userId)
         .input('status', sql.NVarChar(20), 'active')
@@ -138,13 +140,13 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
       push('user_link', 'reused', 'User already linked to tenant');
     }
 
-    // 4. Enable ARION service
-    const svcHit = await pool.request()
+    // 4. Enable ARION service (core.tenant_services in platform DB)
+    const svcHit = await platformPool.request()
       .input('tid', sql.UniqueIdentifier, tenantId)
       .input('sid', sql.UniqueIdentifier, ARION_SERVICE_ID)
       .query('SELECT 1 AS h FROM core.tenant_services WHERE tenant_id = @tid AND service_id = @sid');
     if (svcHit.recordset.length === 0) {
-      await pool.request()
+      await platformPool.request()
         .input('tid', sql.UniqueIdentifier, tenantId)
         .input('sid', sql.UniqueIdentifier, ARION_SERVICE_ID)
         .input('status', sql.NVarChar(20), 'active')
@@ -154,7 +156,7 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
       push('service', 'reused', 'ARION service already enabled');
     }
 
-    // 5. Find or create arion.site row
+    // 5. Find or create arion.site row (services DB)
     let siteId;
     const siteHit = await pool.request()
       .input('tid', sql.UniqueIdentifier, tenantId)
