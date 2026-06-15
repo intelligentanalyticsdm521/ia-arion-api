@@ -68,9 +68,24 @@ router.post('/', async (req, res) => {
   if (!domain || !domain.mode || !['purchase', 'byod'].includes(domain.mode) || !domain.domain) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'domain.mode and domain.domain required', status: 400 } });
   }
-  if (!answers || !answers.businessName || !answers.industry) {
-    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'answers.businessName and answers.industry required', status: 400 } });
+  // R2 — FQDN validation: catch junk before we hit Hostinger and get a vague error
+  if (!isValidFqdn(domain.domain)) {
+    return res.status(400).json({ error: {
+      code: 'INVALID_DOMAIN',
+      message: `"${domain.domain}" is not a valid domain name (expected something like example.com or sub.example.com).`,
+      status: 400,
+    }});
   }
+  // R2 — Business name validation
+  const businessName = String(answers?.businessName || '').trim();
+  if (!businessName || businessName.length < 2) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Business name must be at least 2 characters', status: 400 } });
+  }
+  if (!answers || !answers.industry) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'answers.industry required', status: 400 } });
+  }
+  // Normalize the trimmed business name back into the answers payload
+  answers.businessName = businessName;
 
   try {
     const pool = await getServicesPool();
@@ -120,16 +135,29 @@ router.post('/', async (req, res) => {
       websiteUrl: domain.domain ? `https://${domain.domain}` : null,
     });
 
-    // 4. BYOD verification gate
+    // 4. BYOD verification gate. R2 — when nameservers are not yet propagated,
+    //    kick off a background poller that re-runs the orchestrator as soon as
+    //    DNS lands. Customer's UI sees `dns_verifying` phase in the meantime.
     if (domain.mode === 'byod') {
       const nsCheck = await verifyHostingerNameservers(domain.domain);
       if (!nsCheck.pointsToHostinger) {
+        await updatePhase(pool, session.site_id, 'dns_verifying');
+        // Fire-and-forget — wait up to 30 min for NS to propagate, then
+        // re-invoke this same POST internally so the customer doesn't have
+        // to manually resubmit.
+        setImmediate(() => waitForDnsAndResubmit({
+          domain: domain.domain,
+          sessionId: session_id,
+          body: req.body,
+          pool,
+          siteId: session.site_id,
+        }).catch((e) => console.error('[onboarding/submit] dns-resume failed:', e.message)));
         return res.status(425).json({
           error: {
             code: 'DNS_NOT_PROPAGATED',
-            message: 'Domain nameservers have not yet been pointed to Hostinger. Please update your nameservers and we\'ll start the build automatically when DNS propagates.',
+            message: 'Domain nameservers have not yet been pointed to Hostinger. We\'ll automatically start the build when DNS propagates (up to 30 minutes).',
             status: 425,
-            details: { current_nameservers: nsCheck.nameservers },
+            details: { current_nameservers: nsCheck.nameservers, auto_retry: true },
           },
         });
       }
@@ -288,6 +316,12 @@ router.post('/', async (req, res) => {
  */
 async function runProvisioningBackground({ pool, session, domain, answers, hostingerUsername, wpAdminUrl }) {
     const hasExistingWebsite = answers.hasExistingWebsite === true;
+
+    // R3 — Provisioning path telemetry. Makes debugging much easier — one log
+    // line tells you exactly which combo of {NEW/EXISTING customer, BUY/BYOD
+    // domain, NEW/EXISTING WordPress} this run was.
+    const provisioningPath = `byod=${domain.mode === 'byod'} existing_wp=${hasExistingWebsite}`;
+    console.log(`[onboarding/submit] provisioning ${session.tenant_id}/${session.site_id} domain=${domain.domain} ${provisioningPath}`);
 
     // 7. Issue provisioning code FIRST — the IA Plugin download URL embeds it.
     const codeRes = await createProvisionCode(pool, {
@@ -517,6 +551,7 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       install_shop: installShop,
       plugins_installed: stackResult.installed,
       plugins_skipped: stackResult.skipped,
+      plugins_failed: stackResult.failed || [],
       template_id: template.id,
       template_label: template.label,
       template_bucket: template.bucket,
@@ -543,8 +578,12 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         WHERE site_id = @siteId
       `);
 
-    // 21. Send the "your site is ready + activate your portal" email. Best-effort.
+    // 21. Send the "your site is ready + activate your portal" email. Best-effort
+    //     but failures are now persisted into provisioning_details_json so the
+    //     Portal can surface a "resend email" button.
     await updatePhase(pool, session.site_id, 'sending_welcome');
+    let welcomeEmailStatus = 'unknown';
+    let welcomeEmailError = null;
     try {
       const emailRes = await sendOnboardingWelcomeEmail({
         toEmail: session.email,
@@ -556,18 +595,83 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         wpAdminPassword: adminPassword,
         setupToken,
       });
+      welcomeEmailStatus = emailRes.ok ? 'sent' : 'failed';
       if (!emailRes.ok) {
-        console.warn('[onboarding/submit] welcome email failed:', emailRes.error);
+        welcomeEmailError = (emailRes.error || '').slice(0, 300);
+        console.warn('[onboarding/submit] welcome email failed:', welcomeEmailError);
       }
     } catch (emailErr) {
+      welcomeEmailStatus = 'threw';
+      welcomeEmailError = emailErr.message.slice(0, 300);
       console.error('[onboarding/submit] welcome email threw:', emailErr.message);
     }
+    // Persist email status into provisioning_details_json for UI visibility
+    try {
+      await pool.request()
+        .input('siteId', sql.UniqueIdentifier, session.site_id)
+        .input('status', sql.NVarChar(20), welcomeEmailStatus)
+        .input('err', sql.NVarChar(300), welcomeEmailError)
+        .query(`
+          UPDATE arion.site
+          SET provisioning_details_json = JSON_MODIFY(
+                JSON_MODIFY(provisioning_details_json, '$.welcome_email_status', @status),
+                '$.welcome_email_error', @err
+              )
+          WHERE site_id = @siteId
+        `);
+    } catch (e) { /* best-effort metadata write */ }
     await updatePhase(pool, session.site_id, 'ready');
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * R2 — Auto-resume the onboarding submit when DNS finally lands.
+ *
+ * Polls nameservers every 30s for up to 30 min. As soon as they resolve to
+ * Hostinger, internally re-invokes POST /onboarding/submit with the same body,
+ * which kicks off the full provisioning pipeline. The customer never has to
+ * manually retry — they just see `dns_verifying` until the build starts.
+ *
+ * Best-effort. If arion-api restarts mid-poll the resume dies and the
+ * customer falls back to manually resubmitting (which still works).
+ */
+async function waitForDnsAndResubmit({ domain, sessionId, body, pool, siteId }) {
+  const deadline = Date.now() + 30 * 60 * 1000;  // 30 min
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 30_000));
+    try {
+      const check = await verifyHostingerNameservers(domain);
+      if (check.pointsToHostinger) {
+        console.log(`[onboarding/submit/dns-resume] ${domain} resolved — auto-resubmitting`);
+        const fetchUrl = `${ARION_API_BASE}/onboarding/submit`;
+        await fetch(fetchUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).catch((e) => console.error('[onboarding/submit/dns-resume] self-POST failed:', e.message));
+        return;
+      }
+    } catch (e) {
+      console.warn(`[onboarding/submit/dns-resume] check error: ${e.message}`);
+    }
+  }
+  // Timed out — leave site in dns_verifying so customer can manually retry.
+  console.warn(`[onboarding/submit/dns-resume] gave up after 30 min for ${domain}`);
+}
+
+/**
+ * Validate a domain string as a FQDN.
+ * Accepts: foo.com, sub.foo.com, multi.sub.foo.co.uk
+ * Rejects: localhost, "my site", IP addresses, single-label hostnames
+ */
+function isValidFqdn(d) {
+  const s = String(d || '').trim().toLowerCase();
+  if (s.length < 4 || s.length > 253) return false;
+  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$/.test(s);
+}
 
 /**
  * Register a purchased domain via Hostinger.
