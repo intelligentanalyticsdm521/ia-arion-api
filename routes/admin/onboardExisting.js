@@ -152,8 +152,7 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
       await platformPool.request()
         .input('tid', sql.UniqueIdentifier, tenantId)
         .input('sid', sql.UniqueIdentifier, ARION_SERVICE_ID)
-        .input('st', sql.NVarChar(20), 'Active')
-        .query('INSERT INTO core.tenant_services (tenant_id, service_id, [status]) VALUES (@tid, @sid, @st)');
+        .query('INSERT INTO core.tenant_services (tenant_id, service_id, is_enabled) VALUES (@tid, @sid, 1)');
       push('service', 'created', 'Enabled ARION service for tenant');
     } else {
       push('service', 'reused', 'ARION service already enabled');
