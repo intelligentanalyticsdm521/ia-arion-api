@@ -19,6 +19,7 @@ import onboardingSubmitRouter from './routes/onboarding/submit.js';
 import onboardingStatusRouter from './routes/onboarding/status.js';
 import onboardingSessionInfoRouter from './routes/onboarding/session-info.js';
 import onboardingActivateRouter from './routes/onboarding/activate.js';
+import adminOnboardExistingRouter from './routes/admin/onboardExisting.js';
 import provisioningRouter from './routes/provisioning.js';
 import pluginRouter from './routes/plugin.js';
 
@@ -96,6 +97,9 @@ app.use('/onboarding/submit', onboardingSubmitRouter);
 app.use('/onboarding/status', onboardingStatusRouter);
 app.use('/onboarding/session-info', onboardingSessionInfoRouter);
 app.use('/onboarding/activate', onboardingActivateRouter);
+// Founder admin — onboard a client whose site was built outside the system
+// (e.g. via Hostinger Kodee manually). Auth via Bearer FOUNDER_ADMIN_TOKEN.
+app.use('/admin', adminOnboardExistingRouter);
 // Provisioning endpoints (no JWT auth — authenticated via single-use provisioning code in body
 // or the PROVISIONER_SHARED_SECRET header for worker callbacks).
 // Called by the IA Plugin's bootstrap class on a freshly-provisioned client site.

@@ -150,46 +150,84 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // 6. Create the WordPress install on Hostinger via REST API. This proven
-    //    path provisions the slot, the DB, and a base WP install. The AI
-    //    design step is now an in-WP template import + Claude copy overlay
-    //    (not Hostinger's Kodee flow, which is unreachable from datacenter IPs).
-    const orderId = Number(process.env.HOSTINGER_DEFAULT_ORDER_ID || 0);
-    if (!orderId) {
-      return res.status(503).json({
-        error: {
-          code: 'NOT_CONFIGURED',
-          message: 'HOSTINGER_DEFAULT_ORDER_ID env var is not set.',
-          status: 503,
-        },
-      });
-    }
-    await updatePhase(pool, session.site_id, 'creating_hosting');
-    const wpCreate = await createWebsite({
-      domain: domain.domain,
-      orderId,
-      datacenterCode: process.env.HOSTINGER_DEFAULT_DATACENTER || undefined,
-    });
-    if (!wpCreate.ok) {
-      const alreadyInUse = String(wpCreate.error || '').includes('Domain already in use');
-      if (!alreadyInUse) {
-        return res.status(502).json({ error: { code: 'WP_CREATE_FAILED', message: wpCreate.error, status: 502 } });
+    // 5b. Domain-claim check — make sure no other tenant already owns this
+    //     domain in our system. Prevents two customers from both trying to
+    //     provision the same domain simultaneously (or sequentially).
+    {
+      const claimCheck = await pool.request()
+        .input('domain', sql.NVarChar(253), domain.domain)
+        .input('tenantId', sql.UniqueIdentifier, session.tenant_id)
+        .query(`
+          SELECT TOP 1 tenant_id, site_id
+          FROM arion.site
+          WHERE domain = @domain AND tenant_id <> @tenantId
+        `);
+      if (claimCheck.recordset.length > 0) {
+        return res.status(409).json({ error: {
+          code: 'DOMAIN_ALREADY_CLAIMED',
+          message: 'This domain is already registered to another account. Please contact support if you believe this is in error.',
+          status: 409,
+        }});
       }
-      wpCreate.data = { domain: domain.domain, alreadyInUse: true };
     }
-    const hostingerUsername = wpCreate.data?.username
-      || process.env.HOSTINGER_DEFAULT_USERNAME
-      || null;
-    const websiteId = wpCreate.data?.domain || domain.domain;
+
+    // 5c. Existing-website branch — customer says they have a working WP at
+    //     this domain. We do NOT create a Hostinger website slot, do NOT
+    //     install WP, do NOT import a template, do NOT splice copy. We only
+    //     install the IA Plugin via SSH (if site is on Hostinger), set brand
+    //     options, and send the welcome email with the plugin download URL
+    //     so off-Hostinger customers can install it themselves.
+    const hasExistingWebsite = answers.hasExistingWebsite === true;
+
+    let hostingerUsername = null;
+    let websiteId = domain.domain;
     const wpAdminUrl = `https://${domain.domain}/wp-admin/`;
-    if (!hostingerUsername) {
-      return res.status(500).json({
-        error: {
-          code: 'NO_HOSTINGER_USERNAME',
-          message: 'createWebsite did not return a username and HOSTINGER_DEFAULT_USERNAME is not set.',
-          status: 500,
-        },
+
+    if (!hasExistingWebsite) {
+      // 6. Create the WordPress install on Hostinger via REST API.
+      const orderId = Number(process.env.HOSTINGER_DEFAULT_ORDER_ID || 0);
+      if (!orderId) {
+        return res.status(503).json({
+          error: {
+            code: 'NOT_CONFIGURED',
+            message: 'HOSTINGER_DEFAULT_ORDER_ID env var is not set.',
+            status: 503,
+          },
+        });
+      }
+      await updatePhase(pool, session.site_id, 'creating_hosting');
+      const wpCreate = await createWebsite({
+        domain: domain.domain,
+        orderId,
+        datacenterCode: process.env.HOSTINGER_DEFAULT_DATACENTER || undefined,
       });
+      if (!wpCreate.ok) {
+        const alreadyInUse = String(wpCreate.error || '').includes('Domain already in use');
+        if (!alreadyInUse) {
+          return res.status(502).json({ error: { code: 'WP_CREATE_FAILED', message: wpCreate.error, status: 502 } });
+        }
+        wpCreate.data = { domain: domain.domain, alreadyInUse: true };
+      }
+      hostingerUsername = wpCreate.data?.username
+        || process.env.HOSTINGER_DEFAULT_USERNAME
+        || null;
+      websiteId = wpCreate.data?.domain || domain.domain;
+      if (!hostingerUsername) {
+        return res.status(500).json({
+          error: {
+            code: 'NO_HOSTINGER_USERNAME',
+            message: 'createWebsite did not return a username and HOSTINGER_DEFAULT_USERNAME is not set.',
+            status: 500,
+          },
+        });
+      }
+    } else {
+      // Existing WP — try to use the master Hostinger username (may not be
+      // applicable if the customer's site is NOT on Hostinger). If SSH is
+      // unreachable downstream, the orchestrator will fall back to email-only
+      // delivery: customer installs the IA Plugin from the welcome email
+      // download link and the plugin self-registers on activation.
+      hostingerUsername = process.env.HOSTINGER_DEFAULT_USERNAME || null;
     }
 
     // 7. Persist initial site state
@@ -249,24 +287,131 @@ router.post('/', async (req, res) => {
  * on arion.site so the status endpoint can drive a progress bar.
  */
 async function runProvisioningBackground({ pool, session, domain, answers, hostingerUsername, wpAdminUrl }) {
+    const hasExistingWebsite = answers.hasExistingWebsite === true;
+
     // 7. Issue provisioning code FIRST — the IA Plugin download URL embeds it.
     const codeRes = await createProvisionCode(pool, {
       tenantId: session.tenant_id,
       siteId: session.site_id,
       createdBy: 'onboarding_submit',
-      ttlDays: 14,
+      ttlDays: hasExistingWebsite ? 90 : 14,  // longer TTL for self-install
     });
     const provisionCode = codeRes.code;
     const pluginDownloadUrl = `${ARION_API_BASE}/plugin/download?token=${encodeURIComponent(provisionCode)}`;
+    const adminLogin = 'iaadmin';
+    const adminPassword = generatePassword();
+    const adminEmail = process.env.IA_STAFF_ADMIN_EMAIL || 'info@intelligentanalyticsdm.com';
 
+    // ============================================================
+    // EXISTING WORDPRESS BRANCH (paths #2/#4/#6/#8)
+    // ============================================================
+    // Customer has a working WP at this domain. DO NOT provision a slot, DO
+    // NOT import a template, DO NOT splice copy. Try SSH-install the IA Plugin
+    // (works when site is on Hostinger). If SSH fails, the welcome email gives
+    // the customer a download link and they install it manually — plugin
+    // self-registers with ARION on activation.
+    if (hasExistingWebsite) {
+      const tier = (answers.tier || session.tier || 'lite').toLowerCase();
+      let pluginInstallStatus = 'not_attempted';
+      let pluginInstallError = null;
+      try {
+        await updatePhase(pool, session.site_id, 'installing_plugins');
+        // Try to install the IA Plugin via SSH. This only works if the site
+        // is on our master Hostinger account.
+        const { installPluginsForTier: installFn } = await import('../../lib/pluginStack.js');
+        const stackRes = await installFn({
+          domain: domain.domain,
+          tier,
+          installShop: false,
+          iaPluginDownloadUrl: pluginDownloadUrl,
+          provisionCode,
+          // For existing-site we only install IA Plugin, NOT the full Golden
+          // Master — the customer's existing plugins are theirs to manage.
+          onlySlugs: ['intelligent-analytics'],
+        });
+        pluginInstallStatus = 'ssh_success';
+      } catch (sshErr) {
+        // Site likely off-Hostinger or SSH unreachable — fall back to email-only.
+        pluginInstallStatus = 'ssh_failed_email_fallback';
+        pluginInstallError = (sshErr.message || '').slice(0, 300);
+        console.warn(`[onboarding/submit] existing-WP SSH install failed (will email): ${pluginInstallError}`);
+      }
+
+      // Set brand colors on the IA plugin options (only works if plugin installed)
+      try {
+        await updatePhase(pool, session.site_id, 'applying_branding');
+        await applyBranding({
+          domain: domain.domain,
+          brandName: answers.businessName,
+          primaryColor: answers.primaryColor,
+          secondaryColor: answers.secondaryColor,
+          accentColor: answers.accentColor,
+        });
+      } catch (e) {
+        console.warn(`[onboarding/submit] existing-WP applyBranding skipped: ${e.message.slice(0, 200)}`);
+      }
+
+      await updatePhase(pool, session.site_id, 'finishing_up');
+      const setupToken = generateSetupToken();
+
+      const provisioningDetailsExisting = {
+        flow: 'existing_website',
+        wp_admin_login: null,
+        wp_admin_password_set: false,
+        provisioned_at: new Date().toISOString(),
+        provision_code: provisionCode,
+        tier,
+        plugin_install_status: pluginInstallStatus,
+        plugin_install_error: pluginInstallError,
+        welcome_token: setupToken,
+        ia_plugin_download_url: pluginDownloadUrl,
+        current_phase: 'ready',
+        current_percent: 100,
+        current_message: 'Your site is connected to ARION!',
+      };
+      await pool.request()
+        .input('siteId', sql.UniqueIdentifier, session.site_id)
+        .input('details', sql.NVarChar(sql.MAX), JSON.stringify(provisioningDetailsExisting))
+        .query(`
+          UPDATE arion.site
+          SET provisioning_state = 'ready',
+              provisioned_at = SYSUTCDATETIME(),
+              provisioning_details_json = @details,
+              updated_at = GETUTCDATE()
+          WHERE site_id = @siteId
+        `);
+
+      // Welcome email — include the plugin download URL so off-Hostinger
+      // customers can install it themselves.
+      await updatePhase(pool, session.site_id, 'sending_welcome');
+      try {
+        await sendOnboardingWelcomeEmail({
+          toEmail: session.email,
+          firstName: answers.contactFirstName || answers.firstName || '',
+          brandName: answers.businessName,
+          tenantId: session.tenant_id,
+          wpAdminUrl,
+          wpAdminLogin: null,       // we didn't create one
+          wpAdminPassword: null,    // we didn't create one
+          setupToken,
+          iaPluginDownloadUrl: pluginDownloadUrl,
+          existingWebsite: true,
+        });
+      } catch (emailErr) {
+        console.error('[onboarding/submit] welcome email threw (existing-WP):', emailErr.message);
+      }
+      await updatePhase(pool, session.site_id, 'ready');
+      return;
+    }
+
+    // ============================================================
+    // NEW WORDPRESS BRANCH (paths #1/#3/#5/#7) — original full pipeline
+    // ============================================================
     // 8. Generate credentials for the DB + admin user.
     const dbSuffix = String(session.tenant_id).slice(0, 8).toLowerCase().replace(/-/g, '');
     const dbName = `arion_${dbSuffix}`.slice(0, 18);
     const dbUser = `arion_${dbSuffix}`.slice(0, 18);
     const dbPassword = generatePassword();
-    const adminLogin = 'iaadmin';
-    const adminPassword = generatePassword();
-    const adminEmail = process.env.IA_STAFF_ADMIN_EMAIL || 'info@intelligentanalyticsdm.com';
 
     // 9. Hostinger API: createDatabase
     await updatePhase(pool, session.site_id, 'creating_database');
