@@ -83,18 +83,21 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
       push('tenant', 'reused', `Found tenant ${tenantHit.recordset[0].full_name || tenantHit.recordset[0].name} (${tenantId})`);
     } else {
       tenantId = crypto.randomUUID();
+      // Generate a unique slug — core.tenants.slug is NOT NULL + unique.
+      const slug = await generateUniqueSlug(platformPool, name);
       await platformPool.request()
         .input('tid', sql.UniqueIdentifier, tenantId)
         .input('name', sql.NVarChar(200), name)
         .input('fullName', sql.NVarChar(200), name)
+        .input('slug', sql.NVarChar(63), slug)
         .input('status', sql.NVarChar(20), 'active')
         .input('tier', sql.NVarChar(20), tier)
         .input('website', sql.NVarChar(400), `https://${safeDomain}`)
         .query(`
-          INSERT INTO core.tenants (tenant_id, name, full_name, status, subscription_tier, website_url)
-          VALUES (@tid, @name, @fullName, @status, @tier, @website)
+          INSERT INTO core.tenants (tenant_id, name, full_name, slug, status, subscription_tier, website_url)
+          VALUES (@tid, @name, @fullName, @slug, @status, @tier, @website)
         `);
-      push('tenant', 'created', `Created tenant ${name} (${tenantId})`);
+      push('tenant', 'created', `Created tenant ${name} (slug=${slug}, ${tenantId})`);
     }
 
     // 2. Find or create user (core.users is in the platform DB)
@@ -253,5 +256,30 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500, steps } });
   }
 });
+
+/**
+ * Generate a unique URL-safe slug for core.tenants.
+ * Lowercase, non-alnum → hyphen, dedupe collapse, 3-63 chars.
+ * Loops -2/-3/etc on collision until a free slug is found.
+ */
+async function generateUniqueSlug(pool, name) {
+  let base = String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 56);
+  if (base.length < 3) base = 'tenant-' + crypto.randomUUID().slice(0, 6);
+  let candidate = base;
+  let n = 2;
+  while (true) {
+    const hit = await pool.request()
+      .input('slug', sql.NVarChar(63), candidate)
+      .query('SELECT 1 AS h FROM core.tenants WHERE slug = @slug');
+    if (hit.recordset.length === 0) return candidate;
+    candidate = `${base}-${n}`.slice(0, 63);
+    n++;
+    if (n > 100) return `${base}-${crypto.randomUUID().slice(0, 6)}`.slice(0, 63);
+  }
+}
 
 export default router;
