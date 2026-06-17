@@ -1128,9 +1128,116 @@ router.get('/seo/keywords', async (req, res) => {
     if (!site?.se_ranking_project_id) return res.json({ data: [], project_id: null });
     const { getProjectKeywords } = await import('../lib/seranking.js');
     const keywords = await getProjectKeywords(site.se_ranking_project_id, tenantId);
-    res.json({ data: keywords, project_id: site.se_ranking_project_id });
+    res.json({ data: keywords, project_id: site.se_ranking_project_id, tier: site.seo_addon_tier });
   } catch (err) {
     console.error('[arion/seo/keywords GET]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AI Search prompt management (Growth + Authority tiers)
+// ---------------------------------------------------------------------------
+
+// AI prompt cap is 5 TOTAL per tier (revised 2026-06-17, Brandon).
+// A single prompt at Authority can target multiple engines; the cap is the
+// number of distinct prompts, not prompt × engine slots.
+const AI_PROMPT_TIER_LIMITS = {
+  starter: 0,
+  essentials: 0,
+  growth: 5,
+  authority: 5,
+};
+
+const AI_PROMPT_ENGINES_BY_TIER = {
+  starter: [],
+  essentials: [],
+  growth: ['ai_mode'],                       // Google AI Mode only
+  authority: ['ai_mode', 'chatgpt', 'gemini'], // All three; each prompt picks subset
+};
+
+// GET /arion/seo/ai-prompts?siteId=...
+router.get('/seo/ai-prompts', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.query;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site?.se_ranking_project_id) return res.json({ data: [], project_id: null, allowed_engines: [], cap: 0 });
+    const tier = String(site.seo_addon_tier || '').toLowerCase();
+    const cap = AI_PROMPT_TIER_LIMITS[tier] || 0;
+    const allowedEngines = AI_PROMPT_ENGINES_BY_TIER[tier] || [];
+    const { getAIPrompts } = await import('../lib/seranking.js');
+    const prompts = await getAIPrompts(site.se_ranking_project_id, tenantId);
+    res.json({
+      data: prompts,
+      project_id: site.se_ranking_project_id,
+      tier,
+      cap,
+      allowed_engines: allowedEngines,
+    });
+  } catch (err) {
+    console.error('[arion/seo/ai-prompts GET]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// POST /arion/seo/ai-prompts
+// Body: { siteId, prompt, engines: ['ai_mode','chatgpt','gemini'] }
+router.post('/seo/ai-prompts', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId, prompt, engines } = req.body || {};
+  if (!siteId || !prompt) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId + prompt required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site?.se_ranking_project_id) return res.status(400).json({ error: { code: 'NO_PROJECT', message: 'Site has no SE Ranking project', status: 400 } });
+    const tier = String(site.seo_addon_tier || '').toLowerCase();
+    const cap = AI_PROMPT_TIER_LIMITS[tier] || 0;
+    if (cap === 0) {
+      return res.status(403).json({ error: { code: 'TIER_NOT_AVAILABLE', message: `AI prompts require Growth (5 prompts) or Authority (10 prompts) tier. Current tier: ${tier || 'none'}.`, status: 403 } });
+    }
+    const allowedEngines = AI_PROMPT_ENGINES_BY_TIER[tier];
+    const requestedEngines = Array.isArray(engines) && engines.length > 0 ? engines : allowedEngines;
+    const invalidEngines = requestedEngines.filter((e) => !allowedEngines.includes(e));
+    if (invalidEngines.length > 0) {
+      return res.status(400).json({ error: { code: 'INVALID_ENGINES', message: `Engines not available at tier ${tier}: ${invalidEngines.join(', ')}. Allowed: ${allowedEngines.join(', ')}.`, status: 400 } });
+    }
+
+    // Cap check
+    const { getAIPrompts, addAIPrompt } = await import('../lib/seranking.js');
+    const existing = await getAIPrompts(site.se_ranking_project_id, tenantId);
+    if (existing.length >= cap) {
+      return res.status(400).json({ error: { code: 'CAP_EXCEEDED', message: `AI prompt cap reached (${cap} for ${tier}). Remove an existing prompt first.`, status: 400, cap, existing: existing.length } });
+    }
+
+    const result = await addAIPrompt(site.se_ranking_project_id, prompt, requestedEngines, tenantId);
+    if (!result) {
+      return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: 'SE Ranking did not accept the prompt — endpoint may be unavailable. Try setting it manually in the SE Ranking dashboard.', status: 502 } });
+    }
+    res.json({ data: result });
+  } catch (err) {
+    console.error('[arion/seo/ai-prompts POST]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// DELETE /arion/seo/ai-prompts/:promptId
+router.delete('/seo/ai-prompts/:promptId', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.query;
+  const { promptId } = req.params;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId query param required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site?.se_ranking_project_id) return res.status(404).json({ error: { code: 'NO_PROJECT', message: 'No SE Ranking project', status: 404 } });
+    const { removeAIPrompt } = await import('../lib/seranking.js');
+    const ok = await removeAIPrompt(site.se_ranking_project_id, promptId, tenantId);
+    res.json({ ok });
+  } catch (err) {
+    console.error('[arion/seo/ai-prompts DELETE]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
