@@ -984,6 +984,158 @@ router.post('/seo/project/link', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// SE Ranking — Keyword research + keyword management (2026-06-17 productization)
+//
+// These routes enable self-serve and founder-admin SEO project setup beyond
+// the audit-only flow. Keyword research lives in serankingData.js (Data API
+// key). Keyword management lives in seranking.js (Project API key).
+//
+// Rate limiting: per-tenant + per-day soft caps to protect Data API budget.
+// Cap math:
+//   Lite/Standard:  20 research calls / day
+//   Pro:            50 research calls / day
+//   Business+:     200 research calls / day
+// Per-tenant counter lives in process memory (good enough for v1 — restart
+// resets it, which is acceptable since the protection is best-effort).
+// ---------------------------------------------------------------------------
+
+const KEYWORD_RESEARCH_COUNTER = new Map(); // key: `${tenantId}:${YYYY-MM-DD}` → count
+function getDailyKeywordResearchCount(tenantId) {
+  const day = new Date().toISOString().slice(0, 10);
+  const key = `${tenantId}:${day}`;
+  return KEYWORD_RESEARCH_COUNTER.get(key) || 0;
+}
+function bumpKeywordResearchCount(tenantId) {
+  const day = new Date().toISOString().slice(0, 10);
+  const key = `${tenantId}:${day}`;
+  const next = (KEYWORD_RESEARCH_COUNTER.get(key) || 0) + 1;
+  KEYWORD_RESEARCH_COUNTER.set(key, next);
+  return next;
+}
+function getKeywordResearchCap(seoAddonTier) {
+  // Reuses ARION SEO tier matrix vocabulary, NOT cross-product tier matrix.
+  // Authority customers (paying $199/mo for SEO) get more research budget.
+  const tier = String(seoAddonTier || '').toLowerCase();
+  if (tier === 'authority') return 200;
+  if (tier === 'growth') return 50;
+  return 20;
+}
+
+// POST /arion/seo/keywords/research
+// Body: { seed: string, region?: string, limit?: number }
+// Returns: { overview, suggestions, related, longtail, questions }
+router.post('/seo/keywords/research', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { seed, region = 'us', limit = 25, siteId } = req.body || {};
+  if (!seed || typeof seed !== 'string' || seed.trim().length < 2) {
+    return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'seed (string, ≥ 2 chars) required', status: 400 } });
+  }
+  try {
+    // Rate-limit check
+    let tier = 'starter';
+    if (siteId) {
+      const pool = await getServicesPool();
+      const site = await getSiteForTenant(pool, tenantId, siteId);
+      if (site) tier = site.seo_addon_tier || 'starter';
+    }
+    const cap = getKeywordResearchCap(tier);
+    const used = getDailyKeywordResearchCount(tenantId);
+    if (used >= cap) {
+      return res.status(429).json({ error: { code: 'RATE_LIMIT', message: `Daily keyword research limit reached (${cap} per day on ${tier}). Resets at midnight UTC.`, status: 429, cap, used } });
+    }
+    bumpKeywordResearchCount(tenantId);
+
+    const { researchKeyword } = await import('../lib/serankingData.js');
+    const research = await researchKeyword(seed.trim(), { regionId: region, limit: Math.min(Number(limit) || 25, 100) });
+    res.json({
+      data: research,
+      meta: { tier, cap, used: used + 1, remaining: cap - used - 1 },
+    });
+  } catch (err) {
+    console.error('[arion/seo/keywords/research]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// POST /arion/seo/keywords/add
+// Body: { siteId, keywords: string[], groupId?: number }
+// Adds keywords to the site's SE Ranking project. Enforces the tier keyword cap.
+router.post('/seo/keywords/add', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId, keywords, groupId } = req.body || {};
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  if (!Array.isArray(keywords) || keywords.length === 0) {
+    return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'keywords (non-empty array) required', status: 400 } });
+  }
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (!site.se_ranking_project_id) {
+      return res.status(400).json({ error: { code: 'NO_PROJECT', message: 'Site has no SE Ranking project yet. Run /seo/project/create first.', status: 400 } });
+    }
+
+    // Tier cap check
+    const TIER_CAPS = { starter: 10, essentials: 25, growth: 60, authority: 150 };
+    const tier = String(site.seo_addon_tier || '').toLowerCase();
+    const cap = TIER_CAPS[tier] || 0;
+    const { getProjectKeywords, addKeywords } = await import('../lib/seranking.js');
+    const existing = await getProjectKeywords(site.se_ranking_project_id, tenantId);
+    const existingCount = Array.isArray(existing) ? existing.length : 0;
+    const requested = keywords.length;
+    if (cap > 0 && existingCount + requested > cap) {
+      return res.status(400).json({ error: { code: 'TIER_CAP_EXCEEDED', message: `Tier ${tier} cap is ${cap} keywords. You have ${existingCount}, requested ${requested}.`, status: 400, cap, existing: existingCount, requested } });
+    }
+
+    const result = await addKeywords(site.se_ranking_project_id, keywords, { tenantId, groupId });
+    res.json({ data: result, project_id: site.se_ranking_project_id });
+  } catch (err) {
+    console.error('[arion/seo/keywords/add]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// DELETE /arion/seo/keywords
+// Body: { siteId, keywordIds: number[] }
+router.delete('/seo/keywords', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId, keywordIds } = req.body || {};
+  if (!siteId || !Array.isArray(keywordIds) || keywordIds.length === 0) {
+    return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId + keywordIds[] required', status: 400 } });
+  }
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site?.se_ranking_project_id) return res.status(404).json({ error: { code: 'NO_PROJECT', message: 'No SE Ranking project for site', status: 404 } });
+    const { removeKeywords } = await import('../lib/seranking.js');
+    const ok = await removeKeywords(site.se_ranking_project_id, keywordIds, tenantId);
+    res.json({ ok, removed: keywordIds.length });
+  } catch (err) {
+    console.error('[arion/seo/keywords DELETE]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// GET /arion/seo/keywords?siteId=...
+// Returns current tracked keywords for the site's project with volume/difficulty.
+router.get('/seo/keywords', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.query;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site?.se_ranking_project_id) return res.json({ data: [], project_id: null });
+    const { getProjectKeywords } = await import('../lib/seranking.js');
+    const keywords = await getProjectKeywords(site.se_ranking_project_id, tenantId);
+    res.json({ data: keywords, project_id: site.se_ranking_project_id });
+  } catch (err) {
+    console.error('[arion/seo/keywords GET]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Phase 3.5 — SE Ranking expanded routes
 // ---------------------------------------------------------------------------
 
