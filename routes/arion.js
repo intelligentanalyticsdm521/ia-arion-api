@@ -1156,7 +1156,26 @@ const AI_PROMPT_ENGINES_BY_TIER = {
   authority: ['ai_mode', 'chatgpt', 'gemini'], // All three; each prompt picks subset
 };
 
+// SE Ranking AIRT base_name canonical strings (used in the API enum).
+const AIRT_ENGINE_BASE_NAMES = {
+  ai_mode: 'google_ai_mode',
+  chatgpt: 'chatgpt',
+  gemini: 'gemini',
+  perplexity: 'perplexity',
+  ai_overview: 'google_ai_overview',
+};
+
+const AIRT_BASE_NAME_TO_KEY = {
+  google_ai_mode: 'ai_mode',
+  chatgpt: 'chatgpt',
+  gemini: 'gemini',
+  perplexity: 'perplexity',
+  google_ai_overview: 'ai_overview',
+};
+
 // GET /arion/seo/ai-prompts?siteId=...
+// Returns prompts grouped by enabled LLM engine, plus tier metadata.
+// Aggregates across every enabled AI engine on the project.
 router.get('/seo/ai-prompts', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { siteId } = req.query;
@@ -1164,18 +1183,32 @@ router.get('/seo/ai-prompts', async (req, res) => {
   try {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
-    if (!site?.se_ranking_project_id) return res.json({ data: [], project_id: null, allowed_engines: [], cap: 0 });
-    const tier = String(site.seo_addon_tier || '').toLowerCase();
+    const tier = String(site?.seo_addon_tier || '').toLowerCase();
     const cap = AI_PROMPT_TIER_LIMITS[tier] || 0;
     const allowedEngines = AI_PROMPT_ENGINES_BY_TIER[tier] || [];
-    const { getAIPrompts } = await import('../lib/seranking.js');
-    const prompts = await getAIPrompts(site.se_ranking_project_id, tenantId);
+
+    if (!site?.se_ranking_project_id) {
+      return res.json({ data: [], engines: [], brand: null, project_id: null, tier, cap, allowed_engines: allowedEngines, total_prompts: 0 });
+    }
+
+    const { getAIBrand, listAIEngines, getAllAIPrompts } = await import('../lib/seranking.js');
+    const [brand, engines, byEngine] = await Promise.all([
+      getAIBrand(site.se_ranking_project_id, tenantId),
+      listAIEngines(site.se_ranking_project_id, tenantId),
+      getAllAIPrompts(site.se_ranking_project_id, tenantId),
+    ]);
+
+    const totalPrompts = byEngine.reduce((acc, e) => acc + (Array.isArray(e.prompts) ? e.prompts.length : 0), 0);
+
     res.json({
-      data: prompts,
+      data: byEngine,             // [{ llm_id, engine_base_name, prompts:[...] }, ...]
+      engines,                    // raw LLM engine list as SE Ranking returned
+      brand: brand?.brand || brand || null,
       project_id: site.se_ranking_project_id,
       tier,
       cap,
       allowed_engines: allowedEngines,
+      total_prompts: totalPrompts,
     });
   } catch (err) {
     console.error('[arion/seo/ai-prompts GET]', err);
@@ -1183,58 +1216,128 @@ router.get('/seo/ai-prompts', async (req, res) => {
   }
 });
 
-// POST /arion/seo/ai-prompts
-// Body: { siteId, prompt, engines: ['ai_mode','chatgpt','gemini'] }
-router.post('/seo/ai-prompts', async (req, res) => {
+// POST /arion/seo/ai-prompts/setup
+// Body: { siteId, brand? }
+// One-shot: sets brand from supplied or site name, enables every AI engine
+// allowed by the tier. Idempotent — skips engines already enabled.
+router.post('/seo/ai-prompts/setup', async (req, res) => {
   const tenantId = req.tenant.tenantId;
-  const { siteId, prompt, engines } = req.body || {};
-  if (!siteId || !prompt) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId + prompt required', status: 400 } });
+  const { siteId, brand: brandOverride } = req.body || {};
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
   try {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site?.se_ranking_project_id) return res.status(400).json({ error: { code: 'NO_PROJECT', message: 'Site has no SE Ranking project', status: 400 } });
     const tier = String(site.seo_addon_tier || '').toLowerCase();
+    const allowedEngines = AI_PROMPT_ENGINES_BY_TIER[tier] || [];
+    if (allowedEngines.length === 0) {
+      return res.status(403).json({ error: { code: 'TIER_NOT_AVAILABLE', message: `AI Search is available at Growth (Google AI Mode) and Authority (+ChatGPT + Gemini). Current tier: ${tier || 'none'}.`, status: 403 } });
+    }
+
+    const { setAIBrand, listAIEngines, enableAIEngine } = await import('../lib/seranking.js');
+    const brand = brandOverride || site.business_name || site.domain || 'Brand';
+    const brandResult = await setAIBrand(site.se_ranking_project_id, brand, tenantId);
+    const existing = await listAIEngines(site.se_ranking_project_id, tenantId);
+    const existingBaseNames = new Set(existing.map((e) => e.base_name));
+
+    const enabled = [];
+    const skipped = [];
+    for (const engineKey of allowedEngines) {
+      const baseName = AIRT_ENGINE_BASE_NAMES[engineKey];
+      if (!baseName) continue;
+      if (existingBaseNames.has(baseName)) {
+        skipped.push(baseName);
+        continue;
+      }
+      const result = await enableAIEngine(site.se_ranking_project_id, { baseName, countryCode: 'us', langCode: 'en' }, tenantId);
+      if (result?.llm_id || result?.id) {
+        enabled.push({ base_name: baseName, llm_id: result.llm_id || result.id });
+      }
+    }
+
+    res.json({ brand, brand_set: !!brandResult, enabled, skipped, tier, cap: AI_PROMPT_TIER_LIMITS[tier] || 0 });
+  } catch (err) {
+    console.error('[arion/seo/ai-prompts/setup]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// POST /arion/seo/ai-prompts
+// Body: { siteId, prompt, engine }
+// Adds a single prompt under one engine. `engine` is one of our internal
+// keys: ai_mode | chatgpt | gemini | perplexity | ai_overview.
+// Enforces tier cap (5 total per project across all engines).
+router.post('/seo/ai-prompts', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId, prompt, engine } = req.body || {};
+  if (!siteId || !prompt || !engine) {
+    return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId + prompt + engine required', status: 400 } });
+  }
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site?.se_ranking_project_id) {
+      return res.status(400).json({ error: { code: 'NO_PROJECT', message: 'Site has no SE Ranking project', status: 400 } });
+    }
+    const tier = String(site.seo_addon_tier || '').toLowerCase();
     const cap = AI_PROMPT_TIER_LIMITS[tier] || 0;
     if (cap === 0) {
-      return res.status(403).json({ error: { code: 'TIER_NOT_AVAILABLE', message: `AI prompts require Growth (5 prompts) or Authority (10 prompts) tier. Current tier: ${tier || 'none'}.`, status: 403 } });
+      return res.status(403).json({ error: { code: 'TIER_NOT_AVAILABLE', message: `AI prompts require Growth or Authority tier. Current: ${tier || 'none'}.`, status: 403 } });
     }
     const allowedEngines = AI_PROMPT_ENGINES_BY_TIER[tier];
-    const requestedEngines = Array.isArray(engines) && engines.length > 0 ? engines : allowedEngines;
-    const invalidEngines = requestedEngines.filter((e) => !allowedEngines.includes(e));
-    if (invalidEngines.length > 0) {
-      return res.status(400).json({ error: { code: 'INVALID_ENGINES', message: `Engines not available at tier ${tier}: ${invalidEngines.join(', ')}. Allowed: ${allowedEngines.join(', ')}.`, status: 400 } });
+    if (!allowedEngines.includes(engine)) {
+      return res.status(400).json({ error: { code: 'INVALID_ENGINE', message: `Engine ${engine} not available at tier ${tier}. Allowed: ${allowedEngines.join(', ')}.`, status: 400 } });
     }
 
-    // Cap check
-    const { getAIPrompts, addAIPrompt } = await import('../lib/seranking.js');
-    const existing = await getAIPrompts(site.se_ranking_project_id, tenantId);
-    if (existing.length >= cap) {
-      return res.status(400).json({ error: { code: 'CAP_EXCEEDED', message: `AI prompt cap reached (${cap} for ${tier}). Remove an existing prompt first.`, status: 400, cap, existing: existing.length } });
+    const { listAIEngines, getAllAIPrompts, addAIPrompt } = await import('../lib/seranking.js');
+
+    // Resolve engine → llm_id (engine must be enabled first via /setup).
+    const engines = await listAIEngines(site.se_ranking_project_id, tenantId);
+    const baseName = AIRT_ENGINE_BASE_NAMES[engine];
+    const targetEngine = engines.find((e) => e.base_name === baseName);
+    if (!targetEngine) {
+      return res.status(409).json({ error: { code: 'ENGINE_NOT_ENABLED', message: `Engine ${baseName} not yet enabled on this project. POST /seo/ai-prompts/setup first.`, status: 409 } });
     }
 
-    const result = await addAIPrompt(site.se_ranking_project_id, prompt, requestedEngines, tenantId);
+    // Tier cap is TOTAL across all engines (per locked tier matrix
+    // revised 2026-06-17).
+    const byEngine = await getAllAIPrompts(site.se_ranking_project_id, tenantId);
+    const totalExisting = byEngine.reduce((acc, e) => acc + (Array.isArray(e.prompts) ? e.prompts.length : 0), 0);
+    if (totalExisting >= cap) {
+      return res.status(400).json({ error: { code: 'CAP_EXCEEDED', message: `AI prompt cap reached (${cap}). Remove a prompt first.`, status: 400, cap, existing: totalExisting } });
+    }
+
+    const result = await addAIPrompt(
+      site.se_ranking_project_id,
+      targetEngine.llm_id ?? targetEngine.id,
+      [String(prompt).trim()],
+      { tenantId }
+    );
     if (!result) {
-      return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: 'SE Ranking did not accept the prompt — endpoint may be unavailable. Try setting it manually in the SE Ranking dashboard.', status: 502 } });
+      return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: 'SE Ranking rejected the prompt.', status: 502 } });
     }
-    res.json({ data: result });
+    res.json({ data: result, engine, llm_id: targetEngine.llm_id ?? targetEngine.id });
   } catch (err) {
     console.error('[arion/seo/ai-prompts POST]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
 
-// DELETE /arion/seo/ai-prompts/:promptId
-router.delete('/seo/ai-prompts/:promptId', async (req, res) => {
+// DELETE /arion/seo/ai-prompts/:k2siteLlmId?siteId=...&llmId=...
+// Deletes one prompt by its k2site_llm_id under a specific engine.
+router.delete('/seo/ai-prompts/:k2siteLlmId', async (req, res) => {
   const tenantId = req.tenant.tenantId;
-  const { siteId } = req.query;
-  const { promptId } = req.params;
-  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId query param required', status: 400 } });
+  const { siteId, llmId } = req.query;
+  const { k2siteLlmId } = req.params;
+  if (!siteId || !llmId) {
+    return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId + llmId query params required', status: 400 } });
+  }
   try {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site?.se_ranking_project_id) return res.status(404).json({ error: { code: 'NO_PROJECT', message: 'No SE Ranking project', status: 404 } });
     const { removeAIPrompt } = await import('../lib/seranking.js');
-    const ok = await removeAIPrompt(site.se_ranking_project_id, promptId, tenantId);
+    const ok = await removeAIPrompt(site.se_ranking_project_id, llmId, [Number(k2siteLlmId)], tenantId);
     res.json({ ok });
   } catch (err) {
     console.error('[arion/seo/ai-prompts DELETE]', err);
