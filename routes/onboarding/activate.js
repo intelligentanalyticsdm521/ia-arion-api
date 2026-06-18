@@ -40,6 +40,15 @@ router.post('/', async (req, res) => {
 
   try {
     const pool = await getServicesPool();
+
+    // Path A: arion.site.provisioning_details_json.welcome_token (set by
+    // /onboarding/submit at end of self-serve flow). Path B: oliver.tenant_-
+    // onboarding_state.welcome_token (set by oliver-api finish-onboarding
+    // when the founder onboards a client through the modal). Path B clients
+    // may not have an arion.site at all (SPARK-only / OLIVER-only purchases).
+    //
+    // We try the arion.site path first; if no token there, fall through to
+    // oliver.tenant_onboarding_state. Whichever matches gets marked used.
     const row = await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .query(`
@@ -48,49 +57,83 @@ router.post('/', async (req, res) => {
         WHERE tenant_id = @tenantId
         ORDER BY updated_at DESC
       `);
-    if (row.recordset.length === 0) {
-      return res.status(404).json({ error: { code: 'SITE_NOT_FOUND' } });
-    }
-    const site = row.recordset[0];
-    let details;
-    try {
-      details = site.provisioning_details_json ? JSON.parse(site.provisioning_details_json) : {};
-    } catch {
-      details = {};
-    }
-    if (!details.welcome_token) {
-      return res.status(404).json({ error: { code: 'NO_WELCOME_TOKEN' } });
-    }
-    if (details.welcome_token_used_at) {
-      return res.status(409).json({ error: { code: 'TOKEN_ALREADY_USED' } });
-    }
-    if (timingSafeEq(details.welcome_token, setupToken) === false) {
-      return res.status(422).json({ error: { code: 'TOKEN_MISMATCH' } });
+
+    let matched = null; // { source: 'arion' | 'oliver_onboarding', payload }
+    let arionDetails = null;
+    const arionSite = row.recordset[0] || null;
+    if (arionSite) {
+      try {
+        arionDetails = arionSite.provisioning_details_json ? JSON.parse(arionSite.provisioning_details_json) : {};
+      } catch { arionDetails = {}; }
+      if (arionDetails.welcome_token) {
+        if (arionDetails.welcome_token_used_at) {
+          return res.status(409).json({ error: { code: 'TOKEN_ALREADY_USED' } });
+        }
+        if (timingSafeEq(arionDetails.welcome_token, setupToken)) {
+          matched = { source: 'arion' };
+        }
+      }
     }
 
-    // Mark used + persist.
-    details.welcome_token_used_at = new Date().toISOString();
-    details.welcome_email_activated_by = email;
-    await pool.request()
-      .input('siteId', sql.UniqueIdentifier, site.site_id)
-      .input('details', sql.NVarChar(sql.MAX), JSON.stringify(details))
-      .query(`
-        UPDATE arion.site
-        SET provisioning_details_json = @details,
-            updated_at = GETUTCDATE()
-        WHERE site_id = @siteId
-      `);
+    if (!matched) {
+      // Path B fallback — check oliver.tenant_onboarding_state.
+      const oRow = await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .query(`
+          SELECT welcome_token, welcome_token_expires_at
+            FROM oliver.tenant_onboarding_state
+           WHERE tenant_id = @tenantId
+        `);
+      const oRec = oRow.recordset[0];
+      if (oRec?.welcome_token) {
+        if (oRec.welcome_token_expires_at && new Date(oRec.welcome_token_expires_at) < new Date()) {
+          return res.status(409).json({ error: { code: 'TOKEN_EXPIRED' } });
+        }
+        if (timingSafeEq(oRec.welcome_token, setupToken)) {
+          matched = { source: 'oliver_onboarding' };
+        } else {
+          return res.status(422).json({ error: { code: 'TOKEN_MISMATCH' } });
+        }
+      }
+    }
 
-    // The customer's next stop is the existing CIAM signup flow.
-    const signupUrl = `${PORTAL_BASE}/signup?prefill_email=${encodeURIComponent(email)}&activated=1`;
+    if (!matched) {
+      return res.status(arionSite ? 422 : 404).json({
+        error: { code: arionSite ? 'TOKEN_MISMATCH' : 'NO_WELCOME_TOKEN' },
+      });
+    }
+
+    // Mark used.
+    if (matched.source === 'arion') {
+      arionDetails.welcome_token_used_at = new Date().toISOString();
+      arionDetails.welcome_email_activated_by = email;
+      await pool.request()
+        .input('siteId', sql.UniqueIdentifier, arionSite.site_id)
+        .input('details', sql.NVarChar(sql.MAX), JSON.stringify(arionDetails))
+        .query(`UPDATE arion.site SET provisioning_details_json=@details, updated_at=GETUTCDATE() WHERE site_id=@siteId`);
+    } else {
+      // Path B: null out the token + record used-at so it can't be replayed.
+      await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .query(`
+          UPDATE oliver.tenant_onboarding_state
+             SET welcome_token = NULL,
+                 welcome_token_expires_at = NULL
+           WHERE tenant_id = @tenantId
+        `);
+    }
+
+    // The customer's next stop is the existing CIAM signup flow. Add the
+    // welcome=1 hint so UnifiedSetupCard auto-opens the modal — but only
+    // for Path A (Path B clients are already onboarded by the founder so
+    // the card will see finished_at and self-suppress).
+    const signupUrl = `${PORTAL_BASE}/signup?prefill_email=${encodeURIComponent(email)}&activated=1&post_signup_redirect=${encodeURIComponent('/app/services/command?welcome=1')}`;
 
     return res.status(200).json({
       ok: true,
       signup_url: signupUrl,
-      site: {
-        domain: site.domain,
-        wp_admin_url: site.wp_admin_url,
-      },
+      site: arionSite ? { domain: arionSite.domain, wp_admin_url: arionSite.wp_admin_url } : null,
+      activation_source: matched.source,
     });
   } catch (err) {
     console.error('[onboarding/activate]', err);
