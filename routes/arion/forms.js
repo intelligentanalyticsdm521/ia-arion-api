@@ -115,4 +115,66 @@ router.post('/config', async (req, res) => {
   }
 });
 
+// DELETE /arion/sites/:siteId/forms/submissions/:submissionId — delete a single
+// form submission (spam cleanup). Per Brandon 2026-06-18: tenants need to
+// be able to delete spam from their inbox without it polluting reports.
+// Hard delete — form submissions are not legally retained.
+router.delete('/submissions/:submissionId', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const siteId = req.params.siteId;
+  const submissionId = req.params.submissionId;
+  if (!tenantId) return res.status(401).json({ error: { code: 'NO_TENANT', message: 'tenant header missing' } });
+  try {
+    const pool = await getServicesPool();
+    const r = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('submissionId', sql.UniqueIdentifier, submissionId)
+      .query(`
+        DELETE FROM arion.site_form_submission
+         WHERE tenant_id = @tenantId
+           AND site_id = @siteId
+           AND submission_id = @submissionId
+      `);
+    if (!r.rowsAffected[0]) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'submission not found' } });
+    }
+    res.json({ data: { deleted: true, submission_id: submissionId } });
+  } catch (err) {
+    console.error('[forms:submission:delete]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// POST /arion/sites/:siteId/forms/submissions/bulk-delete — body { submission_ids: [...] }
+// Bulk delete for spam wave cleanup. Returns count deleted.
+router.post('/submissions/bulk-delete', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const siteId = req.params.siteId;
+  const ids = Array.isArray(req.body?.submission_ids) ? req.body.submission_ids : [];
+  if (!tenantId) return res.status(401).json({ error: { code: 'NO_TENANT', message: 'tenant header missing' } });
+  if (!ids.length) return res.json({ data: { deleted: 0 } });
+  try {
+    const pool = await getServicesPool();
+    let deleted = 0;
+    for (const id of ids.slice(0, 500)) {
+      try {
+        const r = await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('siteId', sql.UniqueIdentifier, siteId)
+          .input('submissionId', sql.UniqueIdentifier, id)
+          .query(`
+            DELETE FROM arion.site_form_submission
+             WHERE tenant_id = @tenantId AND site_id = @siteId AND submission_id = @submissionId
+          `);
+        if (r.rowsAffected[0]) deleted++;
+      } catch { /* skip bad ids, continue */ }
+    }
+    res.json({ data: { deleted } });
+  } catch (err) {
+    console.error('[forms:submission:bulk-delete]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 export default router;
