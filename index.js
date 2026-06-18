@@ -5,7 +5,6 @@ import express from 'express';
 import { requireAuth } from './middleware/requireAuth.js';
 import { tenantResolution } from './middleware/tenantResolution.js';
 import { requireArionAccess } from './middleware/requireArionAccess.js';
-import { actingTenantGuard } from './lib/consultingAccess.js';
 
 import healthRouter from './routes/health.js';
 import arionRouter from './routes/arion.js';
@@ -112,7 +111,7 @@ app.use('/provisioning', provisioningRouter);
 // an auth header — just the ?token=<provision_code> query string.
 app.use('/plugin', pluginRouter);
 
-app.use('/arion', requireAuth, tenantResolution, actingTenantGuard, requireArionAccess, arionRouter);
+app.use('/arion', requireAuth, tenantResolution, requireArionAccess, arionRouter);
 
 app.use((req, res) => res.status(404).json({ error: 'not_found', method: req.method, path: req.path }));
 
