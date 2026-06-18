@@ -63,24 +63,33 @@ export async function requireArionAccess(req, res, next) {
       return res.status(403).json({ error: "Not authorized", details: "User was not found in iadm_platform." });
     }
 
+    // Membership check accepts EITHER direct membership in the target tenant
+    // OR membership in the founder tenant (iadm). The founder can operate on
+    // any client tenant by setting x-tenant-key. Audit columns still stamp
+    // the founder's identity.
+    const founderTenantId = (process.env.FOUNDER_TENANT_ID || "8C9527B9-8999-4B31-A306-F3D4CCC39FBD").trim().toUpperCase();
     const membership = await platformPool
       .request()
       .input("tenant_id", sql.UniqueIdentifier, tenantId)
+      .input("founder_tenant_id", sql.UniqueIdentifier, founderTenantId || tenantId)
       .input("user_id", sql.UniqueIdentifier, user.user_id)
       .query(`
-        SELECT TOP 1 tenant_user_id
+        SELECT TOP 1 tenant_user_id, tenant_id AS matched_tenant_id
         FROM core.tenant_users
-        WHERE tenant_id = @tenant_id
-          AND user_id = @user_id
-          AND (status IS NULL OR status = 'active');
+        WHERE user_id = @user_id
+          AND tenant_id IN (@tenant_id, @founder_tenant_id)
+          AND (status IS NULL OR status = 'active')
+        ORDER BY CASE WHEN tenant_id = @tenant_id THEN 0 ELSE 1 END;
       `);
 
-    const tenantUserId = membership.recordset[0]?.tenant_user_id || null;
-    // IA consulting session: operator isn't a member of the client tenant by
-    // design — actingTenantGuard already validated platform-admin/grant.
-    if (!tenantUserId && !req.isConsultingSession) {
+    const row = membership.recordset[0];
+    const tenantUserId = row?.tenant_user_id || null;
+    const isFounderActingOnClient = row && String(row.matched_tenant_id).toUpperCase() === founderTenantId
+                                          && String(tenantId).toUpperCase() !== founderTenantId;
+    if (!tenantUserId) {
       return res.status(403).json({ error: "Not authorized", details: "User is not a member of the selected tenant." });
     }
+    req.isFounderActingOnClient = isFounderActingOnClient;
 
     const serviceKey = (process.env.ARION_SERVICE_KEY || "arion").trim();
     const entitlement = await platformPool
