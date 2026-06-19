@@ -119,6 +119,12 @@ function toSiteSummary(row) {
     isEcommerceEnabled: false,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    // 2026-06-20 — real WP activity timestamp. The IA plugin writes
+    // arion.site_content_change rows when pages/posts/products/custom
+    // post types change. Falls back to plugin_last_status_at (plugin
+    // heartbeat) and finally site row mtime so we never show '—' for an
+    // active site. Frontend renders this as "Last activity".
+    lastContentChangeAt: row.last_content_change_at || row.plugin_last_status_at || row.updated_at,
     arionTier: row.arion_tier,
     seoAddonTier: row.seo_addon_tier || null
   };
@@ -143,9 +149,23 @@ router.get('/sites', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   try {
     const pool = await getServicesPool();
+    // 2026-06-20 — also compute lastContentChangeAt per site. Brandon
+    // pointed out the header was showing arion.site.updated_at (DB row
+    // mtime — only flips on admin edits) as "Last updated" while he
+    // publishes pages/posts multiple times a week. The IA plugin writes
+    // into arion.site_content_change on every WP content event, so
+    // MAX(changed_at) per site is a real freshness signal.
     const result = await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
-      .query('SELECT * FROM arion.site WHERE tenant_id = @tenantId ORDER BY created_at DESC');
+      .query(`
+        SELECT s.*,
+               (SELECT MAX(scc.changed_at)
+                  FROM arion.site_content_change scc
+                 WHERE scc.site_id = s.site_id) AS last_content_change_at
+          FROM arion.site s
+         WHERE s.tenant_id = @tenantId
+         ORDER BY s.created_at DESC
+      `);
     res.json({
       tenant: { tenantId, tenantName: req.tenant.tenantName || null, tenantFullName: req.tenant.tenantFullName || null },
       sites: result.recordset.map(toSiteSummary)
