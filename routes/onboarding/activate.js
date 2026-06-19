@@ -24,6 +24,7 @@
 import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
+import { getPlatformPool } from '../../db/platformPool.js';
 
 const PORTAL_BASE = (process.env.PORTAL_BASE_URL
   || 'https://portal.intelligentanalyticsdm.com').replace(/\/+$/, '');
@@ -69,6 +70,12 @@ router.post('/', async (req, res) => {
         if (arionDetails.welcome_token_used_at) {
           return res.status(409).json({ error: { code: 'TOKEN_ALREADY_USED' } });
         }
+        // F-A.1 (2026-06-19): enforce expiry on the arion path (Path B path
+        // already does it). Without this, leaked Path A tokens were
+        // functionally immortal until used.
+        if (arionDetails.welcome_token_expires_at && new Date(arionDetails.welcome_token_expires_at) < new Date()) {
+          return res.status(409).json({ error: { code: 'TOKEN_EXPIRED' } });
+        }
         if (timingSafeEq(arionDetails.welcome_token, setupToken)) {
           matched = { source: 'arion' };
         }
@@ -101,6 +108,29 @@ router.post('/', async (req, res) => {
       return res.status(arionSite ? 422 : 404).json({
         error: { code: arionSite ? 'TOKEN_MISMATCH' : 'NO_WELCOME_TOKEN' },
       });
+    }
+
+    // F-SEC1.2 (2026-06-19): verify the activating email matches the Stripe-paid
+    // tenant's primary_contact_email. Prevents tenant-claim hijack: if an
+    // attacker intercepts the activation link and swaps in their own email,
+    // they shouldn't be able to claim the paid tenant via CIAM signup. The
+    // tenant_invitations lookup in platform-api/session/verify would also
+    // block them (no invitation for the swapped email), but this rejects
+    // earlier with a clearer 403 instead of stranding them tenantless.
+    try {
+      const platformPool = await getPlatformPool();
+      const tRow = await platformPool.request()
+        .input('tenant_id', sql.UniqueIdentifier, tenantId)
+        .query(`SELECT primary_contact_email FROM core.tenants WHERE tenant_id=@tenant_id`);
+      const expectedEmail = (tRow.recordset[0]?.primary_contact_email || '').toLowerCase().trim();
+      const providedEmail = String(email || '').toLowerCase().trim();
+      if (expectedEmail && providedEmail !== expectedEmail) {
+        return res.status(403).json({ error: { code: 'EMAIL_MISMATCH', message: 'Activation email does not match the paid tenant.' } });
+      }
+    } catch (e) {
+      console.warn('[onboarding/activate] email match check skipped:', e.message);
+      // Fail open on infra errors — token validation already gates this; the
+      // tenant_invitations lookup downstream is the real auto-claim guard.
     }
 
     // Mark used.
