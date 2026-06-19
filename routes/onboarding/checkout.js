@@ -26,6 +26,30 @@ const FREE_FIRST_YEAR_COUPON_ID = process.env.STRIPE_DOMAIN_FREE_FIRST_YEAR_COUP
 // ---------------------------------------------------------------------------
 // GET /catalog — public, used by signup plan-picker UI
 // ---------------------------------------------------------------------------
+// 2026-06-20 Brandon: this endpoint was serving HARDCODED $19.99/$29.99/
+// $49.99/$99.99 from lib/pricing.js ARION_PLANS, ignoring the live Stripe
+// prices Brandon manages via OLIVER → Catalog → Products & Services.
+// Now proxies to oliver-api /signup/catalog?product=arion (the single
+// Stripe owner), which resolves real Stripe Prices by name + overlays
+// description/features from oliver.service_offering. The response is
+// re-shaped into arion-api's existing payload contract so the Portal's
+// SignupPage doesn't need any changes.
+const OLIVER_API_BASE = (
+  process.env.OLIVER_API_BASE ||
+  'https://app-oliver-api-prod-eaffhyhqgrgbcfh0.centralus-01.azurewebsites.net'
+).replace(/\/$/, '');
+
+function annualFromMonthly(m) {
+  // Mirror lib/pricing.js annualPrice — 10% off × 12.
+  const annual = Math.round(m * 12 * 0.90 * 100) / 100;
+  return {
+    monthly_usd: m,
+    annual_usd: annual,
+    annual_per_month_usd: Math.round((annual / 12) * 100) / 100,
+    annual_savings_usd: Math.round((m * 12 - annual) * 100) / 100,
+  };
+}
+
 router.get('/catalog', async (req, res) => {
   // ?product=arion|oliver|spark (default arion — backward compatible)
   const product = String(req.query?.product || 'arion').toLowerCase();
@@ -37,10 +61,38 @@ router.get('/catalog', async (req, res) => {
         error: { code: 'MOVED', status: 410, message: 'Use oliver-api /signup/catalog for OLIVER/SPARK.' },
       });
     }
-    void getStripeCatalog; // retained import; ARION path below unchanged
+    void getStripeCatalog; // retained import
+    void getCatalog;       // hardcoded fallback retained for emergency only
+
+    // Proxy to oliver-api. If it fails (network, 5xx, missing prices), we
+    // surface a 503 — the customer needs to see live prices or a clear
+    // 'unavailable' message, NOT stale hardcoded numbers that would let
+    // them check out at the wrong price.
+    const upstream = `${OLIVER_API_BASE}/signup/catalog?product=arion&billing=${cycle}`;
+    const upstreamRes = await fetch(upstream, { headers: { 'Content-Type': 'application/json' } });
+    if (!upstreamRes.ok) {
+      const body = await upstreamRes.text().catch(() => '');
+      console.error('[onboarding/catalog] proxy upstream', upstreamRes.status, body);
+      return res.status(503).json({ error: { code: 'CATALOG_UPSTREAM_UNAVAILABLE', status: 503, message: `oliver-api returned ${upstreamRes.status}` } });
+    }
+    const upstreamBody = await upstreamRes.json();
+    const upstreamPlans = upstreamBody?.data?.plans || [];
+
+    // Re-shape into the {pricing: {monthly_usd, annual_usd, ...}} contract
+    // the existing Portal SignupPage already consumes. Annual is derived
+    // (10% off × 12) when only the monthly amount is supplied by oliver-api.
+    const plans = upstreamPlans.map((p) => ({
+      key: p.key,
+      product: 'arion',
+      name: p.name,
+      description: p.description,
+      features: p.features,
+      pricing: annualFromMonthly(Number(p.monthly_usd) || 0),
+    }));
+
     res.json({
-      data: { product, plans: getCatalog(product) }, // ARION (env, unchanged)
-      meta: { timestamp: new Date().toISOString() },
+      data: { product, plans },
+      meta: { timestamp: new Date().toISOString(), source: 'oliver-api' },
     });
   } catch (err) {
     console.error('[onboarding/catalog]', err);
