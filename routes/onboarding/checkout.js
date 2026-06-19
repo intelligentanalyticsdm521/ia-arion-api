@@ -39,8 +39,28 @@ const OLIVER_API_BASE = (
   'https://app-oliver-api-prod-eaffhyhqgrgbcfh0.centralus-01.azurewebsites.net'
 ).replace(/\/$/, '');
 
-function annualFromMonthly(m) {
-  // Mirror lib/pricing.js annualPrice — 10% off × 12.
+// 2026-06-20 update: oliver-api/lib/signupPricing.js now returns a
+// `pricing: { monthly_usd, annual_usd, annual_per_month_usd,
+//             annual_savings_pct }`
+// envelope on every plan. This proxy just passes it through. The old
+// `annualFromMonthly` derivation is kept ONLY as a defensive fallback in
+// case the upstream is stale (deploy lag) and only returns the legacy
+// flat monthly_usd field.
+function pricingPassthroughOrDerive(p) {
+  if (p && p.pricing && typeof p.pricing.monthly_usd === "number") {
+    const sp = p.pricing;
+    return {
+      monthly_usd: sp.monthly_usd,
+      annual_usd: sp.annual_usd != null ? sp.annual_usd : Math.round(sp.monthly_usd * 12 * 0.90 * 100) / 100,
+      annual_per_month_usd: sp.annual_per_month_usd != null
+        ? sp.annual_per_month_usd
+        : Math.round(sp.monthly_usd * 12 * 0.90 / 12 * 100) / 100,
+      annual_savings_usd: sp.annual_usd != null
+        ? Math.round((sp.monthly_usd * 12 - sp.annual_usd) * 100) / 100
+        : Math.round(sp.monthly_usd * 12 * 0.10 * 100) / 100,
+    };
+  }
+  const m = Number(p?.monthly_usd) || 0;
   const annual = Math.round(m * 12 * 0.90 * 100) / 100;
   return {
     monthly_usd: m,
@@ -79,19 +99,22 @@ router.get('/catalog', async (req, res) => {
     const upstreamPlans = upstreamBody?.data?.plans || [];
 
     // Re-shape into the {pricing: {monthly_usd, annual_usd, ...}} contract
-    // the existing Portal SignupPage already consumes. Annual is derived
-    // (10% off × 12) when only the monthly amount is supplied by oliver-api.
+    // the existing Portal SignupPage already consumes. Pass through the
+    // pricing envelope from oliver-api when present, derive as fallback.
     const plans = upstreamPlans.map((p) => ({
       key: p.key,
       product: 'arion',
       name: p.name,
       description: p.description,
       features: p.features,
-      pricing: annualFromMonthly(Number(p.monthly_usd) || 0),
+      pricing: pricingPassthroughOrDerive(p),
     }));
 
+    // Pass through ARION SEO add-ons if oliver-api returned them.
+    const seoAddons = upstreamBody?.data?.seoAddons || null;
+
     res.json({
-      data: { product, plans },
+      data: { product, plans, ...(seoAddons ? { seoAddons } : {}) },
       meta: { timestamp: new Date().toISOString(), source: 'oliver-api' },
     });
   } catch (err) {
