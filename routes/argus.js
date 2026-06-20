@@ -9,6 +9,8 @@
 //   GET    /argus/pricing                  current per-action credit pricing
 //   PATCH  /argus/pricing/:action_type     founder-only: edit pricing
 //   GET    /argus/margin?days=30           founder-only: per-action margin dashboard data
+//   GET    /argus/auto-topoff              current auto-topoff config for the tenant
+//   PATCH  /argus/auto-topoff              update auto-topoff config (whitelisted fields)
 
 import express from "express";
 import sql from "mssql";
@@ -206,6 +208,142 @@ router.get("/margin", async (req, res) => {
   } catch (err) {
     console.error("[argus/margin]", err);
     res.status(500).json({ error: { code: "margin_error", message: err.message } });
+  }
+});
+
+// ─── GET /argus/auto-topoff ────────────────────────────────────────────
+// Returns the tenant's current auto-topoff config. Lazily seeds a default
+// row (disabled, threshold=50, pack=100, cap=$300/mo) the first time a
+// tenant looks at the page so the PATCH below can always assume a row.
+router.get("/auto-topoff", async (req, res) => {
+  try {
+    const tenantId = req.tenant.tenantId;
+    const pool = await getServicesPool();
+
+    let r = await pool.request()
+      .input("tid", sql.UniqueIdentifier, tenantId)
+      .query(`SELECT enabled, threshold_credits, refill_pack_size, max_per_month_usd,
+                     month_spent_usd, month_period_start, last_charge_at, last_charge_amount_usd
+                FROM lumen.argus_autotopoff_config
+               WHERE tenant_id = @tid`);
+
+    if (r.recordset.length === 0) {
+      await pool.request()
+        .input("tid", sql.UniqueIdentifier, tenantId)
+        .query(`INSERT INTO lumen.argus_autotopoff_config (tenant_id) VALUES (@tid)`);
+      r = await pool.request()
+        .input("tid", sql.UniqueIdentifier, tenantId)
+        .query(`SELECT enabled, threshold_credits, refill_pack_size, max_per_month_usd,
+                       month_spent_usd, month_period_start, last_charge_at, last_charge_amount_usd
+                  FROM lumen.argus_autotopoff_config
+                 WHERE tenant_id = @tid`);
+    }
+
+    const row = r.recordset[0];
+    res.json({
+      data: {
+        enabled: !!row.enabled,
+        threshold_credits: Number(row.threshold_credits),
+        refill_pack_size: Number(row.refill_pack_size),
+        max_per_month_usd: Number(row.max_per_month_usd),
+        month_spent_usd: Number(row.month_spent_usd),
+        month_period_start: row.month_period_start,
+        last_charge_at: row.last_charge_at,
+        last_charge_amount_usd: row.last_charge_amount_usd == null ? null : Number(row.last_charge_amount_usd),
+      },
+    });
+  } catch (err) {
+    console.error("[argus/auto-topoff:get]", err);
+    res.status(500).json({ error: { code: "autotopoff_get_error", message: err.message } });
+  }
+});
+
+// ─── PATCH /argus/auto-topoff ──────────────────────────────────────────
+// Updates the tenant's auto-topoff config. Only the four user-controlled
+// fields are writable here; bookkeeping columns are owned by the job.
+// Pack size is constrained to the existing Stripe catalog values.
+const ALLOWED_PACK_SIZES = new Set([50, 100, 150, 200, 250, 300, 400, 500, 750, 1000]);
+
+router.patch("/auto-topoff", async (req, res) => {
+  try {
+    const tenantId = req.tenant.tenantId;
+    const body = req.body || {};
+
+    const sets = [];
+    const pool = await getServicesPool();
+    const rq = pool.request().input("tid", sql.UniqueIdentifier, tenantId);
+
+    if (body.enabled !== undefined) {
+      sets.push("enabled = @enabled");
+      rq.input("enabled", sql.Bit, body.enabled ? 1 : 0);
+    }
+    if (body.threshold_credits !== undefined) {
+      const n = Number(body.threshold_credits);
+      if (!Number.isInteger(n) || n <= 0 || n > 100000) {
+        return res.status(400).json({ error: { code: "bad_threshold", message: "threshold_credits must be a positive integer ≤ 100000" } });
+      }
+      sets.push("threshold_credits = @th");
+      rq.input("th", sql.Int, n);
+    }
+    if (body.refill_pack_size !== undefined) {
+      const n = Number(body.refill_pack_size);
+      if (!ALLOWED_PACK_SIZES.has(n)) {
+        return res.status(400).json({ error: { code: "bad_pack_size", message: `refill_pack_size must be one of: ${[...ALLOWED_PACK_SIZES].join(", ")}` } });
+      }
+      sets.push("refill_pack_size = @ps");
+      rq.input("ps", sql.Int, n);
+    }
+    if (body.max_per_month_usd !== undefined) {
+      const n = Number(body.max_per_month_usd);
+      if (!Number.isInteger(n) || n < 0 || n > 100000) {
+        return res.status(400).json({ error: { code: "bad_max", message: "max_per_month_usd must be a non-negative integer ≤ 100000" } });
+      }
+      sets.push("max_per_month_usd = @mx");
+      rq.input("mx", sql.Int, n);
+    }
+
+    if (sets.length === 0) {
+      return res.status(400).json({ error: { code: "no_changes", message: "No writable fields supplied" } });
+    }
+
+    sets.push("updated_at = SYSUTCDATETIME()");
+    sets.push("updated_by = @uid");
+    rq.input("uid", sql.UniqueIdentifier, req.user?.userId || null);
+
+    // Upsert: if no row exists yet, INSERT a defaults row first so the
+    // UPDATE below has something to hit. Avoids a MERGE here for clarity.
+    await pool.request()
+      .input("tid", sql.UniqueIdentifier, tenantId)
+      .query(`IF NOT EXISTS (SELECT 1 FROM lumen.argus_autotopoff_config WHERE tenant_id=@tid)
+                INSERT INTO lumen.argus_autotopoff_config (tenant_id) VALUES (@tid)`);
+
+    await rq.query(`UPDATE lumen.argus_autotopoff_config
+                       SET ${sets.join(", ")}
+                     WHERE tenant_id = @tid`);
+
+    const r = await pool.request()
+      .input("tid", sql.UniqueIdentifier, tenantId)
+      .query(`SELECT enabled, threshold_credits, refill_pack_size, max_per_month_usd,
+                     month_spent_usd, month_period_start, last_charge_at, last_charge_amount_usd
+                FROM lumen.argus_autotopoff_config
+               WHERE tenant_id = @tid`);
+    const row = r.recordset[0];
+
+    res.json({
+      data: {
+        enabled: !!row.enabled,
+        threshold_credits: Number(row.threshold_credits),
+        refill_pack_size: Number(row.refill_pack_size),
+        max_per_month_usd: Number(row.max_per_month_usd),
+        month_spent_usd: Number(row.month_spent_usd),
+        month_period_start: row.month_period_start,
+        last_charge_at: row.last_charge_at,
+        last_charge_amount_usd: row.last_charge_amount_usd == null ? null : Number(row.last_charge_amount_usd),
+      },
+    });
+  } catch (err) {
+    console.error("[argus/auto-topoff:patch]", err);
+    res.status(500).json({ error: { code: "autotopoff_patch_error", message: err.message } });
   }
 });
 
