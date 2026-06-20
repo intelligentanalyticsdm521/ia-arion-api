@@ -154,12 +154,17 @@ router.get('/sites', async (req, res) => {
     // mtime — only flips on admin edits) as "Last updated" while he
     // publishes pages/posts multiple times a week. The IA plugin writes
     // into arion.site_content_change on every WP content event, so
-    // MAX(changed_at) per site is a real freshness signal.
+    // MAX(occurred_at) per site is a real freshness signal.
+    //
+    // Note: column is `occurred_at`, NOT `changed_at` (per migration
+    // 010_plugin_data_flow.sql:208). Prior commit 10d8158 used the
+    // wrong column name; SQL Server returned 'Invalid column name'
+    // which 500'd this handler and broke every ARION page.
     const result = await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .query(`
         SELECT s.*,
-               (SELECT MAX(scc.changed_at)
+               (SELECT MAX(scc.occurred_at)
                   FROM arion.site_content_change scc
                  WHERE scc.site_id = s.site_id) AS last_content_change_at
           FROM arion.site s
