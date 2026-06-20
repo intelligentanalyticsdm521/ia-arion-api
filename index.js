@@ -21,6 +21,7 @@ import onboardingActivateRouter from './routes/onboarding/activate.js';
 import adminOnboardExistingRouter from './routes/admin/onboardExisting.js';
 import provisioningRouter from './routes/provisioning.js';
 import pluginRouter from './routes/plugin.js';
+import argusRouter from './routes/argus.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -112,6 +113,9 @@ app.use('/provisioning', provisioningRouter);
 app.use('/plugin', pluginRouter);
 
 app.use('/arion', requireAuth, tenantResolution, requireArionAccess, arionRouter);
+// ARGUS AI credit endpoints — gated by standard tenant resolution, not
+// product-access (every tenant can see their balance even without ARION).
+app.use('/argus', requireAuth, tenantResolution, argusRouter);
 
 app.use((req, res) => res.status(404).json({ error: 'not_found', method: req.method, path: req.path }));
 
