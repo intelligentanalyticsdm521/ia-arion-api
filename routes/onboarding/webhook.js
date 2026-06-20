@@ -29,6 +29,7 @@ import { sendEmail } from '../../lib/email.js';
 import { welcomeEmail, paymentFailedEmail } from '../../lib/emailTemplates.js';
 import { getPlan } from '../../lib/pricing.js';
 import { getPlatformPool } from '../../db/platformPool.js';
+import { resolveTenantForBuyer } from '../../lib/coreTenants.js';
 
 const router = Router();
 
@@ -158,8 +159,39 @@ async function handleCheckoutCompleted(pool, session) {
       .query(`SELECT TOP 1 site_id FROM arion.site WHERE tenant_id = @tenantId ORDER BY created_at DESC`);
     siteId = siteRow.recordset[0]?.site_id;
   } else {
-    tenantId = crypto.randomUUID();
+    // STRUCTURAL ORPHAN FIX (2026-06-20, multi-agent diagnosis):
+    // Previously this branch did `tenantId = crypto.randomUUID()` blind and
+    // inserted that GUID into arion.tenant — never linking it to
+    // core.tenants in the platform DB. When the buyer later signed into the
+    // Portal, oliver-api `/signup/complete` would mint a DIFFERENT
+    // tenant_id via core.sp_create_tenant. Result: tenantResolution
+    // middleware would resolve req.tenant.tenantId from core.tenants, but
+    // arion.site.tenant_id pointed at the original (orphaned) GUID, so
+    // `GET /arion/sites` returned 0 rows. The dashboard showed "no site
+    // connected" forever.
+    //
+    // Fix: look up an existing core.tenants row by buyer email FIRST. If
+    // one exists, use THAT tenant_id (existing buyer of any IA product —
+    // e.g. an OLIVER customer who later buys ARION). If not, mint a fresh
+    // GUID AND seed a minimal core.tenants row with the same GUID so any
+    // future Portal sign-in / oliver-api intent resolves to the same
+    // tenant. Either way, arion.* and core.tenants share one tenant_id
+    // from the moment of payment.
+    const { tenantId: resolvedTenantId, source } = await resolveTenantForBuyer({
+      email: customerEmail,
+      // No business name at Stripe checkout time — fall back to email; the
+      // questionnaire (or oliver-api /signup/complete) will overwrite
+      // core.tenants.name/full_name with the real business name later.
+      name: session.customer_details?.name || customerEmail,
+      tier: meta.plan || 'starter',
+      product: 'arion',
+      billingCycle: meta.billing_cycle || 'monthly',
+      stripeCustomerId: session.customer || null,
+      stripeSubscriptionId: session.subscription || null,
+    });
+    tenantId = resolvedTenantId;
     siteId = crypto.randomUUID();
+    console.log(`[webhook] core.tenants ${source === 'existing' ? 'reused' : 'seeded'} → tenant=${tenantId} email=${customerEmail}`);
 
     // Create tenant + site rows
     await pool.request()
@@ -170,6 +202,7 @@ async function handleCheckoutCompleted(pool, session) {
       .input('stripeCustomerId', sql.NVarChar(200), session.customer || '')
       .input('stripeSubscriptionId', sql.NVarChar(200), session.subscription || '')
       .query(`
+        IF NOT EXISTS (SELECT 1 FROM arion.tenant WHERE tenant_id = @tenantId)
         INSERT INTO arion.tenant
           (tenant_id, primary_email, [plan], billing_cycle, stripe_customer_id, stripe_subscription_id, status, created_at)
         VALUES
