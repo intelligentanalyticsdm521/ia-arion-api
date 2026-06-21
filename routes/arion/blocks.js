@@ -29,6 +29,8 @@ import { getServicesPool } from '../../db/servicesPool.js';
 import { callEmitter } from '../../lib/websiteBuilder/callEmitter.js';
 import { loadBrandContext, mergeBrandContext } from '../../lib/websiteBuilder/brandContext.js';
 import { hasEmitter, listEmitterKinds } from '../../lib/websiteBuilder/emitterRegistry.js';
+import { assemblePage } from '../../lib/websiteBuilder/pageAssembler.js';
+import { injectPageToWordpress } from '../../lib/websiteBuilder/wpInjector.js';
 
 const router = Router({ mergeParams: true });
 
@@ -282,6 +284,180 @@ router.post('/draft/:blockId/accept', async (req, res) => {
     return res.json({ data: r.recordset[0] });
   } catch (err) {
     return serverErr(res, err, 'arion/sites/blocks:accept');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /arion/sites/:siteId/blocks/assemble  — concatenate drafts into a page
+// ---------------------------------------------------------------------------
+// Body: { pageId?: number, draftBlockIds: string[] }
+//   - draftBlockIds: ordered list of arion.site_block_draft.block_id values
+//     for THIS site. Display order is the array order.
+//   - pageId: WP post ID to update. If absent, the IA Plugin's
+//     POST /pages/elementor endpoint will create a new page (it returns the
+//     new post_id in the response).
+//
+// Behavior:
+//   1. Load all draft rows by ID, verify they all belong to this tenant+site.
+//   2. Load brand context for color injection.
+//   3. assemblePage(orderedBlocks, brand) → elementorData array
+//   4. injectPageToWordpress(site, pageId, elementorData) → POSTs to plugin
+//      (this is a no-op if the plugin endpoint isn't deployed yet — see
+//       followup TODOs in scripts/verify-page-assembler.mjs).
+//   5. Mark each draft accepted=1 + persisted_to_post_id=<pageId> + persisted_at=NOW.
+//
+// Returns: { pageId, elementorEditUrl, blocksInjected, skipped[] }
+router.post('/assemble', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const userId = req.platformUser?.userId || null;
+  const { siteId } = req.params;
+  const body = req.body || {};
+  const pageIdInput = (body.pageId === 0 || body.pageId) ? Number(body.pageId) : null;
+  const ids = Array.isArray(body.draftBlockIds) ? body.draftBlockIds : null;
+
+  if (!tenantId) return badReq(res, 'NO_TENANT', 'Tenant not resolved');
+  if (!siteId)   return badReq(res, 'NO_SITE', 'siteId required');
+  if (!ids || ids.length === 0) return badReq(res, 'NO_DRAFTS', 'draftBlockIds[] required (non-empty)');
+  if (ids.length > 50) return badReq(res, 'TOO_MANY_DRAFTS', 'max 50 drafts per assemble call');
+
+  try {
+    const pool = await getServicesPool();
+    // We need the FULL site row (token, wp_admin_url, etc.) — loadSiteForTenant
+    // returns only a thin projection. Pull the row directly here.
+    const siteRowRes = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId',   sql.UniqueIdentifier, siteId)
+      .query(`SELECT TOP 1 * FROM arion.site
+               WHERE tenant_id = @tenantId AND site_id = @siteId`);
+    const site = siteRowRes.recordset[0];
+    if (!site) return notFound(res, 'Site not found for this tenant');
+
+    // Load every draft in one round-trip via a TVP-equivalent: comma-join the
+    // IDs and use STRING_SPLIT — SQL Server supports this on 2016+ and we're
+    // on Azure SQL which is well past that. Parameterized via @ids NVarChar.
+    const idsCsv = ids.map(String).join(',');
+    const draftRes = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId',   sql.UniqueIdentifier, siteId)
+      .input('ids',      sql.NVarChar(sql.MAX), idsCsv)
+      .query(`
+        SELECT block_id, kind, generated_json, elementor_json, accepted
+          FROM arion.site_block_draft
+         WHERE tenant_id = @tenantId
+           AND site_id   = @siteId
+           AND CAST(block_id AS NVARCHAR(64)) IN (SELECT TRIM(value) FROM STRING_SPLIT(@ids, ','))
+      `);
+    const drafts = draftRes.recordset;
+    // Reorder to match the request order (SQL won't preserve it).
+    const draftById = new Map(drafts.map((d) => [String(d.block_id).toLowerCase(), d]));
+    const ordered = ids.map((id) => draftById.get(String(id).toLowerCase())).filter(Boolean);
+    if (ordered.length !== ids.length) {
+      return badReq(res, 'MISSING_DRAFTS',
+        `Expected ${ids.length} drafts, found ${ordered.length}. Some IDs are wrong tenant/site or don't exist.`);
+    }
+
+    // Brand context drives color injection on the assembled page.
+    const brand = await loadBrandContext(pool, { tenantId, siteId });
+
+    // Pre-parse for assembler.
+    const orderedForAssembler = ordered.map((d) => ({
+      block_id:      d.block_id,
+      kind:          d.kind,
+      block_json:    d.generated_json,
+      elementor_json: d.elementor_json,
+    }));
+
+    const { elementorData, sectionsBuilt, skipped } = assemblePage(orderedForAssembler, brand, {
+      seedPrefix: `site-${siteId}`,
+    });
+
+    if (sectionsBuilt === 0) {
+      return res.status(422).json({
+        error: { code: 'NO_SECTIONS_BUILT', message: 'Assembler produced zero sections', status: 422 },
+        meta: { skipped },
+      });
+    }
+
+    // POST to the IA Plugin. This is where the customer's WP site is hit.
+    // We respect the "don't actually hit a customer WP site" constraint when
+    // ?dryRun=1 is set (verifier / portal preview path).
+    const dryRun = req.query?.dryRun === '1' || req.query?.dryRun === 'true' || body.dryRun === true;
+
+    let injectResult;
+    if (dryRun) {
+      injectResult = {
+        success: true,
+        postId: pageIdInput || null,
+        elementorEditUrl: null,
+        pluginStatus: 'dry_run',
+        dryRun: true,
+      };
+    } else {
+      injectResult = await injectPageToWordpress(site, pageIdInput, elementorData, {
+        title: body.title || null,
+        status: body.status || 'publish',
+        flipToBuilder: true,
+      });
+    }
+
+    if (!injectResult.success) {
+      return res.status(502).json({
+        error: {
+          code: 'WP_INJECTION_FAILED',
+          message: injectResult.error || 'WP plugin rejected the injection',
+          status: 502,
+        },
+        meta: {
+          plugin_status: injectResult.pluginStatus || null,
+          http_status:   injectResult.httpStatus || null,
+          sections_built: sectionsBuilt,
+          skipped,
+        },
+      });
+    }
+
+    const finalPageId = injectResult.postId || pageIdInput || null;
+
+    // Mark drafts accepted + record where they landed. We accept-all even if
+    // some were skipped by the adapter (sectionsBuilt < ordered.length) —
+    // the skipped[] array tells the caller which ones didn't make it.
+    if (finalPageId != null && !dryRun) {
+      await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId',   sql.UniqueIdentifier, siteId)
+        .input('ids',      sql.NVarChar(sql.MAX), idsCsv)
+        .input('userId',   sql.UniqueIdentifier, userId)
+        .input('pageId',   sql.Int,              finalPageId)
+        .query(`
+          UPDATE arion.site_block_draft
+             SET accepted              = 1,
+                 accepted_at           = COALESCE(accepted_at, SYSUTCDATETIME()),
+                 accepted_by           = COALESCE(accepted_by, @userId),
+                 persisted_to_post_id  = @pageId,
+                 persisted_at          = SYSUTCDATETIME()
+           WHERE tenant_id = @tenantId
+             AND site_id   = @siteId
+             AND CAST(block_id AS NVARCHAR(64)) IN (SELECT TRIM(value) FROM STRING_SPLIT(@ids, ','))
+        `);
+    }
+
+    return res.json({
+      data: {
+        pageId:           finalPageId,
+        elementorEditUrl: injectResult.elementorEditUrl || null,
+        blocksInjected:   sectionsBuilt,
+        dryRun:           !!dryRun,
+        skipped,
+      },
+      meta: {
+        tenant_id:    tenantId,
+        site_id:      siteId,
+        plugin_status: injectResult.pluginStatus || null,
+        timestamp:    new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    return serverErr(res, err, 'arion/sites/blocks:assemble');
   }
 });
 
