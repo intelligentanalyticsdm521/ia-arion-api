@@ -211,6 +211,43 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
 
     // 7. Send welcome email (existing-website variant)
     const setupToken = generateSetupToken();
+    // F-SEC1.3: persist SHA-256 hash of the setupToken on arion.site so the
+    // /onboarding/activate endpoint can verify the inbound plaintext token
+    // (it hashes the inbound token and timing-safe-compares against this).
+    // Plaintext setupToken only lives in the welcome email URL below.
+    const setupTokenHash = (await import('node:crypto'))
+      .createHash('sha256').update(setupToken).digest('hex');
+    const setupTokenExpiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
+    try {
+      const existingDetailsRes = await pool.request()
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .query('SELECT provisioning_details_json FROM arion.site WHERE site_id = @siteId');
+      let detailsObj = {};
+      const rawDetails = existingDetailsRes.recordset[0]?.provisioning_details_json;
+      if (rawDetails) {
+        try { detailsObj = JSON.parse(rawDetails) || {}; } catch (_) { detailsObj = {}; }
+      }
+      detailsObj.flow = detailsObj.flow || 'existing_website_admin_onboard';
+      detailsObj.provision_code = provisionCode;
+      detailsObj.tier = tier;
+      detailsObj.ia_plugin_download_url = pluginDownloadUrl;
+      detailsObj.welcome_token = setupTokenHash;
+      detailsObj.welcome_token_expires_at = setupTokenExpiresAt;
+      detailsObj.welcome_token_used_at = null;
+      await pool.request()
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .input('details', sql.NVarChar(sql.MAX), JSON.stringify(detailsObj))
+        .query(`
+          UPDATE arion.site
+          SET provisioning_details_json = @details,
+              updated_at = SYSDATETIMEOFFSET()
+          WHERE site_id = @siteId
+        `);
+      push('welcome_token', 'persisted', `Hashed setup token + 72h expiry stored on site ${siteId}`);
+    } catch (tokenErr) {
+      push('welcome_token', 'failed', (tokenErr.message || '').slice(0, 200));
+      console.error('[admin/onboard-existing] persist welcome_token failed:', tokenErr);
+    }
     let emailResult;
     try {
       emailResult = await sendOnboardingWelcomeEmail({
