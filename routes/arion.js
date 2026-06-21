@@ -38,6 +38,7 @@ import gbpRouter from './arion/gbp.js';
 import integrationsRouter from './arion/integrations.js';
 import domainsRouter from './arion/domains.js';
 import pluginRouter from './arion/plugin.js';
+import blocksRouter from './arion/blocks.js';
 
 const router = Router();
 
@@ -47,6 +48,9 @@ router.use('/sites/:siteId/bookings', bookingsRouter);
 router.use('/sites/:siteId/gbp', gbpRouter);
 router.use('/sites/:siteId', integrationsRouter);
 router.use('/sites/:siteId/domain', domainsRouter);
+// ARION IL Website Builder — block-emitter generation + draft persistence.
+// See lib/websiteBuilder/ + db/migrations/024_ai_website_builder.sql.
+router.use('/sites/:siteId/blocks', blocksRouter);
 
 // Cross-product plugin proxy — used by LUMEN-API for newsletter publishing.
 router.use('/plugin', pluginRouter);
