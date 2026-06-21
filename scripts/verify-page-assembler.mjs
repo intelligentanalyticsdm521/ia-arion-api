@@ -157,7 +157,7 @@ else bad(`IDs drifted: ${ids1} vs ${ids2}`);
 section('Skipped tracker');
 const mixed = [
   mockDraft('11111111-1111-1111-1111-111111111111', 'hero', heroBlock),
-  { kind: 'cta', block_json: '{"invalid":"shape"}' },                // unknown kind
+  { kind: 'definitely-not-a-real-kind', block_json: '{"x":1}' },       // unknown kind
   { /* no kind */ block_json: '{}' },                                 // missing kind
   null,                                                               // falsy
   { kind: 'services', block_json: 'not-json' },                       // bad JSON
