@@ -733,7 +733,14 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       skipped:       (p.skipped || []).length,
       emitter_ok:    (p.emitterResults || []).filter((r) => r.ok).length,
       emitter_fail:  (p.emitterResults || []).filter((r) => !r.ok).length,
+      library_hits:  (p.sectionsUsed || []).length,
     }));
+    // Flatten library hits across pages for attribution + telemetry. Per
+    // claude-code-handoff-section-library.md §4: blueprint_id is the stable
+    // handle; we surface every one used in this build so the Portal can
+    // render a "built from N curated sections" breakdown and analytics
+    // can measure library coverage vs scratch-emit fallback.
+    const sectionsUsedAll = pages.flatMap((p) => Array.isArray(p.sectionsUsed) ? p.sectionsUsed : []);
     const provisioningDetails = {
       wp_admin_login: adminLogin,
       wp_admin_email: adminEmail,
@@ -755,6 +762,7 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       pages_built:            pages.length,
       pages_summary:          pageSummary,
       pages_published:        publishResults,
+      sections_used:          sectionsUsedAll,
       front_page_set:         frontPageResult.ok === true,
       front_page_source:      frontPageResult.source || null,
       front_page_error:       frontPageResult.ok ? null : (frontPageResult.error || null),
