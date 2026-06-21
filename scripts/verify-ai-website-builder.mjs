@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * Verification script for the ARION IL website builder (Phase 1).
+ * Verification script for the ARION IL website builder (Phase 1 + 2).
  * --------------------------------------------------------------------------
  * Checks:
- *   1. emitterRegistry has hero + services registered
+ *   1. emitterRegistry has hero + services + testimonials + cta + about + faq registered
  *   2. Each emitter's example output passes its own validator
  *   3. elementorAdapter produces a non-null section for each kind
  *   4. anthropicClient correctly strips markdown fences + JSON-parses
@@ -11,7 +11,8 @@
  *   5. If ANTHROPIC_API_KEY (env or KV) is reachable:
  *        - call hero emitter end-to-end against mock brand → assert valid output
  *        - call services emitter end-to-end → assert valid output
- *        - if SQL pool reachable, assert a row was written to lumen.ai_usage
+ *        - call testimonials / cta / about / faq emitters end-to-end → assert valid
+ *        - if SQL pool reachable, assert rows were written to lumen.ai_usage
  *      Otherwise: skip with a clear "would have called live" message.
  *
  * Usage:
@@ -72,7 +73,7 @@ const MOCK_BRAND = {
 // 1. Registry
 // ---------------------------------------------------------------------------
 section('Registry');
-const expectedKinds = ['hero', 'services'];
+const expectedKinds = ['hero', 'services', 'testimonials', 'cta', 'about', 'faq'];
 const registered = listEmitterKinds();
 console.log(`  registered: ${registered.join(', ')}`);
 for (const k of expectedKinds) {
@@ -230,7 +231,122 @@ if (skipLive) {
       }
     }
 
-    // 5c. Token-logging assertion
+    // 5c. Testimonials
+    console.log('\n  testimonials emitter...');
+    const tstRes = await callEmitter({
+      kind: 'testimonials',
+      brand: MOCK_BRAND,
+      sectionContext: {},
+      tenantId: MOCK_BRAND.tenant_id,
+      siteId: MOCK_BRAND.site_id,
+      pool,
+    });
+    if (!tstRes.ok) {
+      bad(`testimonials: ${tstRes.error?.code} — ${tstRes.error?.message?.slice(0, 200)}`);
+    } else {
+      ok(`testimonials: ${tstRes.tokens.total} tokens, ${tstRes.latencyMs}ms, cost=$${tstRes.costUsd}`);
+      const b = tstRes.block;
+      if (b.headline && Array.isArray(b.testimonials) && b.testimonials.length >= 3 && b.testimonials.length <= 5) {
+        ok(`testimonials: headline + ${b.testimonials.length} testimonial(s)`);
+      } else {
+        bad(`testimonials: malformed — count=${Array.isArray(b.testimonials) ? b.testimonials.length : 'n/a'}`);
+      }
+      if (tstRes.elementor?.elType === 'section') ok('testimonials: elementor section produced');
+      else bad('testimonials: elementor section missing');
+      console.log(`    headline: "${b.headline}"`);
+      for (const t of b.testimonials.slice(0, 2)) {
+        console.log(`    • "${(t.quote || '').slice(0, 80)}..." — ${t.attribution}`);
+      }
+    }
+
+    // 5d. CTA
+    console.log('\n  cta emitter...');
+    const ctaRes = await callEmitter({
+      kind: 'cta',
+      brand: MOCK_BRAND,
+      sectionContext: { primary_cta_href: '/contact' },
+      tenantId: MOCK_BRAND.tenant_id,
+      siteId: MOCK_BRAND.site_id,
+      pool,
+    });
+    if (!ctaRes.ok) {
+      bad(`cta: ${ctaRes.error?.code} — ${ctaRes.error?.message?.slice(0, 200)}`);
+    } else {
+      ok(`cta: ${ctaRes.tokens.total} tokens, ${ctaRes.latencyMs}ms, cost=$${ctaRes.costUsd}`);
+      const b = ctaRes.block;
+      if (b.headline && b.primary_cta_text && b.primary_cta_href && b.background_style) {
+        ok('cta: required fields present');
+      } else {
+        bad(`cta: missing field(s) — keys=${Object.keys(b).join(',')}`);
+      }
+      if (ctaRes.elementor?.elType === 'section') ok('cta: elementor section produced');
+      else bad('cta: elementor section missing');
+      console.log(`    headline: "${b.headline}"`);
+      console.log(`    primary:  "${b.primary_cta_text}" → ${b.primary_cta_href}`);
+      if (b.secondary_cta_text) console.log(`    secondary: "${b.secondary_cta_text}" → ${b.secondary_cta_href}`);
+    }
+
+    // 5e. About
+    console.log('\n  about emitter...');
+    const abtRes = await callEmitter({
+      kind: 'about',
+      brand: MOCK_BRAND,
+      sectionContext: { origin_notes: 'Founded by Cedar Rapids native after a decade running overnight crews at the largest food plant in Iowa.' },
+      tenantId: MOCK_BRAND.tenant_id,
+      siteId: MOCK_BRAND.site_id,
+      pool,
+    });
+    if (!abtRes.ok) {
+      bad(`about: ${abtRes.error?.code} — ${abtRes.error?.message?.slice(0, 200)}`);
+    } else {
+      ok(`about: ${abtRes.tokens.total} tokens, ${abtRes.latencyMs}ms, cost=$${abtRes.costUsd}`);
+      const b = abtRes.block;
+      const paraCountOk = Array.isArray(b.story_paragraphs) && b.story_paragraphs.length >= 3 && b.story_paragraphs.length <= 4;
+      const valuesCountOk = Array.isArray(b.values) && b.values.length >= 3 && b.values.length <= 5;
+      if (b.headline && paraCountOk && valuesCountOk && b.image_alt) {
+        ok(`about: ${b.story_paragraphs.length} paragraph(s) + ${b.values.length} value(s)`);
+      } else {
+        bad(`about: malformed — paras=${Array.isArray(b.story_paragraphs) ? b.story_paragraphs.length : 'n/a'}, values=${Array.isArray(b.values) ? b.values.length : 'n/a'}`);
+      }
+      if (abtRes.elementor?.elType === 'section') ok('about: elementor section produced');
+      else bad('about: elementor section missing');
+      console.log(`    headline: "${b.headline}"`);
+      console.log(`    para[0]:  "${(b.story_paragraphs[0] || '').slice(0, 100)}..."`);
+      for (const v of b.values.slice(0, 3)) {
+        console.log(`    • ${v.title}`);
+      }
+    }
+
+    // 5f. FAQ
+    console.log('\n  faq emitter...');
+    const faqRes = await callEmitter({
+      kind: 'faq',
+      brand: MOCK_BRAND,
+      sectionContext: {},
+      tenantId: MOCK_BRAND.tenant_id,
+      siteId: MOCK_BRAND.site_id,
+      pool,
+    });
+    if (!faqRes.ok) {
+      bad(`faq: ${faqRes.error?.code} — ${faqRes.error?.message?.slice(0, 200)}`);
+    } else {
+      ok(`faq: ${faqRes.tokens.total} tokens, ${faqRes.latencyMs}ms, cost=$${faqRes.costUsd}`);
+      const b = faqRes.block;
+      const countOk = Array.isArray(b.faqs) && b.faqs.length >= 6 && b.faqs.length <= 8;
+      if (b.headline && countOk) {
+        ok(`faq: headline + ${b.faqs.length} faq(s)`);
+      } else {
+        bad(`faq: malformed — count=${Array.isArray(b.faqs) ? b.faqs.length : 'n/a'}`);
+      }
+      if (faqRes.elementor?.elType === 'section') ok('faq: elementor section produced');
+      else bad('faq: elementor section missing');
+      console.log(`    headline: "${b.headline}"`);
+      for (const q of b.faqs.slice(0, 3)) {
+        console.log(`    Q: ${q.question}`);
+      }
+    }
+
+    // 5g. Token-logging assertion (expect at least 6 rows: hero, services, testimonials, cta, about, faq)
     if (pool) {
       console.log('\n  token logging...');
       try {
@@ -238,19 +354,19 @@ if (skipLive) {
         const r = await pool.request()
           .input('tid', sqlMod.default.UniqueIdentifier, MOCK_BRAND.tenant_id)
           .query(`
-            SELECT TOP 5 surface, sub_kind, model_id, input_tokens, output_tokens, ok, occurred_at
+            SELECT TOP 10 surface, sub_kind, model_id, input_tokens, output_tokens, ok, occurred_at
               FROM lumen.ai_usage
              WHERE tenant_id = @tid
                AND surface = 'arion.website_builder'
              ORDER BY occurred_at DESC
           `);
-        if (r.recordset.length >= 2) {
+        if (r.recordset.length >= 6) {
           ok(`lumen.ai_usage: ${r.recordset.length} recent rows for mock tenant`);
           for (const row of r.recordset) {
             console.log(`    ${row.occurred_at?.toISOString?.() || row.occurred_at} ${row.sub_kind} model=${row.model_id} in=${row.input_tokens} out=${row.output_tokens} ok=${row.ok}`);
           }
         } else {
-          bad(`lumen.ai_usage: expected >=2 rows, found ${r.recordset.length}`);
+          bad(`lumen.ai_usage: expected >=6 rows, found ${r.recordset.length}`);
         }
       } catch (e) {
         bad(`lumen.ai_usage query failed: ${e.message.slice(0, 200)}`);
