@@ -2,6 +2,11 @@ import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../db/servicesPool.js';
 import { getPlatformPool } from '../db/platformPool.js';
+// Onboarding V3 Phase 3 (Batch 14+) — close the "Connect your Google Business
+// Profile" walkthrough task once the OAuth callback completes the GBP listing
+// sync. Cross-product HTTP call to LUMEN-API; failure NEVER breaks the
+// callback redirect (fire-and-forget).
+import { completeWalkthroughTaskByKindFor } from '../lib/walkthroughClient.js';
 
 const router = Router();
 
@@ -225,6 +230,15 @@ router.get('/google/callback', async (req, res) => {
             console.log(`[oauth/google/callback] GBP multi-location sync: added=${syncResult.added} updated=${syncResult.updated} removed=${syncResult.removed} total=${syncResult.total}`);
           }
         } catch (e) { console.warn('[oauth/google/callback] GBP multi-location sync failed:', e.message); }
+
+        // Walkthrough hook (Batch 14+) — close the "Connect your Google
+        // Business Profile" task now that the OAuth callback has both
+        // stored credentials AND attempted location discovery. The OAuth
+        // callback is unauthenticated (no inbound bearer), so this call
+        // may 401 against the LUMEN-API endpoint today; the helper
+        // silently swallows the failure. Follow-up: add an internal
+        // service-token path so this fires reliably.
+        completeWalkthroughTaskByKindFor(tenantId, 'connect_gbp').catch(() => {});
 
         // GA4 — auto-pick if single property or domain match
         try {
