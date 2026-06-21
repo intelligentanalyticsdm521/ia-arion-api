@@ -3,7 +3,8 @@
  * Verification script for the ARION IL website builder (Phase 1 + 2).
  * --------------------------------------------------------------------------
  * Checks:
- *   1. emitterRegistry has hero + services + testimonials + cta + about + faq registered
+ *   1. emitterRegistry has hero + services + testimonials + cta + about + faq
+ *      + gallery + contact registered (8/8 — full Phase 1 set)
  *   2. Each emitter's example output passes its own validator
  *   3. elementorAdapter produces a non-null section for each kind
  *   4. anthropicClient correctly strips markdown fences + JSON-parses
@@ -11,8 +12,9 @@
  *   5. If ANTHROPIC_API_KEY (env or KV) is reachable:
  *        - call hero emitter end-to-end against mock brand → assert valid output
  *        - call services emitter end-to-end → assert valid output
- *        - call testimonials / cta / about / faq emitters end-to-end → assert valid
- *        - if SQL pool reachable, assert rows were written to lumen.ai_usage
+ *        - call testimonials / cta / about / faq / gallery / contact emitters
+ *          end-to-end → assert valid
+ *        - if SQL pool reachable, assert >=8 rows were written to lumen.ai_usage
  *      Otherwise: skip with a clear "would have called live" message.
  *
  * Usage:
@@ -73,7 +75,7 @@ const MOCK_BRAND = {
 // 1. Registry
 // ---------------------------------------------------------------------------
 section('Registry');
-const expectedKinds = ['hero', 'services', 'testimonials', 'cta', 'about', 'faq'];
+const expectedKinds = ['hero', 'services', 'testimonials', 'cta', 'about', 'faq', 'gallery', 'contact'];
 const registered = listEmitterKinds();
 console.log(`  registered: ${registered.join(', ')}`);
 for (const k of expectedKinds) {
@@ -346,7 +348,67 @@ if (skipLive) {
       }
     }
 
-    // 5g. Token-logging assertion (expect at least 6 rows: hero, services, testimonials, cta, about, faq)
+    // 5g. Gallery
+    console.log('\n  gallery emitter...');
+    const galRes = await callEmitter({
+      kind: 'gallery',
+      brand: MOCK_BRAND,
+      sectionContext: {},
+      tenantId: MOCK_BRAND.tenant_id,
+      siteId: MOCK_BRAND.site_id,
+      pool,
+    });
+    if (!galRes.ok) {
+      bad(`gallery: ${galRes.error?.code} — ${galRes.error?.message?.slice(0, 200)}`);
+    } else {
+      ok(`gallery: ${galRes.tokens.total} tokens, ${galRes.latencyMs}ms, cost=$${galRes.costUsd}`);
+      const b = galRes.block;
+      const countOk = Array.isArray(b.images) && b.images.length >= 6 && b.images.length <= 12;
+      if (b.headline && countOk) {
+        ok(`gallery: headline + ${b.images.length} image(s)`);
+      } else {
+        bad(`gallery: malformed — count=${Array.isArray(b.images) ? b.images.length : 'n/a'}`);
+      }
+      if (galRes.elementor?.elType === 'section') ok('gallery: elementor section produced');
+      else bad('gallery: elementor section missing');
+      console.log(`    headline: "${b.headline}"`);
+      for (const img of b.images.slice(0, 3)) {
+        console.log(`    • ${img.url}  (alt: "${(img.alt || '').slice(0, 60)}")`);
+      }
+    }
+
+    // 5h. Contact
+    console.log('\n  contact emitter...');
+    const ctcRes = await callEmitter({
+      kind: 'contact',
+      brand: { ...MOCK_BRAND, phone: '(319) 555-0142', email: 'quotes@cedarridgeplant.com', address: '115 16th Ave SW, Cedar Rapids, IA' },
+      sectionContext: {},
+      tenantId: MOCK_BRAND.tenant_id,
+      siteId: MOCK_BRAND.site_id,
+      pool,
+    });
+    if (!ctcRes.ok) {
+      bad(`contact: ${ctcRes.error?.code} — ${ctcRes.error?.message?.slice(0, 200)}`);
+    } else {
+      ok(`contact: ${ctcRes.tokens.total} tokens, ${ctcRes.latencyMs}ms, cost=$${ctcRes.costUsd}`);
+      const b = ctcRes.block;
+      const methodsOk = Array.isArray(b.contact_methods) && b.contact_methods.length >= 1 && b.contact_methods.length <= 6;
+      const fieldsOk  = b.form_config && Array.isArray(b.form_config.fields) && b.form_config.fields.length >= 1 && b.form_config.fields.length <= 8;
+      if (b.headline && methodsOk && fieldsOk && b.form_config.submit_text) {
+        ok(`contact: ${b.contact_methods.length} method(s) + ${b.form_config.fields.length} form field(s)`);
+      } else {
+        bad(`contact: malformed — methods=${Array.isArray(b.contact_methods) ? b.contact_methods.length : 'n/a'}, fields=${b.form_config && Array.isArray(b.form_config.fields) ? b.form_config.fields.length : 'n/a'}`);
+      }
+      if (ctcRes.elementor?.elType === 'section') ok('contact: elementor section produced');
+      else bad('contact: elementor section missing');
+      console.log(`    headline: "${b.headline}"`);
+      for (const m of b.contact_methods.slice(0, 3)) {
+        console.log(`    • [${m.kind}] ${m.label}: ${m.value} → ${m.href}`);
+      }
+      console.log(`    form:     [${b.form_config.fields.join(', ')}]  submit="${b.form_config.submit_text}"`);
+    }
+
+    // 5i. Token-logging assertion (expect at least 8 rows: hero, services, testimonials, cta, about, faq, gallery, contact)
     if (pool) {
       console.log('\n  token logging...');
       try {
@@ -354,19 +416,19 @@ if (skipLive) {
         const r = await pool.request()
           .input('tid', sqlMod.default.UniqueIdentifier, MOCK_BRAND.tenant_id)
           .query(`
-            SELECT TOP 10 surface, sub_kind, model_id, input_tokens, output_tokens, ok, occurred_at
+            SELECT TOP 12 surface, sub_kind, model_id, input_tokens, output_tokens, ok, occurred_at
               FROM lumen.ai_usage
              WHERE tenant_id = @tid
                AND surface = 'arion.website_builder'
              ORDER BY occurred_at DESC
           `);
-        if (r.recordset.length >= 6) {
+        if (r.recordset.length >= 8) {
           ok(`lumen.ai_usage: ${r.recordset.length} recent rows for mock tenant`);
           for (const row of r.recordset) {
             console.log(`    ${row.occurred_at?.toISOString?.() || row.occurred_at} ${row.sub_kind} model=${row.model_id} in=${row.input_tokens} out=${row.output_tokens} ok=${row.ok}`);
           }
         } else {
-          bad(`lumen.ai_usage: expected >=6 rows, found ${r.recordset.length}`);
+          bad(`lumen.ai_usage: expected >=8 rows, found ${r.recordset.length}`);
         }
       } catch (e) {
         bad(`lumen.ai_usage query failed: ${e.message.slice(0, 200)}`);
