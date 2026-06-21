@@ -29,7 +29,7 @@ import { getServicesPool } from '../../db/servicesPool.js';
 import { callEmitter } from '../../lib/websiteBuilder/callEmitter.js';
 import { loadBrandContext, mergeBrandContext } from '../../lib/websiteBuilder/brandContext.js';
 import { hasEmitter, listEmitterKinds } from '../../lib/websiteBuilder/emitterRegistry.js';
-import { assemblePage } from '../../lib/websiteBuilder/pageAssembler.js';
+import { assemblePage, assemblePageWithMedia } from '../../lib/websiteBuilder/pageAssembler.js';
 import { injectPageToWordpress } from '../../lib/websiteBuilder/wpInjector.js';
 
 const router = Router({ mergeParams: true });
@@ -379,21 +379,42 @@ router.post('/assemble', async (req, res) => {
       elementor_json: d.elementor_json,
     }));
 
-    const { elementorData, sectionsBuilt, skipped } = assemblePage(orderedForAssembler, brand, {
-      seedPrefix: `site-${siteId}`,
-    });
+    // Dry-run skips BOTH the media upload pass and the page injection — useful
+    // for previews / portal "what would this look like" calls.
+    const dryRun = req.query?.dryRun === '1' || req.query?.dryRun === 'true' || body.dryRun === true;
+
+    // Build the elementor_data tree. On a real run we ALSO upload every
+    // gallery placeholder image to the customer's WP media library and swap
+    // the URLs in place (assemblePageWithMedia). Dry-run sticks to the pure
+    // sync assembler — no HTTP, placeholder URLs survive in the response.
+    let elementorData;
+    let sectionsBuilt;
+    let skipped;
+    let mediaResult = { uploaded: 0, reused: 0, failed: [], skipped: [] };
+    if (dryRun) {
+      const pure = assemblePage(orderedForAssembler, brand, { seedPrefix: `site-${siteId}` });
+      elementorData = pure.elementorData;
+      sectionsBuilt = pure.sectionsBuilt;
+      skipped       = pure.skipped;
+    } else {
+      const withMedia = await assemblePageWithMedia(site, orderedForAssembler, brand, {
+        seedPrefix:    `site-${siteId}`,
+        // Default sequential per-site for politeness; small concurrency keeps
+        // 12-image galleries fast without hammering the customer host.
+        maxConcurrent: 2,
+      });
+      elementorData = withMedia.elementorData;
+      sectionsBuilt = withMedia.sectionsBuilt;
+      skipped       = withMedia.skipped;
+      mediaResult   = withMedia.media;
+    }
 
     if (sectionsBuilt === 0) {
       return res.status(422).json({
         error: { code: 'NO_SECTIONS_BUILT', message: 'Assembler produced zero sections', status: 422 },
-        meta: { skipped },
+        meta: { skipped, media: mediaResult },
       });
     }
-
-    // POST to the IA Plugin. This is where the customer's WP site is hit.
-    // We respect the "don't actually hit a customer WP site" constraint when
-    // ?dryRun=1 is set (verifier / portal preview path).
-    const dryRun = req.query?.dryRun === '1' || req.query?.dryRun === 'true' || body.dryRun === true;
 
     let injectResult;
     if (dryRun) {
@@ -460,6 +481,7 @@ router.post('/assemble', async (req, res) => {
         blocksInjected:   sectionsBuilt,
         dryRun:           !!dryRun,
         skipped,
+        media: mediaResult,
       },
       meta: {
         tenant_id:    tenantId,
