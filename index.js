@@ -23,6 +23,7 @@ import adminOnboardExistingRouter from './routes/admin/onboardExisting.js';
 import provisioningRouter from './routes/provisioning.js';
 import pluginRouter from './routes/plugin.js';
 import argusRouter from './routes/argus.js';
+import intelligenceRouter from './routes/intelligence.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -124,6 +125,11 @@ app.use('/arion', requireAuth, enforceEmergencyReadOnly(), tenantResolution, req
 // ARGUS AI credit endpoints — gated by standard tenant resolution, not
 // product-access (every tenant can see their balance even without ARION).
 app.use('/argus', requireAuth, enforceEmergencyReadOnly(), tenantResolution, argusRouter);
+
+// Brandon 2026-06-21 — ARION Platform Pulse (Trend+Intel)/2 per the canonical
+// equal-weight architecture. Read by platform-api to compose Business Pulse.
+// Requires ARION access since the cache lives in arion.platform_pulse_cache.
+app.use('/intelligence', requireAuth, enforceEmergencyReadOnly(), tenantResolution, requireArionAccess, intelligenceRouter);
 
 app.use((req, res) => res.status(404).json({ error: 'not_found', method: req.method, path: req.path }));
 

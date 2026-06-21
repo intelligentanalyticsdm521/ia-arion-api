@@ -39,6 +39,7 @@ import integrationsRouter from './arion/integrations.js';
 import domainsRouter from './arion/domains.js';
 import pluginRouter from './arion/plugin.js';
 import blocksRouter from './arion/blocks.js';
+import intelligenceRouter from './arion/intelligence.js';
 import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } from '../lib/websiteBuilder/costGuard.js';
 
 const router = Router();
@@ -52,6 +53,13 @@ router.use('/sites/:siteId/domain', domainsRouter);
 // ARION IL Website Builder — block-emitter generation + draft persistence.
 // See lib/websiteBuilder/ + db/migrations/024_ai_website_builder.sql.
 router.use('/sites/:siteId/blocks', blocksRouter);
+
+// ARION Intelligence — 6 single-source reports + cached aggregator.
+// See lib/intelligence/ + db/migrations/031_intelligence_cache.sql.
+// Feeds the Intelligence Score side of Platform Pulse (the Platform Pulse
+// itself + cross-tenant readout live in routes/intelligence.js + the
+// platform_pulse_cache migration).
+router.use('/sites/:siteId/intelligence', intelligenceRouter);
 
 // Cross-product plugin proxy — used by LUMEN-API for newsletter publishing.
 router.use('/plugin', pluginRouter);
