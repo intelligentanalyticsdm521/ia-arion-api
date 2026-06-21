@@ -60,8 +60,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   BlobServiceClient,
+  StorageSharedKeyCredential,
 } from '@azure/storage-blob';
 import { AzureCliCredential } from '@azure/identity';
+import { SecretClient } from '@azure/keyvault-secrets';
 import sql from 'mssql';
 
 const SOURCE_DEFAULT = 'C:/Users/brand/Downloads/iadm-section-library.json';
@@ -333,15 +335,52 @@ async function main() {
   // ─── APPLY mode: blob + SQL ───────────────────────────────────────────────
   const credential = new AzureCliCredential();
 
-  // Blob client — token-credential path (RBAC), not account key. The signed-in
-  // principal needs "Storage Blob Data Contributor" on stiadmprod.
-  // We validate the token by acquiring it explicitly before any write so the
-  // failure mode (missing role) surfaces with a clear message.
-  await credential.getToken(STORAGE_SCOPE);
-  const blobSvc = new BlobServiceClient(
-    `https://${STORAGE_ACCOUNT}.blob.core.windows.net`,
-    credential,
-  );
+  // Blob auth — two paths, per `lib/azureBlob.js` precedent (the
+  // arion-api MI lacks Storage Blob Data RBAC because granting it requires
+  // Owner on the subscription; the account-key path sidesteps that).
+  //
+  //   Path A — Storage account key (preferred for local + pipeline runs)
+  //            Picks up STIADMPROD_ACCOUNT_KEY env, or falls back to
+  //            kv-iadm-prod secret STIADMPROD-ACCOUNT-KEY.
+  //   Path B — Token credential (RBAC). Requires "Storage Blob Data
+  //            Contributor" on stiadmprod for the signed-in principal.
+  //
+  // Path A is selected automatically when an account key is available; Path B
+  // is the fallback so this script keeps working in environments where the
+  // key isn't reachable (e.g. dev tenants without KV access).
+  let blobSvc;
+  let blobAuthSource;
+  const envKey = process.env.STIADMPROD_ACCOUNT_KEY;
+  let accountKey = (envKey && envKey.length > 30 && !envKey.startsWith('@Microsoft.KeyVault'))
+    ? envKey : null;
+  if (!accountKey) {
+    // Try KV. The signed-in principal needs "Key Vault Secrets User" on
+    // kv-iadm-prod; if it doesn't, fall through to RBAC.
+    try {
+      const kvUri = process.env.KEY_VAULT_URI || 'https://kv-iadm-prod.vault.azure.net/';
+      const kv = new SecretClient(kvUri, credential);
+      const secret = await kv.getSecret('STIADMPROD-ACCOUNT-KEY');
+      if (secret?.value && secret.value.length > 30) accountKey = secret.value;
+    } catch (e) {
+      console.warn(`[upload-section-library] KV fetch of STIADMPROD-ACCOUNT-KEY failed (non-fatal, will try RBAC): ${e?.message?.slice(0, 200)}`);
+    }
+  }
+  if (accountKey) {
+    const sharedKeyCred = new StorageSharedKeyCredential(STORAGE_ACCOUNT, accountKey);
+    blobSvc = new BlobServiceClient(
+      `https://${STORAGE_ACCOUNT}.blob.core.windows.net`,
+      sharedKeyCred,
+    );
+    blobAuthSource = 'shared_key';
+  } else {
+    await credential.getToken(STORAGE_SCOPE);
+    blobSvc = new BlobServiceClient(
+      `https://${STORAGE_ACCOUNT}.blob.core.windows.net`,
+      credential,
+    );
+    blobAuthSource = 'rbac_token';
+  }
+  console.log(`[upload-section-library] blob auth: ${blobAuthSource}`);
   const containerClient = blobSvc.getContainerClient(CONTAINER_NAME);
   console.log(`[upload-section-library] ensuring container ${CONTAINER_NAME} exists`);
   await ensureContainer(containerClient);
