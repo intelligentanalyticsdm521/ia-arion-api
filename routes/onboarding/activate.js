@@ -22,12 +22,24 @@
  */
 
 import { Router } from 'express';
+import crypto from 'node:crypto';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
 import { getPlatformPool } from '../../db/platformPool.js';
+import { checkRate, getClientIp } from '../../lib/rateLimiter.js';
 
 const PORTAL_BASE = (process.env.PORTAL_BASE_URL
   || 'https://portal.intelligentanalyticsdm.com').replace(/\/+$/, '');
+
+// F-SEC2.1 (2026-06-21): rate-limit /onboarding/activate to 5 req/min per IP
+// AND per email (whichever cap hits first → 429). Activate is a public,
+// unauthenticated endpoint that takes (email, setup_token, tenant_id) — the
+// natural enumeration / brute-force surface. Caps here mean a single attacker
+// IP can probe at most 5 emails per minute, and a single targeted email can
+// be probed at most 5 times per minute across any number of IPs. Restart
+// resets the window (in-memory) — acceptable for V1 per Brandon.
+const ACTIVATE_WINDOW_SEC = 60;
+const ACTIVATE_MAX_HITS   = 5;
 
 const router = Router();
 
@@ -37,6 +49,23 @@ router.post('/', async (req, res) => {
     return res.status(400).json({
       error: { code: 'VALIDATION_ERROR', message: 'email, setup_token, tenant_id required' },
     });
+  }
+
+  // F-SEC2.1 — rate-limit BEFORE any DB lookup. Check IP first, then email.
+  // Both caps share the same window/limit; whichever trips first denies. The
+  // 429 response shape is identical whether the email exists or not, so this
+  // does NOT leak existence (the email-keyed bucket starts empty either way).
+  const ip = getClientIp(req);
+  const lowerEmail = String(email || '').toLowerCase().trim();
+  const ipCheck = checkRate({ key: 'ip:' + ip, windowSec: ACTIVATE_WINDOW_SEC, maxHits: ACTIVATE_MAX_HITS });
+  if (!ipCheck.ok) {
+    res.set('Retry-After', String(ipCheck.retryAfter));
+    return res.status(429).json({ error: 'rate_limited', retry_after_seconds: ipCheck.retryAfter });
+  }
+  const emailCheck = checkRate({ key: 'email:' + lowerEmail, windowSec: ACTIVATE_WINDOW_SEC, maxHits: ACTIVATE_MAX_HITS });
+  if (!emailCheck.ok) {
+    res.set('Retry-After', String(emailCheck.retryAfter));
+    return res.status(429).json({ error: 'rate_limited', retry_after_seconds: emailCheck.retryAfter });
   }
 
   try {
