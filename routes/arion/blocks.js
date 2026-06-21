@@ -105,13 +105,15 @@ router.post('/:kind', async (req, res) => {
     });
 
     if (!result.ok) {
-      // Audit row was already written by callEmitter — surface error to client.
+      // Audit row was already written by callEmitter (except for cap_exceeded
+      // — no provider call happened). Surface error to client.
       const code = result.error?.code || 'EMITTER_FAILED';
-      const httpStatus = code === 'unknown_kind' ? 404
+      const httpStatus = code === 'cap_exceeded' ? 402  // Payment Required — tenant over $ cap
+                       : code === 'unknown_kind' ? 404
                        : code === 'invalid_json' || code === 'shape_error' || code.startsWith('missing_') ? 422
                        : code.startsWith('http_4') ? 502
                        : 500;
-      return res.status(httpStatus).json({
+      const errBody = {
         error: {
           code: code.toUpperCase(),
           message: result.error?.message || 'Block generation failed',
@@ -122,7 +124,17 @@ router.post('/:kind', async (req, res) => {
           latency_ms: result.latencyMs || null,
           model_id: result.model || null,
         },
-      });
+      };
+      // For cap_exceeded, attach the spend/cap breakdown so the portal can
+      // render "You've used $X of $Y this month" without a follow-up call.
+      if (code === 'cap_exceeded') {
+        errBody.error.cap = result.error.cap;
+        errBody.error.spent = result.error.spent;
+        errBody.error.remaining = result.error.remaining;
+        errBody.error.scope = result.error.scope;
+        errBody.error.source = result.error.source;
+      }
+      return res.status(httpStatus).json(errBody);
     }
 
     // 3. Persist as draft.

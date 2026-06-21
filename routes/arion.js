@@ -39,6 +39,7 @@ import integrationsRouter from './arion/integrations.js';
 import domainsRouter from './arion/domains.js';
 import pluginRouter from './arion/plugin.js';
 import blocksRouter from './arion/blocks.js';
+import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } from '../lib/websiteBuilder/costGuard.js';
 
 const router = Router();
 
@@ -223,6 +224,162 @@ router.get('/sites/:siteId/admin-link', async (req, res) => {
     res.json({ data: { admin_url: adminUrl }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
   } catch (err) {
     console.error('[arion/sites/admin-link]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// ─── AI Website Builder per-tenant spend cap admin ────────────────────────
+// Founder-only. Configures lumen.ai_cap_config — the $-based safety floor
+// that costGuard.js enforces in callEmitter.js BEFORE every Anthropic call.
+// See db/migrations/026_ai_cap_config.sql and lib/websiteBuilder/costGuard.js.
+//
+// Routes:
+//   GET   /arion/sites/:siteId/ai-cap   — read current cap config + MTD spend
+//   PATCH /arion/sites/:siteId/ai-cap   — set monthly_cap_usd / daily_cap_usd
+//
+// Keyed by TENANT (not per-site) per the build spec — one tenant can have
+// many sites, but the spend pool is tenant-wide. We accept siteId in the URL
+// so the founder can navigate from any site's settings page; we just verify
+// the site belongs to the tenant before writing.
+const AI_CAP_FOUNDER_TENANT_ID = (process.env.FOUNDER_TENANT_ID || '8C9527B9-8999-4B31-A306-F3D4CCC39FBD').trim().toUpperCase();
+function isAiCapFounder(req) {
+  // Either the actor is in the founder tenant OR requireArionAccess flagged
+  // them as a founder acting on a client tenant via x-tenant-key.
+  if (req.isFounderActingOnClient) return true;
+  const t = String(req?.tenant?.tenantId || '').toUpperCase();
+  return t === AI_CAP_FOUNDER_TENANT_ID;
+}
+
+router.get('/sites/:siteId/ai-cap', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  if (!tenantId || !siteId) {
+    return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'tenantId and siteId required', status: 400 } });
+  }
+  if (!isAiCapFounder(req)) {
+    return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Founder-only', status: 403 } });
+  }
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found for this tenant', status: 404 } });
+
+    const cfg = await loadCapConfig(pool, { tenantId, surface: AI_CAP_SURFACE });
+    // Also project current MTD + DTD spend so the UI doesn't need a second
+    // call. Cheap — same indexed scan costGuard runs on every call.
+    const spendRes = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('surface',  sql.NVarChar(50),     AI_CAP_SURFACE)
+      .query(`
+        SELECT
+          COALESCE(SUM(CASE
+            WHEN occurred_at >= DATEFROMPARTS(YEAR(SYSUTCDATETIME()), MONTH(SYSUTCDATETIME()), 1)
+            THEN cost_usd ELSE 0 END), 0) AS month_spent,
+          COALESCE(SUM(CASE
+            WHEN occurred_at >= CAST(CAST(SYSUTCDATETIME() AS date) AS datetime2)
+            THEN cost_usd ELSE 0 END), 0) AS day_spent
+        FROM lumen.ai_usage
+        WHERE tenant_id = @tenantId
+          AND surface   = @surface
+          AND cost_usd IS NOT NULL
+      `);
+    const spend = spendRes.recordset[0] || { month_spent: 0, day_spent: 0 };
+    res.json({
+      data: {
+        tenant_id:       tenantId,
+        surface:         AI_CAP_SURFACE,
+        monthly_cap_usd: cfg?.monthlyCapUsd ?? null,
+        daily_cap_usd:   cfg?.dailyCapUsd ?? null,
+        source:          cfg?.source || 'env_default',
+        updated_at:      cfg?.updatedAt || null,
+        spend: {
+          month_to_date_usd: Number(spend.month_spent || 0),
+          day_to_date_usd:   Number(spend.day_spent || 0),
+        },
+      },
+      meta: { tenant_id: tenantId, site_id: siteId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[arion/sites/:siteId/ai-cap GET]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+router.patch('/sites/:siteId/ai-cap', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const userId   = req.platformUser?.userId || null;
+  const { siteId } = req.params;
+  const body = req.body || {};
+
+  if (!tenantId || !siteId) {
+    return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'tenantId and siteId required', status: 400 } });
+  }
+  if (!isAiCapFounder(req)) {
+    return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Founder-only', status: 403 } });
+  }
+
+  // Validate body — accept partial. Both fields optional. At least one must
+  // be present so we don't accept empty {} no-ops.
+  const hasMonthly = body.monthly_cap_usd != null;
+  const hasDaily   = body.daily_cap_usd   != null;
+  if (!hasMonthly && !hasDaily && !body.notes) {
+    return res.status(400).json({ error: { code: 'NO_FIELDS', message: 'monthly_cap_usd, daily_cap_usd, or notes required', status: 400 } });
+  }
+  let monthlyCapUsd = null;
+  let dailyCapUsd   = null;
+  if (hasMonthly) {
+    const n = Number(body.monthly_cap_usd);
+    if (!Number.isFinite(n) || n < 0 || n > 100000) {
+      return res.status(400).json({ error: { code: 'BAD_MONTHLY', message: 'monthly_cap_usd must be a non-negative number ≤ 100000', status: 400 } });
+    }
+    monthlyCapUsd = n;
+  }
+  if (hasDaily) {
+    // Allow explicit null to clear the daily cap (caller sends daily_cap_usd: null).
+    // Our cap-loader treats null as "no daily floor."
+    if (body.daily_cap_usd === null) {
+      dailyCapUsd = null;
+    } else {
+      const n = Number(body.daily_cap_usd);
+      if (!Number.isFinite(n) || n < 0 || n > 100000) {
+        return res.status(400).json({ error: { code: 'BAD_DAILY', message: 'daily_cap_usd must be a non-negative number ≤ 100000 or null to clear', status: 400 } });
+      }
+      dailyCapUsd = n;
+    }
+  }
+  // Reject "monthly < daily" — would be a no-op for the daily floor anyway
+  // but better to surface the misconfig than silently let it through.
+  if (monthlyCapUsd != null && dailyCapUsd != null && dailyCapUsd > monthlyCapUsd) {
+    return res.status(400).json({ error: { code: 'DAILY_GT_MONTHLY', message: 'daily_cap_usd cannot exceed monthly_cap_usd', status: 400 } });
+  }
+
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found for this tenant', status: 404 } });
+
+    const row = await upsertCapConfig(pool, {
+      tenantId,
+      surface: AI_CAP_SURFACE,
+      monthlyCapUsd,
+      dailyCapUsd: hasDaily ? dailyCapUsd : undefined,  // undefined → leave alone; null only when caller explicitly cleared
+      updatedBy: userId,
+      notes: body.notes || null,
+    });
+    res.json({
+      data: {
+        tenant_id:       row.tenant_id,
+        surface:         row.surface,
+        monthly_cap_usd: Number(row.monthly_cap_usd),
+        daily_cap_usd:   row.daily_cap_usd == null ? null : Number(row.daily_cap_usd),
+        updated_at:      row.updated_at,
+        updated_by:      row.updated_by,
+        notes:           row.notes,
+      },
+      meta: { tenant_id: tenantId, site_id: siteId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[arion/sites/:siteId/ai-cap PATCH]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
