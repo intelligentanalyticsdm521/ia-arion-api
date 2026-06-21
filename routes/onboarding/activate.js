@@ -68,6 +68,15 @@ router.post('/', async (req, res) => {
     return res.status(429).json({ error: 'rate_limited', retry_after_seconds: emailCheck.retryAfter });
   }
 
+  // F-SEC1.3 (2026-06-21): tokens are stored at rest as SHA-256 hex hashes.
+  // Hash the incoming plaintext token ONCE here, then compare hashes
+  // (constant-time) against what's in the DB / JSON. Customer-facing URL
+  // still carries plaintext — only the at-rest representation changed.
+  // Migration 028 (arion) / 095 (oliver) expired all pre-existing plaintext
+  // tokens by zeroing welcome_token_expires_at, forcing affected accounts
+  // through the resend path which mints fresh hashed tokens.
+  const setupTokenHash = crypto.createHash('sha256').update(String(setupToken)).digest('hex');
+
   try {
     const pool = await getServicesPool();
 
@@ -105,7 +114,9 @@ router.post('/', async (req, res) => {
         if (arionDetails.welcome_token_expires_at && new Date(arionDetails.welcome_token_expires_at) < new Date()) {
           return res.status(409).json({ error: { code: 'TOKEN_EXPIRED' } });
         }
-        if (timingSafeEq(arionDetails.welcome_token, setupToken)) {
+        // F-SEC1.3 (2026-06-21): stored value is the SHA-256 hex hash of the
+        // plaintext token. We compare hash-vs-hash via constant-time eq.
+        if (timingSafeEq(arionDetails.welcome_token, setupTokenHash)) {
           matched = { source: 'arion' };
         }
       }
@@ -125,7 +136,8 @@ router.post('/', async (req, res) => {
         if (oRec.welcome_token_expires_at && new Date(oRec.welcome_token_expires_at) < new Date()) {
           return res.status(409).json({ error: { code: 'TOKEN_EXPIRED' } });
         }
-        if (timingSafeEq(oRec.welcome_token, setupToken)) {
+        // F-SEC1.3 (2026-06-21): stored value is SHA-256 hex hash.
+        if (timingSafeEq(oRec.welcome_token, setupTokenHash)) {
           matched = { source: 'oliver_onboarding' };
         } else {
           return res.status(422).json({ error: { code: 'TOKEN_MISMATCH' } });
@@ -235,18 +247,16 @@ function maskEmail(raw) {
 }
 
 /**
- * Constant-time string compare. The token is short and base64url so a naive
- * `===` would leak length and matching prefix via timing. crypto.timingSafeEqual
- * needs equal-length buffers; we coerce + length-pad to avoid throwing on
- * mismatched lengths AND keep the comparison constant-time.
+ * Constant-time string compare. After F-SEC1.3 (2026-06-21) both sides of
+ * the comparison are 64-char SHA-256 hex hashes, so we can use Node's
+ * crypto.timingSafeEqual directly. The length-equality short-circuit is
+ * still constant-time-safe because length itself is not secret (always 64).
  */
 function timingSafeEq(a, b) {
   const aBuf = Buffer.from(String(a || ''), 'utf8');
   const bBuf = Buffer.from(String(b || ''), 'utf8');
   if (aBuf.length !== bBuf.length) return false;
-  let diff = 0;
-  for (let i = 0; i < aBuf.length; i++) diff |= aBuf[i] ^ bBuf[i];
-  return diff === 0;
+  return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
 export default router;

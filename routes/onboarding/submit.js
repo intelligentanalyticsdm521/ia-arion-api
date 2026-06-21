@@ -392,6 +392,13 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
 
       await updatePhase(pool, session.site_id, 'finishing_up');
       const setupToken = generateSetupToken();
+      // F-SEC1.3 (2026-06-21): store SHA-256 hash at rest, not plaintext.
+      // Plaintext token only lives in the welcome email URL the customer
+      // receives. The /onboarding/activate read side hashes the incoming
+      // token with the same algorithm and timing-safe-compares the hashes.
+      const setupTokenHash = (await import('node:crypto'))
+        .createHash('sha256').update(setupToken).digest('hex');
+      const setupTokenExpiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
 
       const provisioningDetailsExisting = {
         flow: 'existing_website',
@@ -402,7 +409,8 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         tier,
         plugin_install_status: pluginInstallStatus,
         plugin_install_error: pluginInstallError,
-        welcome_token: setupToken,
+        welcome_token: setupTokenHash,
+        welcome_token_expires_at: setupTokenExpiresAt,
         ia_plugin_download_url: pluginDownloadUrl,
         current_phase: 'ready',
         current_percent: 100,
@@ -706,7 +714,14 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
     await updatePhase(pool, session.site_id, 'finishing_up');
 
     // 22. Generate the CIAM activation token for the welcome email link.
+    // F-SEC1.3 (2026-06-21): plaintext token only ever leaves this process
+    // inside the welcome email URL; provisioning_details_json stores the
+    // SHA-256 hex hash, which /onboarding/activate also hashes the inbound
+    // token against (constant-time compare on hashes).
     const setupToken = generateSetupToken();
+    const setupTokenHash = (await import('node:crypto'))
+      .createHash('sha256').update(setupToken).digest('hex');
+    const setupTokenExpiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
 
     // 23. Final state — site is ready. V2 provisioning details record the
     //     AI-WB pipeline outcomes (globals, images, page-by-page publish
@@ -744,7 +759,8 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       front_page_source:      frontPageResult.source || null,
       front_page_error:       frontPageResult.ok ? null : (frontPageResult.error || null),
       copy_source:            copyBundle.source,
-      welcome_token: setupToken,
+      welcome_token: setupTokenHash,
+      welcome_token_expires_at: setupTokenExpiresAt,
       current_phase: 'ready',
       current_percent: 100,
       current_message: 'Your site is ready!',
