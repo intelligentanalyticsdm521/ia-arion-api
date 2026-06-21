@@ -110,27 +110,41 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // F-SEC1.2 (2026-06-19): verify the activating email matches the Stripe-paid
+    // F-SEC1.2 (2026-06-21): verify the activating email matches the Stripe-paid
     // tenant's primary_contact_email. Prevents tenant-claim hijack: if an
     // attacker intercepts the activation link and swaps in their own email,
-    // they shouldn't be able to claim the paid tenant via CIAM signup. The
-    // tenant_invitations lookup in platform-api/session/verify would also
-    // block them (no invitation for the swapped email), but this rejects
-    // earlier with a clearer 403 instead of stranding them tenantless.
+    // they shouldn't be able to claim the paid tenant via CIAM signup. Applies
+    // to BOTH Path A (arion.site welcome_token) and Path B (oliver.tenant_-
+    // onboarding_state welcome_token) — token validation has already succeeded
+    // above, this is the final guard before we mark-used + redirect to signup.
+    //
+    // FAIL-CLOSED: if core.tenants row is missing OR primary_contact_email is
+    // NULL, reject with 403. Previous behavior fell through (fail-open); the
+    // scope doc flagged that as the gap this task closes.
+    const EMAIL_MISMATCH_RESPONSE = {
+      error: 'email_mismatch',
+      message: 'The email you signed up with does not match the email on file. Please contact support.',
+    };
+    let expectedEmail = null;
     try {
       const platformPool = await getPlatformPool();
       const tRow = await platformPool.request()
         .input('tenant_id', sql.UniqueIdentifier, tenantId)
         .query(`SELECT primary_contact_email FROM core.tenants WHERE tenant_id=@tenant_id`);
-      const expectedEmail = (tRow.recordset[0]?.primary_contact_email || '').toLowerCase().trim();
-      const providedEmail = String(email || '').toLowerCase().trim();
-      if (expectedEmail && providedEmail !== expectedEmail) {
-        return res.status(403).json({ error: { code: 'EMAIL_MISMATCH', message: 'Activation email does not match the paid tenant.' } });
-      }
+      const rawExpected = tRow.recordset[0]?.primary_contact_email;
+      expectedEmail = rawExpected ? String(rawExpected).toLowerCase().trim() : null;
     } catch (e) {
-      console.warn('[onboarding/activate] email match check skipped:', e.message);
-      // Fail open on infra errors — token validation already gates this; the
-      // tenant_invitations lookup downstream is the real auto-claim guard.
+      console.error(`[SECURITY][onboarding/activate] core.tenants lookup failed (fail-closed) tenant_id=${tenantId} provided=${maskEmail(email)} err=${e.message}`);
+      return res.status(403).json(EMAIL_MISMATCH_RESPONSE);
+    }
+    const providedEmail = String(email || '').toLowerCase().trim();
+    if (!expectedEmail) {
+      console.warn(`[SECURITY][onboarding/activate] fail-open suppressed — no primary_contact_email on core.tenants tenant_id=${tenantId} provided=${maskEmail(email)} source=${matched.source}`);
+      return res.status(403).json(EMAIL_MISMATCH_RESPONSE);
+    }
+    if (providedEmail !== expectedEmail) {
+      console.error(`[SECURITY][onboarding/activate] email mismatch tenant_id=${tenantId} provided=${maskEmail(email)} expected=${maskEmail(expectedEmail)} source=${matched.source}`);
+      return res.status(403).json(EMAIL_MISMATCH_RESPONSE);
     }
 
     // Mark used.
@@ -172,6 +186,24 @@ router.post('/', async (req, res) => {
     });
   }
 });
+
+/**
+ * Mask an email for SECURITY log lines — keep first char of local-part + first
+ * char of domain, redact the rest. e.g. `brandon@example.com` -> `b****@e****.com`.
+ * Falsy input returns `<none>` so log lines stay scannable.
+ */
+function maskEmail(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '<none>';
+  const at = s.indexOf('@');
+  if (at < 1) return `${s[0] || ''}****`;
+  const local = s.slice(0, at);
+  const domain = s.slice(at + 1);
+  const dot = domain.lastIndexOf('.');
+  const domainHead = dot > 0 ? domain.slice(0, 1) : domain.slice(0, 1);
+  const tld = dot > 0 ? domain.slice(dot) : '';
+  return `${local[0]}****@${domainHead}****${tld}`;
+}
 
 /**
  * Constant-time string compare. The token is short and base64url so a naive
