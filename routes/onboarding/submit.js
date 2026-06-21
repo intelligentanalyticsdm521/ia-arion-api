@@ -567,12 +567,13 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
     };
     let globalsResult = { ok: false, error: 'not_attempted' };
     try {
-      // setElementorGlobals tries POST /wp-json/elementor/v1/globals first
-      // and, on 404 (endpoint is GET-only on the installed Elementor
-      // version), automatically drops down to a wp-cli fallback over SSH
-      // via lib/hostingerSsh.runWpCli (which pulls SSH creds from KV — the
-      // same credentials we used to install plugins above). Returns
-      // `{ ok: true, via: 'wp_cli' }` when the fallback applies.
+      // setElementorGlobals writes Global Colors + Typography to the
+      // Elementor Kit via wp-cli over SSH (lib/hostingerSsh.runWpCli pulls
+      // SSH creds from KV — the same credentials we used to install plugins
+      // above). The Elementor REST endpoint at /wp-json/elementor/v1/globals
+      // is GET-only across the estate, so we don't bother POSTing to it —
+      // wp-cli is the canonical and only transport. Returns
+      // `{ ok: true, via: 'wp_cli', kit_id }` on success.
       globalsResult = await setElementorGlobals({
         domain:         domain.domain,
         brandName:      answers.businessName,
@@ -581,8 +582,8 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         accentColor:    answers.accentColor,
         site:           onboardingSiteShim,
       });
-      if (globalsResult.ok && globalsResult.via === 'wp_cli') {
-        console.log(`[onboarding/submit] Elementor globals applied via wp-cli fallback (REST POST 404'd) on ${domain.domain}`);
+      if (globalsResult.ok) {
+        console.log(`[onboarding/submit] Elementor globals applied via wp-cli on ${domain.domain} (kit ${globalsResult.kit_id || 'unknown'})`);
       }
     } catch (e) {
       globalsResult = { ok: false, error: e.message.slice(0, 300) };
