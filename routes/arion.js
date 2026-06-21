@@ -7255,4 +7255,123 @@ router.get('/analytics/insights', async (req, res) => {
   }
 });
 
+// ============================================================
+// Multi-location Google Business Profile (Onboarding V3 Phase 3)
+// ============================================================
+//
+// Tenants with more than one GBP listing (regional plumbing chains,
+// multi-location dental practices, etc.) need every location auto-imported
+// rather than picking just one. arion.business_location is the canonical
+// row-per-location store; gbpSync.syncAllLocations populates it on every
+// OAuth completion + on-demand via POST /sync below.
+//
+// The legacy single-location flow (arion.site.gbp_location_name +
+// /sites/:siteId/gbp/select-location) keeps working; that picks which
+// location a given SITE is anchored to. This new layer is tenant-scoped
+// because a tenant's locations are a property of the tenant, not a site.
+
+// GET /arion/business-locations
+// List all GBP locations for this tenant.
+router.get('/business-locations', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  try {
+    const pool = await getServicesPool();
+    const result = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .query(`
+        SELECT location_id, tenant_id, site_id, gbp_account_id, gbp_location_id,
+               location_name, display_name, address_line1, city, region,
+               postal_code, country, latitude, longitude, phone, website,
+               primary_category, place_id, review_uri, is_primary, is_verified,
+               last_synced_at, created_at, updated_at
+        FROM arion.business_location
+        WHERE tenant_id = @tenantId
+        ORDER BY is_primary DESC, display_name ASC
+      `);
+    res.json({
+      data: result.recordset,
+      meta: {
+        tenant_id: tenantId,
+        count: result.recordset.length,
+        primary: result.recordset.find((r) => r.is_primary === true || r.is_primary === 1)?.location_id || null,
+        timestamp: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    console.error('[business-locations:list]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// POST /arion/business-locations/:id/set-primary
+// Promote one location to primary (and demote the previous primary).
+router.post('/business-locations/:id/set-primary', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { id } = req.params;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'id must be a UUID', status: 400 } });
+  }
+  try {
+    const { setPrimaryLocation } = await import('../lib/integrations/gbpSync.js');
+    const result = await setPrimaryLocation(tenantId, id);
+    if (!result) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Location not found for this tenant', status: 404 } });
+    }
+    res.json({
+      data: { primary_location_id: result.primary_location_id, updated: true },
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[business-locations:set-primary]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// POST /arion/business-locations/sync?siteId=...
+// Trigger a fresh sync against Google. Uses the gbp_oauth_token_ref on the
+// given site (or, if no siteId provided, the first site for the tenant).
+// Returns { added, updated, removed, total, primary }.
+router.post('/business-locations/sync', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId || req.body?.siteId || null;
+  try {
+    const pool = await getServicesPool();
+    let siteRow;
+    if (siteId) {
+      const r = await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .query('SELECT site_id, domain, gbp_oauth_token_ref FROM arion.site WHERE tenant_id = @tenantId AND site_id = @siteId');
+      siteRow = r.recordset[0];
+    } else {
+      const r = await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .query('SELECT TOP 1 site_id, domain, gbp_oauth_token_ref FROM arion.site WHERE tenant_id = @tenantId AND gbp_oauth_token_ref IS NOT NULL ORDER BY created_at');
+      siteRow = r.recordset[0];
+    }
+    if (!siteRow || !siteRow.gbp_oauth_token_ref) {
+      return res.status(400).json({ error: { code: 'NOT_CONNECTED', message: 'No Google-connected site for this tenant', status: 400 } });
+    }
+    const tokenData = await getAccessToken(siteRow.gbp_oauth_token_ref).catch(() => null);
+    if (!tokenData) {
+      return res.status(401).json({ error: { code: 'AUTH_EXPIRED', message: 'Google authorization expired — reconnect', status: 401 } });
+    }
+    const { syncAllLocations } = await import('../lib/integrations/gbpSync.js');
+    const result = await syncAllLocations(tenantId, tokenData.access_token, {
+      siteId: siteRow.site_id,
+      siteDomain: siteRow.domain,
+    });
+    res.json({ data: result, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+  } catch (err) {
+    console.error('[business-locations:sync]', err);
+    if (err.code === 'gbp_quota_exceeded') {
+      return res.status(429).json({ error: { code: 'GBP_QUOTA_EXCEEDED', message: 'Google Business Profile API has no quota allocated', status: 429 } });
+    }
+    if (err.code === 'gbp_api_disabled') {
+      return res.status(503).json({ error: { code: 'GBP_API_DISABLED', message: 'Google Business Profile API is not enabled on the project', status: 503 } });
+    }
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 export default router;

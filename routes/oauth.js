@@ -208,6 +208,24 @@ router.get('/google/callback', async (req, res) => {
           }
         } catch (e) { console.warn('[oauth/google/callback] GBP auto-pick failed:', e.message); }
 
+        // Onboarding V3 Phase 3 — multi-location auto-import.
+        // Persist EVERY discoverable GBP location to arion.business_location
+        // so multi-branch tenants (regional plumbing chains, multi-location
+        // dental practices, etc.) get all their locations rather than just
+        // the one anchored to this site. Best-effort: failure shouldn't
+        // break the OAuth callback. See lib/integrations/gbpSync.js.
+        try {
+          const tRow = await pool.request()
+            .input('siteId', sql.UniqueIdentifier, siteId)
+            .query('SELECT tenant_id FROM arion.site WHERE site_id = @siteId');
+          const tid = tRow.recordset[0]?.tenant_id;
+          if (tid) {
+            const { syncAllLocations } = await import('../lib/integrations/gbpSync.js');
+            const syncResult = await syncAllLocations(tid, accessToken, { siteId, siteDomain });
+            console.log(`[oauth/google/callback] GBP multi-location sync: added=${syncResult.added} updated=${syncResult.updated} removed=${syncResult.removed} total=${syncResult.total}`);
+          }
+        } catch (e) { console.warn('[oauth/google/callback] GBP multi-location sync failed:', e.message); }
+
         // GA4 — auto-pick if single property or domain match
         try {
           const ga4Res = await fetch('https://analyticsadmin.googleapis.com/v1beta/accountSummaries', {
