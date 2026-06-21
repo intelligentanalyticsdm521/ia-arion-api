@@ -30,6 +30,7 @@ import { welcomeEmail, paymentFailedEmail } from '../../lib/emailTemplates.js';
 import { getPlan } from '../../lib/pricing.js';
 import { getPlatformPool } from '../../db/platformPool.js';
 import { resolveTenantForBuyer } from '../../lib/coreTenants.js';
+import { seedDefaultTasksForTenant } from '../../lib/walkthroughClient.js';
 
 const router = Router();
 
@@ -250,6 +251,24 @@ async function handleCheckoutCompleted(pool, session) {
       eventRefId: tenantId,
       payload: { plan: meta.plan, billing_cycle: meta.billing_cycle, email: customerEmail },
     });
+
+    // ── Walkthrough framework seed (Batch 16, 2026-06-21) ──
+    // Fire LUMEN-API's seedDefaultTasks via the internal service-token
+    // endpoint. ARION self-serve = single product purchase, so we seed only
+    // the ARION task subset. Idempotent on the LUMEN side. Wrapped in
+    // try/catch so a LUMEN failure NEVER fails the webhook (Stripe would
+    // retry the whole event otherwise, double-charging the buyer's tenant
+    // table inserts).
+    try {
+      await seedDefaultTasksForTenant({
+        tenantId,
+        products: ['arion'],
+        tier: meta.plan || 'starter',
+        triggeredBy: 'arion_stripe_webhook',
+      });
+    } catch (seedErr) {
+      console.warn('[webhook] walkthrough seed failed (non-blocking):', seedErr?.message || seedErr);
+    }
 
     // Welcome email — fire and forget (don't fail the webhook if email is down)
     const planMeta = getPlan(meta.plan || 'starter');
