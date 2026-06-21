@@ -36,13 +36,17 @@ import {
   stripHostingerOnboardingPlugins,
   createClientEditor,
   ensureAdminPassword,
-  importStarterTemplate,
   applyBranding,
-  applyBrandedCopy,
 } from '../../lib/hostingerSsh.js';
 import { installPluginsForTier } from '../../lib/pluginStack.js';
-import { pickTemplateForIndustry } from '../../lib/templateRegistry.js';
 import { generateSiteCopy } from '../../lib/aiCopy.js';
+import { setElementorGlobals } from '../../lib/elementorGlobals.js';
+import { generateSiteImages } from '../../lib/imageGen.js';
+import {
+  generateAllPages,
+  postElementorPage,
+  setStaticFrontPage,
+} from '../../lib/websiteBuilder/onboardingDriver.js';
 import {
   sendOnboardingWelcomeEmail,
   generateSetupToken,
@@ -494,7 +498,8 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       clientLastName: (answers.contactLastName || '').toString() || '',
     });
 
-    // 15. Install the Golden Master plugin stack (now includes astra-sites)
+    // 15. Install the Golden Master plugin stack (Elementor + Pro + IA Plugin).
+    //     V2 dropped the astra-sites dependency — see overnight-report/38.
     await updatePhase(pool, session.site_id, 'installing_plugins');
     const tier = (answers.tier || session.tier || 'lite').toLowerCase();
     const installShop = answers.installShop === true || answers.needsShop === true;
@@ -503,44 +508,162 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       iaPluginDownloadUrl: pluginDownloadUrl, provisionCode,
     });
 
-    // 16. Generate Claude copy from the questionnaire
+    // 16. Generate Claude copy from the questionnaire (kept as a per-block
+    //     enrichment hint passed into the emitter pipeline). V2 emitters
+    //     re-write the actual page sections from scratch but copyBundle gives
+    //     a fallback if any emitter fails.
     await updatePhase(pool, session.site_id, 'generating_copy');
     const copyBundle = await generateSiteCopy(answers);
 
-    // 17. Pick + import an industry-matched Astra Starter Template
-    await updatePhase(pool, session.site_id, 'importing_template');
-    const template = pickTemplateForIndustry({
-      industry: answers.industry,
-      businessName: answers.businessName,
-    });
-    const importResult = await importStarterTemplate({
-      domain: domain.domain,
-      templateId: template.id,
-      answers,
-    });
+    // 17. NEW (V2 F-201) — Set Elementor Globals (brand colors + fonts) via
+    //     the Elementor v1/globals REST API. Cascades automatically through
+    //     every widget that references globals.primary / globals.heading_font
+    //     so we don't have to touch each leaf node.
+    //     Elementor REST needs Basic auth from a real WP user. We just
+    //     provisioned iaadmin with adminPassword above; synthesize an in-
+    //     memory site row that pluginClient.buildPluginAuth() will accept
+    //     so setElementorGlobals can authenticate during onboarding.
+    await updatePhase(pool, session.site_id, 'setting_brand_globals');
+    const onboardingSiteShim = {
+      domain:               domain.domain,
+      wp_admin_url:         wpAdminUrl,
+      wp_app_password_ref:  `${adminLogin}:${adminPassword}`,
+    };
+    let globalsResult = { ok: false, error: 'not_attempted' };
+    try {
+      globalsResult = await setElementorGlobals({
+        domain:         domain.domain,
+        brandName:      answers.businessName,
+        primaryColor:   answers.primaryColor,
+        secondaryColor: answers.secondaryColor,
+        accentColor:    answers.accentColor,
+        site:           onboardingSiteShim,
+      });
+    } catch (e) {
+      globalsResult = { ok: false, error: e.message.slice(0, 300) };
+      console.warn(`[onboarding/submit] setElementorGlobals failed (non-fatal): ${globalsResult.error}`);
+    }
 
-    // 18. Apply branding — colors, brand name, logo, copy splice
-    await updatePhase(pool, session.site_id, 'applying_branding');
-    await applyBranding({
-      domain: domain.domain,
-      brandName: answers.businessName,
-      primaryColor: answers.primaryColor,
-      secondaryColor: answers.secondaryColor,
-      accentColor: answers.accentColor,
-    });
-    const copyApply = await applyBrandedCopy({
-      domain: domain.domain,
+    // 17b. Also write the legacy ia_brand_* options via wp-cli so the IA
+    //      Plugin's older brand readers still see the customer's colors.
+    //      Soft-fails on off-Hostinger sites (rare here — this is the
+    //      fresh-WP branch — but defensive).
+    try {
+      await applyBranding({
+        domain: domain.domain,
+        brandName: answers.businessName,
+        primaryColor: answers.primaryColor,
+        secondaryColor: answers.secondaryColor,
+        accentColor: answers.accentColor,
+      });
+    } catch (e) {
+      console.warn(`[onboarding/submit] legacy applyBranding skipped: ${e.message.slice(0, 200)}`);
+    }
+
+    // 18. NEW (V2 F-205) — Generate hero + section images via gpt-image-1.
+    //     Soft-fails: emitters can fall back to image-less variants if no
+    //     bundle is returned. imageBundle is consumed by the page generator
+    //     through sectionContextFor() inside onboardingDriver.
+    await updatePhase(pool, session.site_id, 'generating_images');
+    let imageBundle = null;
+    try {
+      imageBundle = await generateSiteImages({
+        answers,
+        brandColors: {
+          primary:   answers.primaryColor,
+          secondary: answers.secondaryColor,
+          accent:    answers.accentColor,
+        },
+        domain: domain.domain,
+      });
+    } catch (e) {
+      console.warn(`[onboarding/submit] generateSiteImages failed (non-fatal): ${e.message.slice(0, 200)}`);
+      imageBundle = null;
+    }
+
+    // 19. NEW (V2 F-204) — Generate Home + About + Services + Contact pages
+    //     via the AI WB emitter pipeline. Each page is built from a
+    //     kind-specific block sequence (see lib/websiteBuilder/onboardingDriver.js
+    //     PAGE_BLUEPRINTS) and assembled into a single _elementor_data tree.
+    await updatePhase(pool, session.site_id, 'generating_pages');
+    const pages = await generateAllPages({
+      domain:   domain.domain,
       answers,
       copyBundle,
-      logoUrl: answers.logoUrl || null,
+      imageBundle,
+      brandColors: {
+        primary:   answers.primaryColor,
+        secondary: answers.secondaryColor,
+        accent:    answers.accentColor,
+      },
+      tenantId: session.tenant_id,
+      siteId:   session.site_id,
     });
+
+    // 20. NEW (V2 F-205) — POST each page's _elementor_data to the WP site via
+    //     the IA Plugin's /pages/elementor route (plugin handler already
+    //     shipped — see intelligent-analytics.php upsert_elementor_page).
+    await updatePhase(pool, session.site_id, 'publishing_pages');
+    const publishResults = [];
+    for (const page of pages) {
+      if (!page.elementorData || page.elementorData.length === 0) {
+        publishResults.push({ slug: page.slug, ok: false, error: 'no_sections_built' });
+        console.warn(`[onboarding/submit] page "${page.slug}" had zero sections — skipping publish`);
+        continue;
+      }
+      const postResult = await postElementorPage({
+        domain:        domain.domain,
+        slug:          page.slug,
+        title:         page.title,
+        elementorData: page.elementorData,
+        provisionCode,
+        site:          onboardingSiteShim,
+      });
+      publishResults.push({
+        slug:   page.slug,
+        ok:     postResult.ok,
+        postId: postResult.postId || null,
+        error:  postResult.error || null,
+      });
+      if (!postResult.ok) {
+        console.warn(`[onboarding/submit] publishing "${page.slug}" failed: ${postResult.error}`);
+      }
+    }
+
+    // 21. NEW (V2 F-207) — Set Home as the static front page so visitors hit
+    //     the marquee page instead of the blog roll.
+    await updatePhase(pool, session.site_id, 'finalizing_homepage');
+    let frontPageResult = { ok: false, error: 'not_attempted' };
+    try {
+      const homePub = publishResults.find((p) => p.slug === 'home');
+      frontPageResult = await setStaticFrontPage({
+        domain:        domain.domain,
+        slug:          'home',
+        pageId:        homePub?.postId || null,
+        provisionCode,
+        site:          onboardingSiteShim,
+      });
+    } catch (e) {
+      frontPageResult = { ok: false, error: e.message.slice(0, 300) };
+      console.warn(`[onboarding/submit] setStaticFrontPage failed (non-fatal): ${frontPageResult.error}`);
+    }
 
     await updatePhase(pool, session.site_id, 'finishing_up');
 
-    // 19. Generate the CIAM activation token for the welcome email link.
+    // 22. Generate the CIAM activation token for the welcome email link.
     const setupToken = generateSetupToken();
 
-    // 20. Final state — site is ready.
+    // 23. Final state — site is ready. V2 provisioning details record the
+    //     AI-WB pipeline outcomes (globals, images, page-by-page publish
+    //     results, front-page flip) so the Portal status surface + customer
+    //     support can see what happened on each onboarding run.
+    const pageSummary = pages.map((p) => ({
+      slug:          p.slug,
+      sections_built: p.sectionsBuilt,
+      skipped:       (p.skipped || []).length,
+      emitter_ok:    (p.emitterResults || []).filter((r) => r.ok).length,
+      emitter_fail:  (p.emitterResults || []).filter((r) => !r.ok).length,
+    }));
     const provisioningDetails = {
       wp_admin_login: adminLogin,
       wp_admin_email: adminEmail,
@@ -552,14 +675,19 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       plugins_installed: stackResult.installed,
       plugins_skipped: stackResult.skipped,
       plugins_failed: stackResult.failed || [],
-      template_id: template.id,
-      template_label: template.label,
-      template_bucket: template.bucket,
-      template_imported_ok: importResult.ok,
-      template_fallback_used: importResult.fallback,
-      copy_source: copyBundle.source,
-      copy_applied: copyApply.applied,
-      copy_errors: copyApply.errors,
+      // V2 AI Website Builder outcomes
+      builder_version:        'v2',
+      elementor_globals_set:  globalsResult.ok === true,
+      elementor_globals_error: globalsResult.ok ? null : (globalsResult.error || null),
+      images_generated:       imageBundle ? (imageBundle.stats?.succeeded ?? true) : false,
+      images_failed:          imageBundle?.stats?.failed ?? null,
+      pages_built:            pages.length,
+      pages_summary:          pageSummary,
+      pages_published:        publishResults,
+      front_page_set:         frontPageResult.ok === true,
+      front_page_source:      frontPageResult.source || null,
+      front_page_error:       frontPageResult.ok ? null : (frontPageResult.error || null),
+      copy_source:            copyBundle.source,
       welcome_token: setupToken,
       current_phase: 'ready',
       current_percent: 100,
@@ -578,7 +706,7 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         WHERE site_id = @siteId
       `);
 
-    // 21. Send the "your site is ready + activate your portal" email. Best-effort
+    // 24. Send the "your site is ready + activate your portal" email. Best-effort
     //     but failures are now persisted into provisioning_details_json so the
     //     Portal can surface a "resend email" button.
     await updatePhase(pool, session.site_id, 'sending_welcome');
