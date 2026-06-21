@@ -37,6 +37,7 @@ import {
   createClientEditor,
   ensureAdminPassword,
   applyBranding,
+  runWpCli,
 } from '../../lib/hostingerSsh.js';
 import { installPluginsForTier } from '../../lib/pluginStack.js';
 import { generateSiteCopy } from '../../lib/aiCopy.js';
@@ -498,6 +499,32 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       clientLastName: (answers.contactLastName || '').toString() || '',
     });
 
+    // 14b. Mint a WordPress application password for the iaadmin user so the
+    //      downstream V2 publish steps (postElementorPage + setElementorGlobals)
+    //      can authenticate against the WP REST API with HTTP Basic auth. WP
+    //      5.6+ REJECTS Basic auth with the user's regular login password — only
+    //      application passwords pass through the wp_authenticate_application_password
+    //      filter, which is what produces the authenticated current_user for
+    //      permission_callback to read.
+    //
+    //      `--porcelain` returns just the plaintext password (no UUID/header).
+    //      The wp-cli command auto-generates a strong password; we cannot supply
+    //      one. Token is held in-memory only and embedded in the in-memory site
+    //      shim — never persisted longer than this background task.
+    await updatePhase(pool, session.site_id, 'minting_publish_credentials');
+    let iaadminAppPassword = null;
+    try {
+      const appPwResult = await mintIaadminAppPassword(domain.domain);
+      iaadminAppPassword = appPwResult.appPassword;
+      console.log(`[onboarding/submit] minted iaadmin application password for ${domain.domain} (len=${iaadminAppPassword?.length || 0})`);
+    } catch (mintErr) {
+      // Non-fatal: postElementorPage will still attempt the provision-code
+      // header path; if the plugin route accepts it, publish still works.
+      // If it doesn't, we'll see "Sorry, you are not allowed to do that."
+      // in the publish results, surfaced via provisioning_details_json.
+      console.warn(`[onboarding/submit] failed to mint iaadmin app password (non-fatal): ${mintErr.message.slice(0, 200)}`);
+    }
+
     // 15. Install the Golden Master plugin stack (Elementor + Pro + IA Plugin).
     //     V2 dropped the astra-sites dependency — see overnight-report/38.
     await updatePhase(pool, session.site_id, 'installing_plugins');
@@ -524,13 +551,28 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
     //     memory site row that pluginClient.buildPluginAuth() will accept
     //     so setElementorGlobals can authenticate during onboarding.
     await updatePhase(pool, session.site_id, 'setting_brand_globals');
+    // V2 publish auth — the WP REST API rejects Basic auth with the user's
+    // regular password since WP 5.6+. Only application passwords pass the
+    // wp_authenticate_application_password filter. If we minted one in step 14b
+    // we use it here (and for postElementorPage below); otherwise we fall back
+    // to the regular password which will fail Basic auth (caller falls back to
+    // the provision-code header path).
+    const publishCreds = iaadminAppPassword
+      ? `${adminLogin}:${iaadminAppPassword}`
+      : `${adminLogin}:${adminPassword}`;
     const onboardingSiteShim = {
       domain:               domain.domain,
       wp_admin_url:         wpAdminUrl,
-      wp_app_password_ref:  `${adminLogin}:${adminPassword}`,
+      wp_app_password_ref:  publishCreds,
     };
     let globalsResult = { ok: false, error: 'not_attempted' };
     try {
+      // setElementorGlobals tries POST /wp-json/elementor/v1/globals first
+      // and, on 404 (endpoint is GET-only on the installed Elementor
+      // version), automatically drops down to a wp-cli fallback over SSH
+      // via lib/hostingerSsh.runWpCli (which pulls SSH creds from KV — the
+      // same credentials we used to install plugins above). Returns
+      // `{ ok: true, via: 'wp_cli' }` when the fallback applies.
       globalsResult = await setElementorGlobals({
         domain:         domain.domain,
         brandName:      answers.businessName,
@@ -539,6 +581,9 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         accentColor:    answers.accentColor,
         site:           onboardingSiteShim,
       });
+      if (globalsResult.ok && globalsResult.via === 'wp_cli') {
+        console.log(`[onboarding/submit] Elementor globals applied via wp-cli fallback (REST POST 404'd) on ${domain.domain}`);
+      }
     } catch (e) {
       globalsResult = { ok: false, error: e.message.slice(0, 300) };
       console.warn(`[onboarding/submit] setElementorGlobals failed (non-fatal): ${globalsResult.error}`);
@@ -927,6 +972,32 @@ function generatePassword() {
     [chars[i], chars[j]] = [chars[j], chars[i]];
   }
   return chars.join('');
+}
+
+/**
+ * Mint a fresh WordPress application password for the iaadmin user via
+ * wp-cli. Application passwords are the ONLY credential type WP REST will
+ * accept as HTTP Basic auth since WP 5.6 — sending the regular login password
+ * over Basic auth returns 401/"Sorry, you are not allowed to do that".
+ *
+ * `wp user application-password create <user> <name> --porcelain` prints just
+ * the plaintext password (no UUID, no header). The 24-char password is shown
+ * exactly once — WP stores only the hash — so we must capture stdout here.
+ *
+ * @param {string} domain  the customer domain (e.g. example.com)
+ * @returns {Promise<{ appPassword: string }>}
+ *   - throws if the wp-cli call fails or returns no password text
+ */
+async function mintIaadminAppPassword(domain) {
+  const result = await runWpCli(
+    domain,
+    `user application-password create iaadmin "Arion V2 Onboarding" --porcelain`,
+  );
+  const appPassword = (result.stdout || '').trim();
+  if (!appPassword || /\s/.test(appPassword)) {
+    throw new Error(`unexpected wp-cli output for application-password create: "${appPassword.slice(0, 100)}"`);
+  }
+  return { appPassword };
 }
 
 export default router;
