@@ -5,6 +5,7 @@ import express from 'express';
 import { requireAuth } from './middleware/requireAuth.js';
 import { tenantResolution } from './middleware/tenantResolution.js';
 import { requireArionAccess } from './middleware/requireArionAccess.js';
+import { enforceEmergencyReadOnly } from './middleware/enforceEmergencyReadOnly.js';
 
 import healthRouter from './routes/health.js';
 import arionRouter from './routes/arion.js';
@@ -112,10 +113,17 @@ app.use('/provisioning', provisioningRouter);
 // an auth header — just the ?token=<provision_code> query string.
 app.use('/plugin', pluginRouter);
 
-app.use('/arion', requireAuth, tenantResolution, requireArionAccess, arionRouter);
+// Founder super-user "Emergency act-as" read-only enforcement.
+//
+// enforceEmergencyReadOnly is inserted right after requireAuth so it has the
+// JWT claims to identify the founder, but BEFORE tenantResolution +
+// requireArionAccess so non-GET requests are 403'd before any tenant-scope
+// logic runs. It is a NO-OP when no x-actas-mode header is sent — normal
+// traffic and "switch" mode are unaffected. Mirrors oliver-api's chain.
+app.use('/arion', requireAuth, enforceEmergencyReadOnly(), tenantResolution, requireArionAccess, arionRouter);
 // ARGUS AI credit endpoints — gated by standard tenant resolution, not
 // product-access (every tenant can see their balance even without ARION).
-app.use('/argus', requireAuth, tenantResolution, argusRouter);
+app.use('/argus', requireAuth, enforceEmergencyReadOnly(), tenantResolution, argusRouter);
 
 app.use((req, res) => res.status(404).json({ error: 'not_found', method: req.method, path: req.path }));
 
