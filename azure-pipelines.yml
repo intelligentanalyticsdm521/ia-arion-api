@@ -1,3 +1,25 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# arion-api CI/CD
+#
+# Post-deploy migration runner (added 2026-06-20):
+#   After the AzureWebApp@1 deploy step, an AzureCLI@2 task runs
+#   `scripts/run-pipeline-migrations.js` against iadm_services. The runner:
+#     1) Lists db/migrations/*.sql in numeric order
+#     2) Reads db.schema_migrations to find what's already applied (scoped by
+#        repo='arion-api')
+#     3) Logs a dry-run summary first
+#     4) Applies pending migrations in apply mode, recording each one
+#     5) Fails the build on any migration error (exit 2)
+#
+#   Bootstrap (ONE-TIME, manual): apply db/migrations/000_schema_migrations.sql
+#   from a dev machine with `az login` + db_ddladmin:
+#     node scripts/run-migration.js db/migrations/000_schema_migrations.sql
+#
+#   After bootstrap, every future migration committed to db/migrations/ is
+#   picked up automatically on the next deploy. Never apply migrations by
+#   hand again.
+# ──────────────────────────────────────────────────────────────────────────────
+
 trigger:
   - main
 
@@ -61,3 +83,20 @@ steps:
       azureSubscription: "$(azureSubscription)"
       appName: "$(webAppName)"
       package: "$(Build.ArtifactStagingDirectory)/drop.zip"
+
+  - task: AzureCLI@2
+    displayName: "Post-deploy: run pending DB migrations (dry-run + apply)"
+    inputs:
+      azureSubscription: "$(azureSubscription)"
+      scriptType: "bash"
+      scriptLocation: "inlineScript"
+      inlineScript: |
+        set -e
+        cd "$(System.DefaultWorkingDirectory)"
+        export MIGRATION_REPO=arion-api
+        export SQL_SERVER=sql-iadm-prod-cus.database.windows.net
+        export SQL_DATABASE=iadm_services
+        echo "─── dry-run ───"
+        node scripts/run-pipeline-migrations.js --dry-run
+        echo "─── apply ───"
+        node scripts/run-pipeline-migrations.js --apply
