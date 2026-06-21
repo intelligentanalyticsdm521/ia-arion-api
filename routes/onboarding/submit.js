@@ -619,8 +619,17 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
           secondary: answers.secondaryColor,
           accent:    answers.accentColor,
         },
-        domain: domain.domain,
+        domain:        domain.domain,
+        provisionCode,                 // enables REST media fallback if SFTP/wp-cli path errors
+        pool,                          // required for lumen.ai_usage telemetry
+        tenantId:      session.tenant_id,
+        siteId:        session.site_id,
       });
+      if (imageBundle?.errors?.length) {
+        for (const e of imageBundle.errors) {
+          console.warn(`[onboarding/submit] image slot=${e.slot} failed: ${e.message}`);
+        }
+      }
     } catch (e) {
       console.warn(`[onboarding/submit] generateSiteImages failed (non-fatal): ${e.message.slice(0, 200)}`);
       imageBundle = null;
@@ -726,6 +735,7 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       elementor_globals_error: globalsResult.ok ? null : (globalsResult.error || null),
       images_generated:       imageBundle ? (imageBundle.stats?.succeeded ?? true) : false,
       images_failed:          imageBundle?.stats?.failed ?? null,
+      images_errors:          imageBundle?.errors ?? null,
       pages_built:            pages.length,
       pages_summary:          pageSummary,
       pages_published:        publishResults,
