@@ -96,7 +96,7 @@ async function buildIntelContext({ site, tenantId }) {
                       fcp_ms, tbt_ms, run_date
           FROM arion.site_pagespeed_snapshot
          WHERE tenant_id = @tenantId AND site_id = @siteId
-         ORDER BY run_date DESC, id DESC
+         ORDER BY run_date DESC, snapshot_id DESC
       `);
     pageSpeedSnapshots = psiRes.recordset || [];
   } catch (err) {
