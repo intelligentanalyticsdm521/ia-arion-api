@@ -8,7 +8,7 @@
 --
 -- The Intelligence page renders 6 SINGLE-SOURCE cached reports per ARION
 -- site (Brandon's locked architecture 2026-06-21 — no cross-platform data
--- in any ARION report; cross-channel intelligence lives in ARGUS):
+-- in any ARION report; cross-platform intelligence lives in ARGUS):
 --   1. SEO Authority Position           (seo_authority)        — SE Ranking
 --   2. Visibility Trajectory            (visibility_trajectory) — GSC
 --   3. Competitive Presence Gap         (competitive_presence) — SE Ranking
@@ -18,7 +18,7 @@
 --
 -- relocated_to column flags rows that have been migrated to another
 -- product surface (e.g. lead_source/content_roi/rep_revenue moved into
--- ARGUS Cross-Channel Intelligence per the refactor). Keeps the row for
+-- ARGUS Cross-Platform Intelligence per the refactor). Keeps the row for
 -- audit trail but excludes it from /arion/intelligence responses.
 --
 -- Each calculator hits external APIs (SE Ranking, GSC, PSI) which are

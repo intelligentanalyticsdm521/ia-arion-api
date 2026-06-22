@@ -2,7 +2,7 @@
 //
 // Brandon's locked architecture (2026-06-21):
 //   Each ARION Intelligence report is SINGLE-SOURCE. No SPARK/OLIVER/GBP
-//   blends. Cross-channel intelligence lives in ARGUS.
+//   blends. Cross-platform intelligence lives in ARGUS.
 //
 // GET /arion/sites/:siteId/intelligence
 //   Returns: { intelligenceScore, intelligenceTier, reports:{...}, ... }
