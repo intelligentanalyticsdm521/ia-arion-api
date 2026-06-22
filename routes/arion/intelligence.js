@@ -43,15 +43,25 @@ async function buildIntelContext({ site, tenantId }) {
   // available. Returns array of { date, clicks, impressions, ctr, position }
   // over the last 90 days. Each calculator individually handles missing
   // data, so a null is safe.
+  //
+  // 2026-06-22 — Prefer site.gsc_oauth_token_ref (the GSC-specific column);
+  // fall back to gbp_oauth_token_ref for legacy tenants where the same
+  // refresh token was issued for both scopes during GBP-first onboarding.
+  // Prefer site.gsc_site_url (the canonical form Google requires, with
+  // protocol + trailing slash) over a domain-derived URL.
   let gscDates = [];
   try {
-    const refreshToken = site?.gbp_oauth_token_ref;  // same OAuth token serves GSC + GBP per arion.js convention
-    if (refreshToken && site?.domain) {
-      const siteUrl = 'https://' + site.domain;
-      const gscRows = await getSearchConsoleDates(refreshToken, siteUrl, 90).catch(() => []);
+    const refreshToken = site?.gsc_oauth_token_ref || site?.gbp_oauth_token_ref || null;
+    const siteUrl = site?.gsc_site_url || (site?.domain ? 'https://' + site.domain : null);
+    if (refreshToken && siteUrl) {
+      const gscRows = await getSearchConsoleDates(refreshToken, siteUrl, 90).catch((err) => {
+        console.error('[intelligence/buildIntelContext:gsc-fetch]', err?.message || err);
+        return [];
+      });
       gscDates = Array.isArray(gscRows) ? gscRows : [];
     }
-  } catch (_) {
+  } catch (err) {
+    console.error('[intelligence/buildIntelContext:gsc]', err?.message || err);
     gscDates = [];
   }
 
@@ -60,13 +70,17 @@ async function buildIntelContext({ site, tenantId }) {
   let totalPages = null;
   try {
     if (site?.domain) {
-      const seo = await pluginApi.contentSeoAgg(site).catch(() => null);
+      const seo = await pluginApi.contentSeoAgg(site).catch((err) => {
+        console.error('[intelligence/buildIntelContext:plugin-fetch]', err?.message || err);
+        return null;
+      });
       if (seo?.ok && seo.data) {
         pluginSeoAgg = seo.data;
         totalPages = Number(seo.data?.summary?.totalPosts || seo.data?.totals?.posts || 0) || null;
       }
     }
-  } catch (_) {
+  } catch (err) {
+    console.error('[intelligence/buildIntelContext:plugin]', err?.message || err);
     pluginSeoAgg = null;
   }
 
@@ -85,7 +99,8 @@ async function buildIntelContext({ site, tenantId }) {
          ORDER BY run_date DESC, id DESC
       `);
     pageSpeedSnapshots = psiRes.recordset || [];
-  } catch (_) {
+  } catch (err) {
+    console.error('[intelligence/buildIntelContext:psi-query]', err?.message || err);
     pageSpeedSnapshots = [];
   }
 
@@ -98,6 +113,15 @@ async function buildIntelContext({ site, tenantId }) {
     pluginSeoAgg,
     totalPages,
     pageSpeedSnapshots,
+    // 2026-06-22 — Readiness fingerprint so cache payloads + downstream
+    // diagnostics know which sources were actually available at compute time.
+    dataSources: {
+      gscDays: Array.isArray(gscDates) ? gscDates.length : 0,
+      pluginAgg: pluginSeoAgg != null,
+      psiSnapshots: Array.isArray(pageSpeedSnapshots) ? pageSpeedSnapshots.length : 0,
+      seRankingProject: seRankingProjectId || null,
+      seRankingAudit: seRankingAuditId || null,
+    },
   };
 }
 
@@ -106,7 +130,11 @@ async function writeCache(pool, { tenantId, siteId, reportKey, payload }) {
   const score = Number.isFinite(payload?.score) ? payload.score : null;
   const tier = payload?.tier || null;
   const payloadJson = JSON.stringify(payload || {});
-  const expiresAt = new Date(Date.now() + CACHE_TTL_MS);
+  // 2026-06-22 — Short TTL (1 hour) for insufficient_data payloads so a
+  // transient API outage or missing-data condition can self-heal on the
+  // next read instead of being pinned at "no data" for 12 hours.
+  const ttlMs = payload?.state === 'insufficient_data' ? 60 * 60 * 1000 : CACHE_TTL_MS;
+  const expiresAt = new Date(Date.now() + ttlMs);
   try {
     await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
