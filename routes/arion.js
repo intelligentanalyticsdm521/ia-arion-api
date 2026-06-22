@@ -119,6 +119,44 @@ router.get('/onboarding/checklist', async (req, res) => {
   }
 });
 
+// GET /arion/sites/:siteId/integrations-status — boolean flags consumed by
+// ClientTenantModal.tsx:1009-1017 (founder client-detail panel). Mirrors the
+// columns on arion.site rather than re-checking each provider live (the
+// per-provider routes already keep these flags in sync).
+router.get('/sites/:siteId/integrations-status', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  if (!tenantId || !siteId) {
+    return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'tenantId and siteId required', status: 400 } });
+  }
+  try {
+    const pool = await getServicesPool();
+    const r = await pool.request()
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .query(`SELECT a.gbp_connected, a.gsc_connected, a.google_ads_linked,
+                     a.bing_connected, a.apple_claimed, a.se_ranking_project_id,
+                     a.ga4_property_id, a.plugin_status, a.plugin_last_status_at
+                FROM arion.site a
+               WHERE a.site_id=@siteId AND a.tenant_id=@tenantId`);
+    const row = r.recordset[0];
+    if (!row) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    return res.json({
+      ga4_connected: !!row.ga4_property_id,
+      gsc_connected: !!row.gsc_connected,
+      gbp_connected: !!row.gbp_connected,
+      google_ads_linked: !!row.google_ads_linked,
+      bing_connected: !!row.bing_connected,
+      apple_claimed: !!row.apple_claimed,
+      se_ranking_project_created: !!row.se_ranking_project_id,
+      plugin_connected: !!row.plugin_status && row.plugin_status === 'connected',
+    });
+  } catch (err) {
+    console.error('[arion/sites/:siteId/integrations-status]', err);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // Helper: get site summary for portal
 function toSiteSummary(row) {
   return {
@@ -463,11 +501,11 @@ router.get('/overview', async (req, res) => {
       site: site ? toSiteSummary(site) : null,
       permissions: { siteCount, siteLimit: null, canCreateSite: true, extraSitePriceMonthly: 0, extraSitePriceAnnual: 0 },
       integrations: {
-        googleAnalytics: false,
+        googleAnalytics: !!site?.ga4_property_id,
         googleSearchConsole: gscConnected,
         googleBusinessProfile: gbpConnected,
-        bingWebmaster: false,
-        bingPlaces: false,
+        bingWebmaster: !!site?.bing_connected,
+        bingPlaces: false, // no storage today; intentionally still false
         appleBusinessConnect: site?.apple_claimed ? true : false,
         seRankingProject: seoConnected
       },

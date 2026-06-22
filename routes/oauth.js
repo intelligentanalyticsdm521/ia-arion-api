@@ -234,11 +234,24 @@ router.get('/google/callback', async (req, res) => {
         // Walkthrough hook (Batch 14+) — close the "Connect your Google
         // Business Profile" task now that the OAuth callback has both
         // stored credentials AND attempted location discovery. The OAuth
-        // callback is unauthenticated (no inbound bearer), so this call
-        // may 401 against the LUMEN-API endpoint today; the helper
-        // silently swallows the failure. Follow-up: add an internal
-        // service-token path so this fires reliably.
-        completeWalkthroughTaskByKindFor(tenantId, 'connect_gbp').catch(() => {});
+        // callback is unauthenticated (no inbound bearer), so we send the
+        // shared-secret `x-internal-token` instead (same env var the seed
+        // helper uses). LUMEN-API has an internal-token variant on the
+        // by-kind/complete endpoint; if the token isn't configured we
+        // warn and skip rather than throw.
+        {
+          const walkthroughInternalToken =
+            process.env.LUMEN_WALKTHROUGH_SEED_TOKEN ||
+            process.env.WALKTHROUGH_SEED_INTERNAL_TOKEN ||
+            '';
+          if (!walkthroughInternalToken) {
+            console.warn('[oauth/google/callback] LUMEN_WALKTHROUGH_SEED_TOKEN not set — skipping connect_gbp walkthrough completion');
+          } else {
+            completeWalkthroughTaskByKindFor(tenantId, 'connect_gbp', {
+              internalToken: walkthroughInternalToken,
+            }).catch(() => {});
+          }
+        }
 
         // GA4 — auto-pick if single property or domain match
         try {
