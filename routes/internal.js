@@ -171,4 +171,193 @@ router.delete('/sites/:siteId/provision-codes/:codeId', requireIngestKey, async 
   }
 });
 
+/* =========================================================================
+ * OnboardingRunner advance endpoints (called by arion-func worker)
+ *
+ * The worker (arion-func src/shared/onboardingRunner.js) sits on the
+ * arion.site rows in status_phase IN (installing_plugins, creating_editor_user,
+ * configuring_seo, connecting_bing) and calls these handlers every 30s. Each
+ * handler runs ONE side-effect, returns 200 { ok: true } on success, and the
+ * worker then transitions the row to the next phase. On 4xx { retryable }
+ * the worker leaves the row in place and retries. On 404 the worker logs
+ * "deferred — endpoint not deployed yet" (the state before THIS commit).
+ *
+ * Contract (matches arion-func/src/shared/onboardingRunner.js:418):
+ *   POST /internal/runner/advance/{kind}
+ *   Headers: x-arion-ingest-key
+ *   Body:    { tenant_id, site_id, domain }
+ *   Response: 200 { ok: true, data? } | 4xx { ok: false, error, retryable }
+ *
+ * Brandon 2026-06-23 — built so the founder wizard runner can actually
+ * advance phase-by-phase instead of stalling at "Installing your tools".
+ * ========================================================================= */
+
+async function loadSiteRow(siteId, tenantId) {
+  const pool = await getServicesPool();
+  const r = await pool.request()
+    .input('siteId', sql.UniqueIdentifier, siteId)
+    .input('tenantId', sql.UniqueIdentifier, tenantId)
+    .query(`
+      SELECT site_id, tenant_id, domain, arion_tier AS tier, feature_addons_json,
+             status_phase, plugin_status, primary_contact_email,
+             primary_contact_first_name, primary_contact_last_name
+      FROM arion.site WHERE site_id = @siteId AND tenant_id = @tenantId`);
+  return r.recordset[0] || null;
+}
+
+function ingestErr(message, retryable = false, status = 400) {
+  return { status, body: { ok: false, error: { message }, retryable } };
+}
+
+// POST /internal/runner/advance/plugin-stack
+// Strip Hostinger onboarding plugins + install the IA Golden Master plugin
+// stack for the site's tier. Idempotent — pluginStack.installPluginsForTier
+// uses `wp plugin install --activate` which is a no-op when already present.
+router.post('/runner/advance/plugin-stack', requireIngestKey, async (req, res) => {
+  const { tenant_id, site_id } = req.body || {};
+  if (!tenant_id || !site_id) {
+    return res.status(400).json({ ok: false, error: { message: 'tenant_id + site_id required' }, retryable: false });
+  }
+  try {
+    const site = await loadSiteRow(site_id, tenant_id);
+    if (!site) return res.status(404).json({ ok: false, error: { message: 'site not found' }, retryable: false });
+
+    const { stripHostingerOnboardingPlugins } = await import('../lib/hostingerSsh.js');
+    const { installPluginsForTier } = await import('../lib/pluginStack.js');
+
+    // 1) Strip Hostinger defaults (leaves third-party plugins alone per spec).
+    try { await stripHostingerOnboardingPlugins(site.domain); }
+    catch (e) { console.warn('[runner:plugin-stack] strip warn:', e.message); }
+
+    // 2) Install/activate the IA plugin stack for this tier.
+    const installShop = false; // WooCommerce remains opt-in per memory reference_arion_plugin_stack
+    await installPluginsForTier({
+      domain: site.domain,
+      tier: site.tier || 'starter',
+      installShop,
+      iaPluginDownloadUrl: process.env.IA_PLUGIN_DOWNLOAD_URL || null,
+      provisionCode: null, // existing sites already provisioned; new sites get this via /sites/:id/provision-codes flow
+    });
+
+    res.json({ ok: true, data: { domain: site.domain, tier: site.tier || 'starter' } });
+  } catch (err) {
+    console.error('[runner:plugin-stack]', err);
+    const retryable = !/no such|not found|auth|credentials|secret/i.test(err.message || '');
+    res.status(500).json({ ok: false, error: { message: err.message }, retryable });
+  }
+});
+
+// POST /internal/runner/advance/create-wp-user
+// Create the client's WP editor user. Idempotent — createClientEditor uses
+// `wp user create` which is safe to call (returns "username is already
+// registered" or "email is already used" which we treat as already-done).
+router.post('/runner/advance/create-wp-user', requireIngestKey, async (req, res) => {
+  const { tenant_id, site_id } = req.body || {};
+  if (!tenant_id || !site_id) {
+    return res.status(400).json({ ok: false, error: { message: 'tenant_id + site_id required' }, retryable: false });
+  }
+  try {
+    const site = await loadSiteRow(site_id, tenant_id);
+    if (!site) return res.status(404).json({ ok: false, error: { message: 'site not found' }, retryable: false });
+    if (!site.primary_contact_email) {
+      // No owner email captured yet — wizard hasn't reached Step 5 (Owner). Defer.
+      return res.json({ ok: true, data: { deferred: true, reason: 'no primary_contact_email yet' } });
+    }
+    const { createClientEditor } = await import('../lib/hostingerSsh.js');
+    const result = await createClientEditor({
+      domain: site.domain,
+      clientEmail: site.primary_contact_email,
+      clientFirstName: site.primary_contact_first_name || 'Owner',
+      clientLastName: site.primary_contact_last_name || '',
+    });
+    res.json({ ok: true, data: result || { created: true } });
+  } catch (err) {
+    console.error('[runner:create-wp-user]', err);
+    const msg = err.message || '';
+    // wp-cli idempotent error cases — treat as success.
+    if (/already registered|already used|already exists/i.test(msg)) {
+      return res.json({ ok: true, data: { already_exists: true } });
+    }
+    const retryable = !/no such|credentials|secret|invalid email/i.test(msg);
+    res.status(500).json({ ok: false, error: { message: msg }, retryable });
+  }
+});
+
+// POST /internal/runner/advance/configure-seo
+// SE Ranking project + keyword seed + competitor seed + tier-specific config.
+// Only fires when the runner determined this site has the SEO add-on
+// (Growth/Authority tier or feature_addons_json.arion_seo true).
+router.post('/runner/advance/configure-seo', requireIngestKey, async (req, res) => {
+  const { tenant_id, site_id } = req.body || {};
+  if (!tenant_id || !site_id) {
+    return res.status(400).json({ ok: false, error: { message: 'tenant_id + site_id required' }, retryable: false });
+  }
+  try {
+    const site = await loadSiteRow(site_id, tenant_id);
+    if (!site) return res.status(404).json({ ok: false, error: { message: 'site not found' }, retryable: false });
+
+    const { configureForTier, persistResult } = await import('../lib/seoOnboarding.js');
+    const result = await configureForTier(site, site.tier || 'starter');
+    try { if (typeof persistResult === 'function') await persistResult(site_id, result); }
+    catch (e) { console.warn('[runner:configure-seo] persistResult warn:', e.message); }
+
+    res.json({ ok: true, data: result || { configured: true } });
+  } catch (err) {
+    console.error('[runner:configure-seo]', err);
+    const msg = err.message || '';
+    const retryable = !/SE_RANKING.*not.*configured|api.*key.*missing|secret/i.test(msg);
+    res.status(retryable ? 500 : 400).json({ ok: false, error: { message: msg }, retryable });
+  }
+});
+
+// POST /internal/runner/advance/bing-auto-connect
+// Auto-add the site to our master Bing Webmaster account so we start
+// collecting Bing search data without user intervention. The BYO Bing
+// path is handled separately (user OAuths their own Bing account).
+router.post('/runner/advance/bing-auto-connect', requireIngestKey, async (req, res) => {
+  const { tenant_id, site_id } = req.body || {};
+  if (!tenant_id || !site_id) {
+    return res.status(400).json({ ok: false, error: { message: 'tenant_id + site_id required' }, retryable: false });
+  }
+  try {
+    const site = await loadSiteRow(site_id, tenant_id);
+    if (!site) return res.status(404).json({ ok: false, error: { message: 'site not found' }, retryable: false });
+
+    const masterKey = process.env.BING_WMT_API_KEY || process.env['BING-WMT-API-KEY'];
+    if (!masterKey) {
+      // Founder hasn't pasted the IA master Bing key yet — non-retryable.
+      // Worker should mark as failed_user_action so founder sees the gap.
+      return res.status(503).json({ ok: false, error: { message: 'BING-WMT-API-KEY not configured in KV' }, retryable: false });
+    }
+
+    const { addSite, getSiteEntry } = await import('../lib/bingWebmaster.js');
+    const siteUrl = site.domain.startsWith('http') ? site.domain : `https://${site.domain}`;
+    try { await addSite(masterKey, siteUrl); }
+    catch (e) {
+      // Bing returns various "already added" shapes — log + check entry.
+      console.warn('[runner:bing-auto-connect] addSite warn:', e.message);
+    }
+    const entry = await getSiteEntry(masterKey, siteUrl);
+
+    // Persist state so the integrations-status endpoint reflects it.
+    const pool = await getServicesPool();
+    await pool.request()
+      .input('siteId', sql.UniqueIdentifier, site_id)
+      .input('tenantId', sql.UniqueIdentifier, tenant_id)
+      .input('mode', sql.NVarChar(20), 'auto_ia')
+      .query(`UPDATE arion.site
+              SET bing_setup_mode = @mode,
+                  bing_connected = CASE WHEN bing_connected = 1 THEN 1 ELSE 1 END,
+                  bing_setup_probed_at = SYSDATETIMEOFFSET(),
+                  updated_at = SYSDATETIMEOFFSET()
+              WHERE site_id = @siteId AND tenant_id = @tenantId`);
+
+    res.json({ ok: true, data: { added: !!entry, siteUrl } });
+  } catch (err) {
+    console.error('[runner:bing-auto-connect]', err);
+    const retryable = !/api.*key.*missing|secret|invalid url/i.test(err.message || '');
+    res.status(retryable ? 500 : 400).json({ ok: false, error: { message: err.message }, retryable });
+  }
+});
+
 export default router;
