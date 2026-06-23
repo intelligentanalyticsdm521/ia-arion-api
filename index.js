@@ -20,6 +20,8 @@ import onboardingStatusRouter from './routes/onboarding/status.js';
 import onboardingSessionInfoRouter from './routes/onboarding/session-info.js';
 import onboardingActivateRouter from './routes/onboarding/activate.js';
 import onboardingRunnerRouter from './routes/onboarding/runner.js';
+import onboardingGoogleOauthRouter from './routes/onboarding/google-oauth.js';
+import onboardingBingOauthRouter from './routes/onboarding/bing-oauth.js';
 import adminOnboardExistingRouter from './routes/admin/onboardExisting.js';
 import provisioningRouter from './routes/provisioning.js';
 import pluginRouter from './routes/plugin.js';
@@ -111,6 +113,25 @@ app.use(
   enforceEmergencyReadOnly(),
   tenantResolution,
   onboardingRunnerRouter,
+);
+
+// Google + Bing dual-path onboarding orchestrators (Brandon-locked 2026-06-23).
+// Same auth chain as the runner — only the post-checkout authenticated wizard
+// hits these. See routes/onboarding/google-oauth.js + bing-oauth.js for the
+// YES / NO / NOT_SURE answer routing and the IA-master auto-provision flow.
+app.use(
+  '/onboarding/google-oauth',
+  requireAuth,
+  enforceEmergencyReadOnly(),
+  tenantResolution,
+  onboardingGoogleOauthRouter,
+);
+app.use(
+  '/onboarding/bing-oauth',
+  requireAuth,
+  enforceEmergencyReadOnly(),
+  tenantResolution,
+  onboardingBingOauthRouter,
 );
 
 // Founder admin — onboard a client whose site was built outside the system
