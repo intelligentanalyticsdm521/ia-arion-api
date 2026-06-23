@@ -44,11 +44,19 @@ GO
 -- index keeps the lookup cheap. Filtered to non-terminal phases since
 -- the vast majority of historical rows will be in 'ready' or 'failed'
 -- (or NULL pre-migration) and we don't want them bloating the index.
+--
+-- FIX (2026-06-23) — SQL Server FILTERED INDEX does NOT support NOT IN in
+-- the WHERE predicate. The original "NOT IN ('ready','failed','consulting_…')"
+-- compiled to "Incorrect syntax near 'NOT'" and blocked every subsequent
+-- migration (034 google/bing dual-path) for two consecutive pipelines.
+-- Rewrite as explicit per-value <> conjunctions which IS supported.
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_arion_site_status_phase_stuck')
-CREATE INDEX IX_arion_site_status_phase_stuck
+  EXEC('CREATE INDEX IX_arion_site_status_phase_stuck
   ON arion.site (tenant_id, status_phase)
   WHERE status_phase IS NOT NULL
-    AND status_phase NOT IN ('ready', 'failed', 'consulting_migration_queued');
+    AND status_phase <> ''ready''
+    AND status_phase <> ''failed''
+    AND status_phase <> ''consulting_migration_queued''');
 GO
 
 -- Consulting hub: pull migrations needing operator attention.
