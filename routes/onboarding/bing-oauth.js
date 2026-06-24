@@ -61,7 +61,7 @@ async function getSiteRow(pool, tenantId, siteId) {
   const r = await pool.request()
     .input('tenantId', sql.UniqueIdentifier, tenantId)
     .input('siteId', sql.UniqueIdentifier, siteId)
-    .query(`SELECT TOP 1 site_id, tenant_id, domain, primary_url, bing_connected, bing_site_url
+    .query(`SELECT TOP 1 site_id, tenant_id, domain, bing_connected, bing_site_url
               FROM arion.site
              WHERE site_id = @siteId AND tenant_id = @tenantId`);
   return r.recordset[0] || null;
