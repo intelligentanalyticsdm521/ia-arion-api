@@ -203,9 +203,51 @@ async function loadSiteRow(siteId, tenantId) {
     .input('tenantId', sql.UniqueIdentifier, tenantId)
     .query(`
       SELECT site_id, tenant_id, domain, arion_tier AS tier, feature_addons_json,
-             status_phase, plugin_status
+             status_phase, plugin_status,
+             hostinger_website_id, hostinger_subscription_id, provisioning_state
       FROM arion.site WHERE site_id = @siteId AND tenant_id = @tenantId`);
   return r.recordset[0] || null;
+}
+
+/**
+ * Persist a soft-skip reason onto arion.site.provisioning_details_json without
+ * marking the row failed. Mirrors arion-func onboardingRunner.noteSoftSkip so
+ * the founder dashboard surfaces these as "manual follow-up".
+ */
+async function noteSiteSoftSkip(siteId, key, message) {
+  try {
+    const pool = await getServicesPool();
+    await pool.request()
+      .input('sid', sql.UniqueIdentifier, siteId)
+      .input('key', sql.NVarChar(60), key)
+      .input('message', sql.NVarChar(500), (message || '').slice(0, 500))
+      .query(`
+        UPDATE arion.site
+           SET provisioning_details_json = JSON_MODIFY(
+                 JSON_MODIFY(
+                   COALESCE(provisioning_details_json, '{}'),
+                   '$.soft_skips.' + @key, @message
+                 ),
+                 '$.soft_skips_present', CAST(1 AS bit)
+               ),
+               updated_at = SYSDATETIMEOFFSET()
+         WHERE site_id = @sid
+      `);
+  } catch (e) {
+    console.warn(`[internal:noteSiteSoftSkip] site_id=${siteId} key=${key}: ${e.message}`);
+  }
+}
+
+/**
+ * True when the arion.site row has no real Hostinger website provisioned —
+ * i.e. upstream creating_hosting / installing_wordpress phases never actually
+ * ran for this site. Happens for test-seeded rows (runner walks) and for
+ * sites where the founder created the row by hand. In that state SSH wp-cli
+ * cannot work (no public_html directory) and the runner-advance endpoints
+ * must graceful-skip rather than mark the row hard-failed.
+ */
+function siteHasNoHostingerInstall(site) {
+  return !site?.hostinger_website_id && !site?.hostinger_subscription_id;
 }
 
 async function loadOwnerFromSignupSession(siteId, tenantId) {
@@ -252,8 +294,30 @@ router.post('/runner/advance/plugin-stack', requireIngestKey, async (req, res) =
     const site = await loadSiteRow(site_id, tenant_id);
     if (!site) return res.status(404).json({ ok: false, error: { message: 'site not found' }, retryable: false });
 
-    const { stripHostingerOnboardingPlugins } = await import('../lib/hostingerSsh.js');
+    const { stripHostingerOnboardingPlugins, checkWpInstallExists } = await import('../lib/hostingerSsh.js');
     const { installPluginsForTier } = await import('../lib/pluginStack.js');
+
+    // Pre-flight: graceful-skip when upstream Hostinger provisioning never ran.
+    // Test-seeded rows and runner walks that bypass create-hosting +
+    // installing-wordpress have no public_html on the box, so wp-cli would
+    // fail with `bash: cd: ... No such file or directory`. Instead of marking
+    // the row failed (which strands the founder dashboard at a phase that
+    // can't be retried without re-provisioning Hostinger), we soft-skip:
+    // record the reason on the row and return ok:true so the worker
+    // advances to the next phase. The site ends in `ready` with a
+    // soft_skips_present flag the founder dashboard surfaces as
+    // "manual follow-up".
+    if (siteHasNoHostingerInstall(site)) {
+      let wpExists = false;
+      try { wpExists = await checkWpInstallExists(site.domain); }
+      catch (e) { console.warn('[runner:plugin-stack] preflight ssh warn:', e.message); }
+      if (!wpExists) {
+        const reason = `no Hostinger website provisioned for ${site.domain}; upstream create-hosting/install-wp phases never ran`;
+        await noteSiteSoftSkip(site_id, 'plugin_stack_skipped_no_wp', reason);
+        console.warn(`[runner:plugin-stack] soft-skip site_id=${site_id}: ${reason}`);
+        return res.json({ ok: true, data: { skipped: 'no_wp_install', reason, domain: site.domain } });
+      }
+    }
 
     // 1) Strip Hostinger defaults (leaves third-party plugins alone per spec).
     try { await stripHostingerOnboardingPlugins(site.domain); }
@@ -261,13 +325,28 @@ router.post('/runner/advance/plugin-stack', requireIngestKey, async (req, res) =
 
     // 2) Install/activate the IA plugin stack for this tier.
     const installShop = false; // WooCommerce remains opt-in per memory reference_arion_plugin_stack
-    await installPluginsForTier({
-      domain: site.domain,
-      tier: site.tier || 'starter',
-      installShop,
-      iaPluginDownloadUrl: process.env.IA_PLUGIN_DOWNLOAD_URL || null,
-      provisionCode: null, // existing sites already provisioned; new sites get this via /sites/:id/provision-codes flow
-    });
+    try {
+      await installPluginsForTier({
+        domain: site.domain,
+        tier: site.tier || 'starter',
+        installShop,
+        iaPluginDownloadUrl: process.env.IA_PLUGIN_DOWNLOAD_URL || null,
+        provisionCode: null, // existing sites already provisioned; new sites get this via /sites/:id/provision-codes flow
+      });
+    } catch (e) {
+      // installPluginsForTier raises NO_WP_INSTALL when the FIRST wp-cli hits
+      // a missing public_html. Graceful-skip the same way as the pre-flight
+      // branch — covers the case where loadSiteRow's hostinger_website_id is
+      // populated but the actual directory is gone (e.g. Hostinger deleted
+      // the subdomain, or the row was migrated from a stale environment).
+      if (e.code === 'NO_WP_INSTALL' || e.noWpInstall) {
+        const reason = `wp-cli reported no public_html for ${site.domain}; firstFailedSlug=${e.firstFailedSlug || 'unknown'}`;
+        await noteSiteSoftSkip(site_id, 'plugin_stack_skipped_no_wp', reason);
+        console.warn(`[runner:plugin-stack] soft-skip on install site_id=${site_id}: ${reason}`);
+        return res.json({ ok: true, data: { skipped: 'no_wp_install', reason, domain: site.domain } });
+      }
+      throw e;
+    }
 
     res.json({ ok: true, data: { domain: site.domain, tier: site.tier || 'starter' } });
   } catch (err) {
@@ -289,19 +368,45 @@ router.post('/runner/advance/create-wp-user', requireIngestKey, async (req, res)
   try {
     const site = await loadSiteRow(site_id, tenant_id);
     if (!site) return res.status(404).json({ ok: false, error: { message: 'site not found' }, retryable: false });
+
+    const { createClientEditor, checkWpInstallExists } = await import('../lib/hostingerSsh.js');
+
+    // Pre-flight: same graceful-skip rule as plugin-stack — no public_html →
+    // can't wp-cli, can't fail. Soft-skip + advance so the walk completes.
+    if (siteHasNoHostingerInstall(site)) {
+      let wpExists = false;
+      try { wpExists = await checkWpInstallExists(site.domain); }
+      catch (e) { console.warn('[runner:create-wp-user] preflight ssh warn:', e.message); }
+      if (!wpExists) {
+        const reason = `no Hostinger website provisioned for ${site.domain}; cannot create wp-admin user`;
+        await noteSiteSoftSkip(site_id, 'create_wp_user_skipped_no_wp', reason);
+        console.warn(`[runner:create-wp-user] soft-skip site_id=${site_id}: ${reason}`);
+        return res.json({ ok: true, data: { skipped: 'no_wp_install', reason, domain: site.domain } });
+      }
+    }
+
     const owner = await loadOwnerFromSignupSession(site_id, tenant_id);
     if (!owner || !owner.email) {
       // No owner email captured yet — wizard hasn't reached Step 5 (Owner). Defer.
       return res.json({ ok: true, data: { deferred: true, reason: 'no owner email in signup_session yet' } });
     }
-    const { createClientEditor } = await import('../lib/hostingerSsh.js');
-    const result = await createClientEditor({
-      domain: site.domain,
-      clientEmail: owner.email,
-      clientFirstName: owner.firstName || 'Owner',
-      clientLastName: owner.lastName || '',
-    });
-    res.json({ ok: true, data: result || { created: true } });
+    try {
+      const result = await createClientEditor({
+        domain: site.domain,
+        clientEmail: owner.email,
+        clientFirstName: owner.firstName || 'Owner',
+        clientLastName: owner.lastName || '',
+      });
+      res.json({ ok: true, data: result || { created: true } });
+    } catch (e) {
+      if (e.code === 'NO_WP_INSTALL' || e.noWpInstall) {
+        const reason = `wp-cli reported no public_html for ${site.domain}`;
+        await noteSiteSoftSkip(site_id, 'create_wp_user_skipped_no_wp', reason);
+        console.warn(`[runner:create-wp-user] soft-skip on call site_id=${site_id}: ${reason}`);
+        return res.json({ ok: true, data: { skipped: 'no_wp_install', reason, domain: site.domain } });
+      }
+      throw e;
+    }
   } catch (err) {
     console.error('[runner:create-wp-user]', err);
     const msg = err.message || '';
