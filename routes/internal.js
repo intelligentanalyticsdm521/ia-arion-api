@@ -193,16 +193,46 @@ router.delete('/sites/:siteId/provision-codes/:codeId', requireIngestKey, async 
  * ========================================================================= */
 
 async function loadSiteRow(siteId, tenantId) {
+  // ARION schema owns ONLY product-specific site data — never contact info.
+  // Owner contact is sourced separately from arion.signup_session (transient
+  // wizard data) by handlers that need it. See memory:
+  // reference_data_ownership_architecture.
   const pool = await getServicesPool();
   const r = await pool.request()
     .input('siteId', sql.UniqueIdentifier, siteId)
     .input('tenantId', sql.UniqueIdentifier, tenantId)
     .query(`
       SELECT site_id, tenant_id, domain, arion_tier AS tier, feature_addons_json,
-             status_phase, plugin_status, primary_contact_email,
-             primary_contact_first_name, primary_contact_last_name
+             status_phase, plugin_status
       FROM arion.site WHERE site_id = @siteId AND tenant_id = @tenantId`);
   return r.recordset[0] || null;
+}
+
+async function loadOwnerFromSignupSession(siteId, tenantId) {
+  // Transient onboarding data — pulled from the LATEST signup_session row for
+  // this site. The questionnaire_json blob contains owner_first_name /
+  // owner_last_name (the wizard Step 5 owner capture). Returns null if no
+  // session exists yet (e.g. Path B founder wizard hasn't reached owner step).
+  const pool = await getServicesPool();
+  const r = await pool.request()
+    .input('siteId', sql.UniqueIdentifier, siteId)
+    .input('tenantId', sql.UniqueIdentifier, tenantId)
+    .query(`
+      SELECT TOP 1
+        email,
+        JSON_VALUE(questionnaire_json, '$.owner_first_name')   AS owner_first_name,
+        JSON_VALUE(questionnaire_json, '$.owner_last_name')    AS owner_last_name,
+        JSON_VALUE(questionnaire_json, '$.owner_email')        AS owner_email_from_json
+      FROM arion.signup_session
+      WHERE site_id = @siteId AND tenant_id = @tenantId
+      ORDER BY COALESCE(submitted_at, questionnaire_submitted_at, created_at) DESC`);
+  const row = r.recordset[0];
+  if (!row) return null;
+  return {
+    email: row.owner_email_from_json || row.email || null,
+    firstName: row.owner_first_name || null,
+    lastName: row.owner_last_name || null,
+  };
 }
 
 function ingestErr(message, retryable = false, status = 400) {
@@ -259,16 +289,17 @@ router.post('/runner/advance/create-wp-user', requireIngestKey, async (req, res)
   try {
     const site = await loadSiteRow(site_id, tenant_id);
     if (!site) return res.status(404).json({ ok: false, error: { message: 'site not found' }, retryable: false });
-    if (!site.primary_contact_email) {
+    const owner = await loadOwnerFromSignupSession(site_id, tenant_id);
+    if (!owner || !owner.email) {
       // No owner email captured yet — wizard hasn't reached Step 5 (Owner). Defer.
-      return res.json({ ok: true, data: { deferred: true, reason: 'no primary_contact_email yet' } });
+      return res.json({ ok: true, data: { deferred: true, reason: 'no owner email in signup_session yet' } });
     }
     const { createClientEditor } = await import('../lib/hostingerSsh.js');
     const result = await createClientEditor({
       domain: site.domain,
-      clientEmail: site.primary_contact_email,
-      clientFirstName: site.primary_contact_first_name || 'Owner',
-      clientLastName: site.primary_contact_last_name || '',
+      clientEmail: owner.email,
+      clientFirstName: owner.firstName || 'Owner',
+      clientLastName: owner.lastName || '',
     });
     res.json({ ok: true, data: result || { created: true } });
   } catch (err) {
