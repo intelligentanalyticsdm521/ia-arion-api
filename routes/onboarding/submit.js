@@ -538,8 +538,9 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
     await updatePhase(pool, session.site_id, 'installing_plugins');
     const tier = (answers.tier || session.tier || 'lite').toLowerCase();
     const installShop = answers.installShop === true || answers.needsShop === true;
+    const publishPdfs = answers.publishPdfs === true;
     const stackResult = await installPluginsForTier({
-      domain: domain.domain, tier, installShop,
+      domain: domain.domain, tier, installShop, publishPdfs,
       iaPluginDownloadUrl: pluginDownloadUrl, provisionCode,
     });
 
@@ -749,6 +750,7 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       provision_code: provisionCode,
       tier,
       install_shop: installShop,
+      publish_pdfs: publishPdfs,
       plugins_installed: stackResult.installed,
       plugins_skipped: stackResult.skipped,
       plugins_failed: stackResult.failed || [],
