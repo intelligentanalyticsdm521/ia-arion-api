@@ -26,7 +26,8 @@ import { getServicesPool } from '../../db/servicesPool.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
 import { firePlatformEvent } from '../../lib/platformEvents.js';
 import { sendEmail } from '../../lib/email.js';
-import { welcomeEmail, paymentFailedEmail } from '../../lib/emailTemplates.js';
+import { paymentFailedEmail } from '../../lib/emailTemplates.js';
+import { sendOnboardingWelcomeEmail } from '../../lib/welcomeEmail.js';
 import { getPlan } from '../../lib/pricing.js';
 import { getPlatformPool } from '../../db/platformPool.js';
 import { resolveTenantForBuyer } from '../../lib/coreTenants.js';
@@ -270,21 +271,37 @@ async function handleCheckoutCompleted(pool, session) {
       console.warn('[webhook] walkthrough seed failed (non-blocking):', seedErr?.message || seedErr);
     }
 
-    // Welcome email — fire and forget (don't fail the webhook if email is down)
+    // Welcome email — self-onboard variant. Routes through LUMEN-API's
+    // templated email pipeline (template_key=welcome_email_self_onboard).
+    // SPARK owns the body copy + merge-tag resolution. Fire-and-forget so a
+    // LUMEN outage NEVER fails the Stripe webhook (Stripe would otherwise
+    // retry and double-create tenant rows).
+    //
+    // No CIAM activation token here — that lives in the post-provisioning
+    // "your site is ready" email. The self-onboard welcome's CTA is the
+    // questionnaire link (onboarding_link).
     const planMeta = getPlan(meta.plan || 'starter');
     const firstName = parseFirstName(session.customer_details?.name || '');
-    const tpl = welcomeEmail({
+    const portalBase = (process.env.PORTAL_BASE_URL
+      || 'https://portal.intelligentanalyticsdm.com').replace(/\/+$/, '');
+    const onboardingLink = `${portalBase}/onboarding?session_id=${encodeURIComponent(session.id)}`;
+    sendOnboardingWelcomeEmail({
+      toEmail: customerEmail,
       firstName,
-      planName: planMeta?.name || 'your',
-      billingCycle: meta.billing_cycle || 'monthly',
-    });
-    sendEmail({
-      to: customerEmail,
-      subject: tpl.subject,
-      html: tpl.html,
-      tag: 'welcome',
-      metadata: { tenant_id: tenantId, site_id: siteId, stripe_session_id: session.id },
-    }).catch((err) => console.warn('[webhook] welcome email failed:', err.message));
+      brandName: planMeta?.name || '',
+      tenantId,
+      setupToken: null,
+      path: 'self_onboard',
+      productList: ['arion'],
+      onboardingLink,
+      extraContext: {
+        plan_name:     planMeta?.name || '',
+        billing_cycle: meta.billing_cycle || 'monthly',
+        stripe_session_id: session.id,
+      },
+    }).then((r) => {
+      if (!r.ok) console.warn('[webhook] self-onboard welcome email failed:', r.error);
+    }).catch((err) => console.warn('[webhook] self-onboard welcome email threw:', err.message));
   }
 
   console.log(`[webhook] checkout.completed → tenant=${tenantId} site=${siteId}`);
