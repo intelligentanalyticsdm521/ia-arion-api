@@ -7,6 +7,11 @@ import { createProvisionCode } from '../lib/provisionCodes.js';
 
 const router = Router();
 
+// Public API base used to construct per-tenant plugin-download token URLs
+// (same pattern as routes/onboarding/submit.js + routes/admin/onboardExisting.js).
+const ARION_API_BASE = (process.env.ARION_API_BASE_URL
+  || 'https://app-arion-api-prod-e6fuc9gzd8f3hqfe.centralus-01.azurewebsites.net').replace(/\/+$/, '');
+
 // Simple key check for internal endpoints
 function requireIngestKey(req, res, next) {
   const key = process.env.ARION_INGEST_KEY;
@@ -323,15 +328,31 @@ router.post('/runner/advance/plugin-stack', requireIngestKey, async (req, res) =
     try { await stripHostingerOnboardingPlugins(site.domain); }
     catch (e) { console.warn('[runner:plugin-stack] strip warn:', e.message); }
 
-    // 2) Install/activate the IA plugin stack for this tier.
+    // 2) Mint a fresh provision code + build the per-tenant token download URL.
+    // Same shape as routes/onboarding/submit.js + routes/admin/onboardExisting.js:
+    // arion-api serves the .zip from /plugin/download?token=<code>, and the
+    // plugin self-redeems the token on first activation to write site_token +
+    // tenant_id into wp_options. For an already-provisioned site (Brandon's
+    // case) the token is harmless: download still works, plugin sees existing
+    // site_token, no-op. For new sites it completes provisioning.
+    const pool = await getServicesPool();
+    const codeResult = await createProvisionCode(pool, {
+      tenantId: tenant_id,
+      siteId: site_id,
+      createdBy: 'runner:plugin-stack',
+      ttlDays: 1,
+    });
+    const iaPluginDownloadUrl = `${ARION_API_BASE}/plugin/download?token=${encodeURIComponent(codeResult.code)}`;
+
+    // 3) Install/activate the IA plugin stack for this tier.
     const installShop = false; // WooCommerce remains opt-in per memory reference_arion_plugin_stack
     try {
       await installPluginsForTier({
         domain: site.domain,
         tier: site.tier || 'starter',
         installShop,
-        iaPluginDownloadUrl: process.env.IA_PLUGIN_DOWNLOAD_URL || null,
-        provisionCode: null, // existing sites already provisioned; new sites get this via /sites/:id/provision-codes flow
+        iaPluginDownloadUrl,
+        provisionCode: codeResult.code,
       });
     } catch (e) {
       // installPluginsForTier raises NO_WP_INSTALL when the FIRST wp-cli hits
