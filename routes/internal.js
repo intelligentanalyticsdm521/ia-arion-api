@@ -299,6 +299,19 @@ router.post('/runner/advance/plugin-stack', requireIngestKey, async (req, res) =
     const site = await loadSiteRow(site_id, tenant_id);
     if (!site) return res.status(404).json({ ok: false, error: { message: 'site not found' }, retryable: false });
 
+    // Skip-if-already-provisioned. Mirrors the wizard-side ArionSection check
+    // (SCOPE_WORKING.md:2454) so re-walks against an already-provisioned site
+    // don't re-run the full wp-cli install. The plugin reports plugin_status =
+    // 'connected' via heartbeat once it has a valid site_token, so this is
+    // the authoritative signal. If a tier upgrade adds plugins we haven't
+    // installed yet, a future enhancement can compare plugin_version against
+    // the expected stack manifest — for now connected+versioned is enough to
+    // exit early.
+    if (site.plugin_status === 'connected' && site.plugin_version) {
+      console.log(`[runner:plugin-stack] skip site_id=${site_id} already_connected plugin_version=${site.plugin_version}`);
+      return res.json({ ok: true, data: { skipped: 'already_provisioned', plugin_version: site.plugin_version, domain: site.domain } });
+    }
+
     const { stripHostingerOnboardingPlugins, checkWpInstallExists } = await import('../lib/hostingerSsh.js');
     const { installPluginsForTier } = await import('../lib/pluginStack.js');
 
