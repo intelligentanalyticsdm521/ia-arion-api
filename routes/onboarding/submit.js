@@ -56,6 +56,7 @@ import { createJob, transitionState, getLatestJobForSite } from '../../lib/provi
 import { createProvisionCode } from '../../lib/provisionCodes.js';
 import { updateSharedProfile } from '../../db/platformPool.js';
 import { updatePhase, markFailed } from '../../lib/provisioningPhase.js';
+import { upsertBrandIntake } from '../../lib/brandIntakeClient.js';
 
 // arion-api base URL (so the IA Plugin gets a valid download URL inside wp-cli).
 // Tries env first, then falls back to the prod hostname.
@@ -139,6 +140,19 @@ router.post('/', async (req, res) => {
       brandColor: answers.primaryColor || null,
       websiteUrl: domain.domain ? `https://${domain.domain}` : null,
     });
+
+    // 3c. 2026-06-25 — If the QuestionnaireAnswers payload carries the
+    // simplified Brand Intake (BrandIntakeStep), forward it to LUMEN-API's
+    // internal voice-profile upsert. Fire-and-forget — failure here MUST
+    // NEVER block site provisioning. Empty intakes are skipped inside the
+    // client (intakeHasContent guard).
+    if (answers && answers.brandIntake) {
+      upsertBrandIntake({
+        tenantId: session.tenant_id,
+        intake: answers.brandIntake,
+        questionnaire: answers,
+      }).catch((e) => console.warn('[onboarding/submit] brand intake upsert deferred:', e?.message));
+    }
 
     // 4. BYOD verification gate. R2 — when nameservers are not yet propagated,
     //    kick off a background poller that re-runs the orchestrator as soon as
