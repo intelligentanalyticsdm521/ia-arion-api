@@ -25,6 +25,8 @@ import { getServicesPool } from '../../db/servicesPool.js';
 import { getPlatformPool } from '../../db/platformPool.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
 import { sendOnboardingWelcomeEmail, generateSetupToken } from '../../lib/welcomeEmail.js';
+import { installPluginsForTier } from '../../lib/pluginStack.js';
+import { stripHostingerOnboardingPlugins, checkWpInstallExists } from '../../lib/hostingerSsh.js';
 
 const ARION_API_BASE = (process.env.ARION_API_BASE_URL
   || 'https://app-arion-api-prod-e6fuc9gzd8f3hqfe.centralus-01.azurewebsites.net').replace(/\/+$/, '');
@@ -209,6 +211,119 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
     const pluginDownloadUrl = `${ARION_API_BASE}/plugin/download?token=${encodeURIComponent(provisionCode)}`;
     push('provision_code', 'created', `Issued 90-day code ${provisionCode.slice(0, 8)}…`);
 
+    // 6b. PLUGIN PIPELINE — ROOT CAUSE FIX (2026-06-24).
+    //
+    // Previously this handler INSERTed the arion.site row with
+    // provisioning_state='ready' and went straight to step 7 (welcome email),
+    // never calling installPluginsForTier. That meant a migrated Pro-tier site
+    // like Rolling In It got the customer's existing plugins (whatever Kodee
+    // had left behind) PLUS the IA Plugin via self-install — but NO Elementor
+    // Pro, NO Wordfence, NO EWWW config, NO Hostinger-stock-plugin strip, NO
+    // SE Ranking crawler whitelist. Diagnostic confirmed elementor-pro and
+    // wordfence MISSING from rollinginitllc.com despite being Pro tier.
+    //
+    // Now: pre-flight check WP is reachable over SSH; strip Hostinger's stock
+    // onboarding plugins; install the Golden Master stack with onlySlugs
+    // limited to the IA-owned/managed plugins (we do NOT re-install the
+    // customer's existing plugins). Failures are captured into
+    // provisioning_details_json.plugins_installed/plugins_failed/phase_errors
+    // and surfaced on the founder dashboard — never silently swallowed.
+    //
+    // Best-effort: a hard failure here (e.g. site is NOT on the master
+    // Hostinger account → no SSH access) leaves the existing customer-self-
+    // install fallback in place via the welcome-email plugin link. The
+    // provision code already created above remains valid for 90 days.
+    let pluginInstallStatus = 'not_attempted';
+    let pluginInstallError = null;
+    let pluginsInstalledList = [];
+    let pluginsFailedList = [];
+    const phaseErrors = [];
+    try {
+      const wpReachable = await checkWpInstallExists(safeDomain);
+      if (!wpReachable) {
+        pluginInstallStatus = 'ssh_skipped_off_hostinger';
+        pluginInstallError = `WP install at ~/domains/${safeDomain}/public_html not reachable via master SSH — likely off-Hostinger or different SSH account. Customer will self-install via welcome email.`;
+        push('plugin_pipeline', 'skipped', pluginInstallError);
+      } else {
+        // 6b.i — Strip Hostinger's stock onboarding plugins. Idempotent and
+        // best-effort per-plugin via tryWp() inside the helper.
+        try {
+          await stripHostingerOnboardingPlugins(safeDomain);
+          push('strip_hostinger_plugins', 'ok', 'Removed Hostinger stock onboarding plugins (if present)');
+        } catch (stripErr) {
+          phaseErrors.push({ phase: 'stripping_hostinger', error: stripErr.message.slice(0, 240) });
+          push('strip_hostinger_plugins', 'partial', stripErr.message.slice(0, 200));
+        }
+
+        // 6b.ii — Install the IA-owned Golden Master subset. We do NOT touch
+        // the customer's existing plugins (no force-install of woocommerce,
+        // pdf-embedder, astra-sites, etc.) — only the IA-managed essentials
+        // a Pro-tier site MUST have:
+        //   - intelligent-analytics (CRITICAL; the whole reason for onboarding)
+        //   - hello-elementor theme (required base for Elementor Pro)
+        //   - elementor + elementor-pro (Pro-tier promise)
+        //   - wordfence + SE Ranking whitelist (Intelligence reports need this)
+        //   - ewww-image-optimizer with IA defaults (perf baseline)
+        //   - seo-by-rank-math (only if Kodee didn't already install it)
+        //   - litespeed-cache + safe-svg + wp-mail-smtp + advanced-custom-fields
+        const stackRes = await installPluginsForTier({
+          domain: safeDomain,
+          tier,
+          installShop: false,
+          publishPdfs: false,
+          iaPluginDownloadUrl: pluginDownloadUrl,
+          provisionCode,
+          onlySlugs: [
+            'intelligent-analytics',
+            'hello-elementor',
+            'elementor',
+            'elementor-pro',
+            'wordfence',
+            'ewww-image-optimizer',
+            'seo-by-rank-math',
+            'litespeed-cache',
+            'wp-mail-smtp',
+            'safe-svg',
+            'advanced-custom-fields',
+          ],
+        });
+        pluginsInstalledList = stackRes.installed || [];
+        pluginsFailedList = stackRes.failed || [];
+        const iaInstalled = pluginsInstalledList.includes('intelligent-analytics')
+          || (stackRes.skipped || []).includes('intelligent-analytics');
+        const elProInstalled = pluginsInstalledList.includes('elementor-pro')
+          || (stackRes.skipped || []).includes('elementor-pro');
+        if (!iaInstalled) {
+          pluginInstallStatus = 'ia_plugin_missing_email_fallback';
+          pluginInstallError = `IA Plugin did not install via SSH (installed=[${pluginsInstalledList.join(',')}], failed=${JSON.stringify(pluginsFailedList).slice(0, 200)})`;
+          phaseErrors.push({ phase: 'installing_plugins', error: pluginInstallError });
+        } else if (!elProInstalled && tier === 'pro') {
+          // Pro-tier promise: Elementor Pro MUST land. If not, mark partial
+          // so the dashboard surfaces a "fix this" affordance.
+          pluginInstallStatus = 'ssh_partial_no_elementor_pro';
+          pluginInstallError = `Elementor Pro did not install (failed=${JSON.stringify(pluginsFailedList).slice(0, 240)})`;
+          phaseErrors.push({ phase: 'installing_plugins', error: pluginInstallError });
+        } else if (pluginsFailedList.length > 0) {
+          pluginInstallStatus = 'ssh_partial';
+          pluginInstallError = `Partial failures: ${JSON.stringify(pluginsFailedList).slice(0, 280)}`;
+          phaseErrors.push({ phase: 'installing_plugins_post_hooks', error: pluginInstallError });
+        } else {
+          pluginInstallStatus = 'ssh_success';
+        }
+        push(
+          'plugin_pipeline',
+          pluginInstallStatus,
+          `installed=[${pluginsInstalledList.join(',')}], skipped=[${(stackRes.skipped || []).join(',')}], failed=${pluginsFailedList.length}`,
+        );
+      }
+    } catch (pipelineErr) {
+      pluginInstallStatus = 'ssh_failed_email_fallback';
+      pluginInstallError = (pipelineErr.message || '').slice(0, 300);
+      phaseErrors.push({ phase: 'installing_plugins', error: pluginInstallError });
+      push('plugin_pipeline', 'failed', pluginInstallError);
+      console.warn(`[admin/onboard-existing] plugin pipeline failed (will rely on welcome-email fallback): ${pluginInstallError}`);
+    }
+
     // 7. Send welcome email (existing-website variant)
     const setupToken = generateSetupToken();
     // F-SEC1.3: persist SHA-256 hash of the setupToken on arion.site so the
@@ -234,6 +349,14 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
       detailsObj.welcome_token = setupTokenHash;
       detailsObj.welcome_token_expires_at = setupTokenExpiresAt;
       detailsObj.welcome_token_used_at = null;
+      // 2026-06-24 — Persist plugin-pipeline outcomes so the founder dashboard
+      // can show "plugins_failed=[]" / "Pro-stack landed" affordances instead
+      // of a green checkmark over a broken Pro-tier install.
+      detailsObj.plugin_install_status = pluginInstallStatus;
+      detailsObj.plugin_install_error = pluginInstallError;
+      detailsObj.plugins_installed = pluginsInstalledList;
+      detailsObj.plugins_failed = pluginsFailedList;
+      detailsObj.phase_errors = phaseErrors;
       await pool.request()
         .input('siteId', sql.UniqueIdentifier, siteId)
         .input('details', sql.NVarChar(sql.MAX), JSON.stringify(detailsObj))

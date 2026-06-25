@@ -353,6 +353,13 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       const tier = (answers.tier || session.tier || 'lite').toLowerCase();
       let pluginInstallStatus = 'not_attempted';
       let pluginInstallError = null;
+      // R5 2026-06-24 — Per-step failure log surfaced to dashboard via
+      // provisioning_details_json.phase_errors[]. Previously every catch
+      // here just console.warn'd, leaving the Portal showing "ready"
+      // while the IA Plugin / branding actually never installed.
+      const phaseErrors = [];
+      let pluginsInstalledList = [];
+      let pluginsFailedList = [];
       try {
         await updatePhase(pool, session.site_id, 'installing_plugins');
         // Try to install the IA Plugin via SSH. This only works if the site
@@ -368,11 +375,32 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
           // Master — the customer's existing plugins are theirs to manage.
           onlySlugs: ['intelligent-analytics'],
         });
-        pluginInstallStatus = 'ssh_success';
+        pluginsInstalledList = stackRes.installed || [];
+        pluginsFailedList = stackRes.failed || [];
+        // R5 — IA Plugin is CRITICAL on existing-WP path too. If it's not in
+        // the installed list (and not in skipped-as-already-active), surface
+        // an actionable failure so the dashboard doesn't show "ready" when
+        // the plugin link never landed.
+        const iaInstalled = pluginsInstalledList.includes('intelligent-analytics')
+          || (stackRes.skipped || []).includes('intelligent-analytics');
+        if (!iaInstalled) {
+          pluginInstallStatus = 'ia_plugin_missing_email_fallback';
+          pluginInstallError = `IA Plugin did not install via SSH (installed=[${pluginsInstalledList.join(',')}], skipped=[${(stackRes.skipped || []).join(',')}], failed=${JSON.stringify(pluginsFailedList).slice(0, 200)})`;
+          phaseErrors.push({ phase: 'installing_plugins', error: pluginInstallError });
+        } else if (pluginsFailedList.length > 0) {
+          // Partial success: IA Plugin landed but post-install hooks (license,
+          // EWWW config, SE Ranking whitelist) failed. Don't claim 'ssh_success'.
+          pluginInstallStatus = 'ssh_partial';
+          pluginInstallError = `Partial failures: ${JSON.stringify(pluginsFailedList).slice(0, 280)}`;
+          phaseErrors.push({ phase: 'installing_plugins_post_hooks', error: pluginInstallError });
+        } else {
+          pluginInstallStatus = 'ssh_success';
+        }
       } catch (sshErr) {
         // Site likely off-Hostinger or SSH unreachable — fall back to email-only.
         pluginInstallStatus = 'ssh_failed_email_fallback';
         pluginInstallError = (sshErr.message || '').slice(0, 300);
+        phaseErrors.push({ phase: 'installing_plugins', error: pluginInstallError });
         console.warn(`[onboarding/submit] existing-WP SSH install failed (will email): ${pluginInstallError}`);
       }
 
@@ -387,6 +415,11 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
           accentColor: answers.accentColor,
         });
       } catch (e) {
+        // R5 — Don't just console.warn. Push to phaseErrors so the dashboard
+        // can show "branding failed, click to retry". Still non-fatal so the
+        // welcome email + ready state still ship.
+        const brandingErr = `applyBranding (existing-WP): ${e.message.slice(0, 200)}`;
+        phaseErrors.push({ phase: 'applying_branding', error: brandingErr });
         console.warn(`[onboarding/submit] existing-WP applyBranding skipped: ${e.message.slice(0, 200)}`);
       }
 
@@ -409,6 +442,12 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         tier,
         plugin_install_status: pluginInstallStatus,
         plugin_install_error: pluginInstallError,
+        // R5 — Surface per-plugin install outcomes + per-step error log so
+        // the dashboard can render a "fix this" affordance instead of a
+        // green checkmark over a broken install.
+        plugins_installed: pluginsInstalledList,
+        plugins_failed: pluginsFailedList,
+        phase_errors: phaseErrors,
         welcome_token: setupTokenHash,
         welcome_token_expires_at: setupTokenExpiresAt,
         ia_plugin_download_url: pluginDownloadUrl,
@@ -445,7 +484,25 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
           existingWebsite: true,
         });
       } catch (emailErr) {
+        // R5 2026-06-24 — Persist welcome-email failure to provisioning_details
+        // so the dashboard can show a "resend welcome email" button. Previously
+        // only console.error'd; the customer was left wondering why no email
+        // arrived but the dashboard claimed "ready".
+        const emailErrMsg = (emailErr.message || '').slice(0, 300);
         console.error('[onboarding/submit] welcome email threw (existing-WP):', emailErr.message);
+        try {
+          await pool.request()
+            .input('siteId', sql.UniqueIdentifier, session.site_id)
+            .input('err', sql.NVarChar(300), emailErrMsg)
+            .query(`
+              UPDATE arion.site
+              SET provisioning_details_json = JSON_MODIFY(
+                    JSON_MODIFY(provisioning_details_json, '$.welcome_email_status', 'threw'),
+                    '$.welcome_email_error', @err
+                  )
+              WHERE site_id = @siteId
+            `);
+        } catch { /* best-effort metadata write */ }
       }
       await updatePhase(pool, session.site_id, 'ready');
       return;
@@ -539,10 +596,22 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
     const tier = (answers.tier || session.tier || 'lite').toLowerCase();
     const installShop = answers.installShop === true || answers.needsShop === true;
     const publishPdfs = answers.publishPdfs === true;
+    // R5 2026-06-24 — Roll-up of every non-fatal failure surfaced as a
+    // structured phase_errors[] in provisioning_details_json. Critical
+    // plugins (hello-elementor, intelligent-analytics) still throw inside
+    // installPluginsForTier and abort the run; everything else gets
+    // logged here so the dashboard can show "ready (with N warnings)"
+    // instead of silently hiding broken license/branding/image steps.
+    const phaseErrors = [];
     const stackResult = await installPluginsForTier({
       domain: domain.domain, tier, installShop, publishPdfs,
       iaPluginDownloadUrl: pluginDownloadUrl, provisionCode,
     });
+    if (Array.isArray(stackResult.failed) && stackResult.failed.length > 0) {
+      for (const f of stackResult.failed) {
+        phaseErrors.push({ phase: 'installing_plugins', slug: f.slug, error: f.error });
+      }
+    }
 
     // 16. Generate Claude copy from the questionnaire (kept as a per-block
     //     enrichment hint passed into the emitter pipeline). V2 emitters
@@ -596,6 +665,7 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       }
     } catch (e) {
       globalsResult = { ok: false, error: e.message.slice(0, 300) };
+      phaseErrors.push({ phase: 'setting_brand_globals', error: globalsResult.error });
       console.warn(`[onboarding/submit] setElementorGlobals failed (non-fatal): ${globalsResult.error}`);
     }
 
@@ -612,6 +682,7 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         accentColor: answers.accentColor,
       });
     } catch (e) {
+      phaseErrors.push({ phase: 'applying_branding', error: e.message.slice(0, 200) });
       console.warn(`[onboarding/submit] legacy applyBranding skipped: ${e.message.slice(0, 200)}`);
     }
 
@@ -641,8 +712,18 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         }
       }
     } catch (e) {
-      console.warn(`[onboarding/submit] generateSiteImages failed (non-fatal): ${e.message.slice(0, 200)}`);
+      const imgErr = e.message.slice(0, 200);
+      phaseErrors.push({ phase: 'generating_images', error: imgErr });
+      console.warn(`[onboarding/submit] generateSiteImages failed (non-fatal): ${imgErr}`);
       imageBundle = null;
+    }
+    // Per-slot image errors from inside the bundle (the bundle itself can
+    // partially succeed) — surface those individually too so the dashboard
+    // shows which specific images need a manual retry.
+    if (imageBundle && Array.isArray(imageBundle.errors)) {
+      for (const e of imageBundle.errors) {
+        phaseErrors.push({ phase: 'generating_images', slot: e.slot, error: (e.message || '').slice(0, 200) });
+      }
     }
 
     // 19. NEW (V2 F-204) — Generate Home + About + Services + Contact pages
@@ -709,7 +790,16 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       });
     } catch (e) {
       frontPageResult = { ok: false, error: e.message.slice(0, 300) };
+      phaseErrors.push({ phase: 'finalizing_homepage', error: frontPageResult.error });
       console.warn(`[onboarding/submit] setStaticFrontPage failed (non-fatal): ${frontPageResult.error}`);
+    }
+    // Per-page publish failures (silent before — only console.warn'd in the
+    // publish loop above). Surface each so the dashboard can show which
+    // specific page didn't land.
+    for (const pr of publishResults) {
+      if (!pr.ok) {
+        phaseErrors.push({ phase: 'publishing_pages', slug: pr.slug, error: (pr.error || 'unknown').slice(0, 200) });
+      }
     }
 
     await updatePhase(pool, session.site_id, 'finishing_up');
@@ -754,6 +844,11 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       plugins_installed: stackResult.installed,
       plugins_skipped: stackResult.skipped,
       plugins_failed: stackResult.failed || [],
+      // R5 2026-06-24 — Aggregated non-fatal error log across every step
+      // (plugin install hooks, brand globals, branding, image gen per slot,
+      // page publish per page, front-page set). Empty array means a clean
+      // run; the dashboard shows a warning banner when len > 0.
+      phase_errors: phaseErrors,
       // V2 AI Website Builder outcomes
       builder_version:        'v2',
       elementor_globals_set:  globalsResult.ok === true,
@@ -808,24 +903,33 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       welcomeEmailStatus = emailRes.ok ? 'sent' : 'failed';
       if (!emailRes.ok) {
         welcomeEmailError = (emailRes.error || '').slice(0, 300);
+        phaseErrors.push({ phase: 'sending_welcome', error: welcomeEmailError });
         console.warn('[onboarding/submit] welcome email failed:', welcomeEmailError);
       }
     } catch (emailErr) {
       welcomeEmailStatus = 'threw';
       welcomeEmailError = emailErr.message.slice(0, 300);
+      phaseErrors.push({ phase: 'sending_welcome', error: welcomeEmailError });
       console.error('[onboarding/submit] welcome email threw:', emailErr.message);
     }
-    // Persist email status into provisioning_details_json for UI visibility
+    // Persist email status into provisioning_details_json for UI visibility.
+    // R5 2026-06-24 — Also re-write phase_errors (the in-memory array got
+    // welcome-email pushes after the main JSON write); JSON.stringify the
+    // updated array so the dashboard sees the full per-step error log.
     try {
       await pool.request()
         .input('siteId', sql.UniqueIdentifier, session.site_id)
         .input('status', sql.NVarChar(20), welcomeEmailStatus)
         .input('err', sql.NVarChar(300), welcomeEmailError)
+        .input('phaseErrors', sql.NVarChar(sql.MAX), JSON.stringify(phaseErrors))
         .query(`
           UPDATE arion.site
           SET provisioning_details_json = JSON_MODIFY(
-                JSON_MODIFY(provisioning_details_json, '$.welcome_email_status', @status),
-                '$.welcome_email_error', @err
+                JSON_MODIFY(
+                  JSON_MODIFY(provisioning_details_json, '$.welcome_email_status', @status),
+                  '$.welcome_email_error', @err
+                ),
+                '$.phase_errors', JSON_QUERY(@phaseErrors)
               )
           WHERE site_id = @siteId
         `);

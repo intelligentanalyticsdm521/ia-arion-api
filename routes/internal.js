@@ -359,8 +359,9 @@ router.post('/runner/advance/plugin-stack', requireIngestKey, async (req, res) =
 
     // 3) Install/activate the IA plugin stack for this tier.
     const installShop = false; // WooCommerce remains opt-in per memory reference_arion_plugin_stack
+    let stackResult = null;
     try {
-      await installPluginsForTier({
+      stackResult = await installPluginsForTier({
         domain: site.domain,
         tier: site.tier || 'starter',
         installShop,
@@ -382,7 +383,47 @@ router.post('/runner/advance/plugin-stack', requireIngestKey, async (req, res) =
       throw e;
     }
 
-    res.json({ ok: true, data: { domain: site.domain, tier: site.tier || 'starter' } });
+    // R5 2026-06-24 — Surface per-plugin partial failures (license activation,
+    // EWWW config, SE Ranking whitelist, RankMath setup) so the dashboard sees
+    // them via provisioning_details_json.plugins_failed[]. Previously the
+    // runner discarded stackResult entirely and returned ok:true even when
+    // multiple post-install hooks blew up. Critical plugin failures already
+    // throw inside installPluginsForTier and hit the catch above.
+    if (stackResult && Array.isArray(stackResult.failed) && stackResult.failed.length > 0) {
+      try {
+        const pool2 = await getServicesPool();
+        await pool2.request()
+          .input('sid', sql.UniqueIdentifier, site_id)
+          .input('failed', sql.NVarChar(sql.MAX), JSON.stringify(stackResult.failed))
+          .input('installed', sql.NVarChar(sql.MAX), JSON.stringify(stackResult.installed || []))
+          .query(`
+            UPDATE arion.site
+               SET provisioning_details_json = JSON_MODIFY(
+                     JSON_MODIFY(
+                       COALESCE(provisioning_details_json, '{}'),
+                       '$.plugins_failed', JSON_QUERY(@failed)
+                     ),
+                     '$.plugins_installed', JSON_QUERY(@installed)
+                   ),
+                   updated_at = SYSDATETIMEOFFSET()
+             WHERE site_id = @sid
+          `);
+      } catch (persistErr) {
+        console.warn(`[runner:plugin-stack] persist failed[] write threw: ${persistErr.message}`);
+      }
+      console.warn(`[runner:plugin-stack] partial failures site_id=${site_id} failed=${JSON.stringify(stackResult.failed).slice(0, 300)}`);
+    }
+
+    res.json({
+      ok: true,
+      data: {
+        domain: site.domain,
+        tier: site.tier || 'starter',
+        installed: stackResult?.installed || [],
+        skipped: stackResult?.skipped || [],
+        failed: stackResult?.failed || [],
+      },
+    });
   } catch (err) {
     console.error('[runner:plugin-stack]', err);
     const retryable = !/no such|not found|auth|credentials|secret/i.test(err.message || '');

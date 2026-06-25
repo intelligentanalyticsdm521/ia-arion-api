@@ -6,6 +6,7 @@ import { requireAuth } from './middleware/requireAuth.js';
 import { tenantResolution } from './middleware/tenantResolution.js';
 import { requireArionAccess } from './middleware/requireArionAccess.js';
 import { enforceEmergencyReadOnly } from './middleware/enforceEmergencyReadOnly.js';
+import { enforceViewAsReadOnly } from './middleware/enforceViewAsReadOnly.js';
 
 import healthRouter from './routes/health.js';
 import arionRouter from './routes/arion.js';
@@ -111,6 +112,7 @@ app.use(
   '/onboarding/runner',
   requireAuth,
   enforceEmergencyReadOnly(),
+  enforceViewAsReadOnly(),
   tenantResolution,
   onboardingRunnerRouter,
 );
@@ -123,6 +125,7 @@ app.use(
   '/onboarding/google-oauth',
   requireAuth,
   enforceEmergencyReadOnly(),
+  enforceViewAsReadOnly(),
   tenantResolution,
   onboardingGoogleOauthRouter,
 );
@@ -130,6 +133,7 @@ app.use(
   '/onboarding/bing-oauth',
   requireAuth,
   enforceEmergencyReadOnly(),
+  enforceViewAsReadOnly(),
   tenantResolution,
   onboardingBingOauthRouter,
 );
@@ -156,15 +160,15 @@ app.use('/plugin', pluginRouter);
 // requireArionAccess so non-GET requests are 403'd before any tenant-scope
 // logic runs. It is a NO-OP when no x-actas-mode header is sent — normal
 // traffic and "switch" mode are unaffected. Mirrors oliver-api's chain.
-app.use('/arion', requireAuth, enforceEmergencyReadOnly(), tenantResolution, requireArionAccess, arionRouter);
+app.use('/arion', requireAuth, enforceEmergencyReadOnly(), enforceViewAsReadOnly(), tenantResolution, requireArionAccess, arionRouter);
 // ARGUS AI credit endpoints — gated by standard tenant resolution, not
 // product-access (every tenant can see their balance even without ARION).
-app.use('/argus', requireAuth, enforceEmergencyReadOnly(), tenantResolution, argusRouter);
+app.use('/argus', requireAuth, enforceEmergencyReadOnly(), enforceViewAsReadOnly(), tenantResolution, argusRouter);
 
 // Brandon 2026-06-21 — ARION Platform Pulse (Trend+Intel)/2 per the canonical
 // equal-weight architecture. Read by platform-api to compose Business Pulse.
 // Requires ARION access since the cache lives in arion.platform_pulse_cache.
-app.use('/intelligence', requireAuth, enforceEmergencyReadOnly(), tenantResolution, requireArionAccess, intelligenceRouter);
+app.use('/intelligence', requireAuth, enforceEmergencyReadOnly(), enforceViewAsReadOnly(), tenantResolution, requireArionAccess, intelligenceRouter);
 
 app.use((req, res) => res.status(404).json({ error: 'not_found', method: req.method, path: req.path }));
 
