@@ -383,6 +383,55 @@ router.post('/', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// POST /arion/sites/:siteId/apple/mark-claimed
+// Apple Business Connect has no OAuth/API, so the claim flow is manual:
+// after the tenant finishes the signup at register.apple.com/business they
+// (or the founder) click "Mark as Claimed" in the Portal. This endpoint
+// flips arion.site.apple_claimed = 1 and stamps apple_claimed_at.
+//
+// Body: { claimed?: boolean }  // defaults to true; pass false to UNMARK
+// Returns: { ok: true, apple_claimed, apple_claimed_at }
+// ---------------------------------------------------------------------------
+router.post('/:siteId/apple/mark-claimed', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  const claimed = req.body?.claimed === false ? false : true; // default true
+  try {
+    const pool = await getServicesPool();
+    const result = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('claimed', sql.Bit, claimed ? 1 : 0)
+      .query(`
+        UPDATE arion.site
+           SET apple_claimed = @claimed,
+               apple_claimed_at = CASE WHEN @claimed = 1 THEN SYSDATETIMEOFFSET() ELSE NULL END,
+               updated_at = SYSDATETIMEOFFSET()
+         WHERE site_id = @siteId AND tenant_id = @tenantId;
+
+        SELECT apple_claimed, apple_claimed_at
+          FROM arion.site
+         WHERE site_id = @siteId AND tenant_id = @tenantId;
+      `);
+    const row = result.recordset?.[0];
+    if (!row) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    }
+    return res.json({
+      data: {
+        ok: true,
+        apple_claimed: !!row.apple_claimed,
+        apple_claimed_at: row.apple_claimed_at || null,
+      },
+      meta: { tenant_id: tenantId, site_id: siteId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[sites:apple/mark-claimed]', err);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // GET /arion/sites/:siteId/editor-link - generate Elementor deep link
 router.get('/:siteId/editor-link', async (req, res) => {
   const tenantId = req.tenant.tenantId;

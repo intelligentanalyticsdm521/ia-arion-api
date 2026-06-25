@@ -135,7 +135,8 @@ router.get('/sites/:siteId/integrations-status', async (req, res) => {
       .input('siteId', sql.UniqueIdentifier, siteId)
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .query(`SELECT a.gbp_connected, a.gsc_connected, a.google_ads_linked,
-                     a.bing_connected, a.apple_claimed, a.se_ranking_project_id,
+                     a.bing_connected, a.apple_claimed, a.apple_claimed_at,
+                     a.se_ranking_project_id,
                      a.ga4_property_id, a.plugin_status, a.plugin_last_status_at
                 FROM arion.site a
                WHERE a.site_id=@siteId AND a.tenant_id=@tenantId`);
@@ -148,6 +149,7 @@ router.get('/sites/:siteId/integrations-status', async (req, res) => {
       google_ads_linked: !!row.google_ads_linked,
       bing_connected: !!row.bing_connected,
       apple_claimed: !!row.apple_claimed,
+      apple_claimed_at: row.apple_claimed_at || null,
       se_ranking_project_created: !!row.se_ranking_project_id,
       plugin_connected: !!row.plugin_status && row.plugin_status === 'connected',
     });
@@ -507,6 +509,7 @@ router.get('/overview', async (req, res) => {
         bingWebmaster: !!site?.bing_connected,
         bingPlaces: false, // no storage today; intentionally still false
         appleBusinessConnect: site?.apple_claimed ? true : false,
+        appleBusinessConnectClaimedAt: site?.apple_claimed_at || null,
         seRankingProject: seoConnected
       },
       overview: {
@@ -896,6 +899,13 @@ router.get('/my-business/:provider', async (req, res) => {
     if (provider === 'google') connected = site.gbp_connected ? true : false;
     else if (provider === 'apple') connected = site.apple_claimed ? true : false;
     let profile = nullProfile(connected);
+
+    // Apple Business Connect — no API exists, so the "profile" is purely the
+    // manual claim record. Surface the claim timestamp so the UI can render
+    // "Claimed on Jun 25, 2026" without a second round-trip.
+    if (provider === 'apple') {
+      profile = { ...profile, claimedAt: site.apple_claimed_at || null };
+    }
 
     if (provider === 'google' && connected) {
       try {
