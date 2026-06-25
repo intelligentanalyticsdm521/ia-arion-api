@@ -700,6 +700,21 @@ router.get('/website-analytics/:provider', async (req, res) => {
       } catch (e) { console.warn('[analytics] GA4 call failed:', e.message); }
     }
 
+    // BING branch — return connected flag honestly. Real Bing analytics
+    // ingest lives in arion.bing_* tables; for now we surface the connection
+    // state so the UI stops showing "not connected" when arion.site.bing_*
+    // says otherwise. Data tables get wired in a follow-up.
+    if (provider === 'BING') {
+      return res.json({
+        site: toSiteSummary(site),
+        provider,
+        connected: !!site.bing_connected,
+        summary: { users: null, sessions: null, views: null, engagementRate: null, avgEngagementTimeSeconds: null, conversions: null, revenueUsd: null },
+        breakdowns: { topPages: [], topSources: [], devices: [], geos: [], landingPages: [] },
+        integration: site.bing_connected ? { mode: site.bing_setup_mode || 'managed_by_master', site_url: site.bing_site_url, connected_at: site.bing_connected_at } : null
+      });
+    }
+
     // Fallback: return null response
     res.json({
       site: toSiteSummary(site), provider, connected: false,
