@@ -2996,9 +2996,15 @@ router.post('/seo/market-monitor/watchlist', async (req, res) => {
     const tx = new sql.Transaction(pool);
     await tx.begin();
     try {
+      // 2026-06-27 (N-08) Defense-in-depth tenant filter on DELETE. The
+      // upstream getSiteForTenant check at line ~2947 is the primary
+      // safeguard; adding tenant_id here matches the INSERT pattern below
+      // and protects against a future refactor that drops or shadows
+      // tenantId before this transaction runs.
       await new sql.Request(tx)
         .input('siteId', sql.UniqueIdentifier, siteId)
-        .query(`DELETE FROM arion.site_page_watch WHERE site_id = @siteId`);
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .query(`DELETE FROM arion.site_page_watch WHERE site_id = @siteId AND tenant_id = @tenantId`);
 
       for (const n of normalized) {
         await new sql.Request(tx)
@@ -6295,14 +6301,18 @@ router.post('/sites/:siteId/plugin/updates/plugin', async (req, res) => {
     const r = await pluginApi.updatePlugin(site, pluginFile);
 
     const finalStatus = r.ok ? 'success' : 'failure';
+    // 2026-06-27 (N-05) Tenant filter on UPDATE — same defect class as M-11.
+    // log_id is enumerable across tenants; without this filter an attacker
+    // could overwrite another tenant's plugin-update audit row.
     await pool.request()
       .input('logId', sql.UniqueIdentifier, logId)
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('status', sql.NVarChar(20), finalStatus)
       .input('errorMsg', sql.NVarChar(sql.MAX), r.ok ? null : (r.errorText || 'unknown'))
       .query(`
         UPDATE arion.site_plugin_update_log
         SET status = @status, error_message = @errorMsg, completed_at = SYSDATETIMEOFFSET()
-        WHERE log_id = @logId
+        WHERE log_id = @logId AND tenant_id = @tenantId
       `);
 
     res.json({
