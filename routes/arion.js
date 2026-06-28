@@ -982,11 +982,23 @@ router.get('/sites/:siteId/gbp/locations', async (req, res) => {
         autoSelected = exactMatches[0]; // exactly one domain-matched listing
       }
       if (autoSelected) {
+        // 2026-06-27 (Q-14) Record who triggered the auto-pick. Migration 038
+        // added updated_by_* to arion.site. consultantGrantId/consultantOrg are
+        // forward-compatible: arion-api isn't yet wired with consultant_grant
+        // middleware, so they'll resolve to NULL until that lands.
         await pool.request()
           .input('tenantId', sql.UniqueIdentifier, tenantId)
           .input('siteId', sql.UniqueIdentifier, siteId)
           .input('locationName', sql.NVarChar(200), autoSelected.location_name)
-          .query('UPDATE arion.site SET gbp_location_name = @locationName WHERE tenant_id = @tenantId AND site_id = @siteId');
+          .input('updatedByUserId', sql.UniqueIdentifier, req.platformUser?.userId || null)
+          .input('updatedByGrantId', sql.UniqueIdentifier, req.consultantGrantId || null)
+          .input('updatedByOrganization', sql.NVarChar(120), req.consultantOrg || null)
+          .query(`UPDATE arion.site
+                  SET gbp_location_name = @locationName,
+                      updated_by_user_id = @updatedByUserId,
+                      updated_by_grant_id = @updatedByGrantId,
+                      updated_by_organization = @updatedByOrganization
+                  WHERE tenant_id = @tenantId AND site_id = @siteId`);
         currentlySelected = autoSelected.location_name;
       }
     }
@@ -4260,13 +4272,24 @@ router.post('/search/indexnow/generate-key', async (req, res) => {
     const keyLocation = `https://${site.domain}/${key}.txt`;
 
     // 1. Store in DB (verified=false initially)
+    // 2026-06-27 (Q-13) Record who rotated the IndexNow key. Migration 038
+    // added updated_by_* to arion.site. consultantGrantId/consultantOrg
+    // resolve to NULL until arion-api adopts consultant_grant middleware.
     await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('siteId', sql.UniqueIdentifier, siteId)
       .input('key', sql.NVarChar(64), key)
       .input('now', sql.DateTime2, now)
+      .input('updatedByUserId', sql.UniqueIdentifier, req.platformUser?.userId || null)
+      .input('updatedByGrantId', sql.UniqueIdentifier, req.consultantGrantId || null)
+      .input('updatedByOrganization', sql.NVarChar(120), req.consultantOrg || null)
       .query(`UPDATE arion.site
-              SET indexnow_key = @key, indexnow_generated_at = @now, indexnow_verified_at = NULL
+              SET indexnow_key = @key,
+                  indexnow_generated_at = @now,
+                  indexnow_verified_at = NULL,
+                  updated_by_user_id = @updatedByUserId,
+                  updated_by_grant_id = @updatedByGrantId,
+                  updated_by_organization = @updatedByOrganization
               WHERE tenant_id = @tenantId AND site_id = @siteId`);
 
     // 2. Auto-install via IA Plugin (if app password is configured)

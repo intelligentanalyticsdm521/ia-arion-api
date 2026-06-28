@@ -83,6 +83,39 @@ router.get('/google/callback', async (req, res) => {
     `);
   }
 
+  // 2026-06-27 (Q-01) — OAuth code-replay defense. Mirrors the
+  // platform-api LinkedIn/Meta/X pattern: sha256(code) goes into
+  // core.oauth_code_log with PK(code_hash, platform). A PK violation
+  // (2627/2601) means the browser hit /callback twice — back button,
+  // double-fetch, retry. We MUST NOT re-exchange the code because Google
+  // rotates the refresh token on every exchange, which would silently
+  // invalidate the token already saved on arion.site and break active
+  // GBP/GSC/GA4 reads. Missing table (208) → platform-api migration 027
+  // hasn't been applied here yet; log and proceed rather than block OAuth
+  // on a defensive side-channel.
+  try {
+    const { createHash } = await import('node:crypto');
+    const codeHash = createHash('sha256').update(String(code)).digest('hex');
+    const platformPool = await getPlatformPool();
+    await platformPool.request()
+      .input('hash', sql.Char(64), codeHash)
+      .input('platform', sql.NVarChar(40), 'google')
+      .input('tid', sql.UniqueIdentifier, tenantId)
+      .query(`INSERT INTO core.oauth_code_log (code_hash, platform, tenant_id)
+              VALUES (@hash, @platform, @tid)`);
+  } catch (dedupeErr) {
+    if (dedupeErr?.number === 2627 || dedupeErr?.number === 2601) {
+      const portalUrl = process.env.PORTAL_URL || 'https://portal.intelligentanalyticsdm.com';
+      const alreadyTo = returnUrl || `${portalUrl}/app/settings?tab=connected&status=already_processed&siteId=${encodeURIComponent(siteId)}`;
+      return res.redirect(alreadyTo);
+    }
+    if (dedupeErr?.number === 208) {
+      console.warn('[oauth/google/callback] core.oauth_code_log not present; skipping dedupe (apply platform-api migration 027)');
+    } else {
+      console.warn('[oauth/google/callback] oauth_code_log write failed (non-fatal):', dedupeErr.message);
+    }
+  }
+
   // Exchange authorization code for tokens
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
