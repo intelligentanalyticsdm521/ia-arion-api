@@ -122,7 +122,33 @@ async function findOrCreateUser(pool, args) {
 }
 
 // --- Step 5: Link user to tenant ---------------------------------------------
+//
+// 2026-06-26 — bug fix. Previously this unconditionally inserted (tenant_id,
+// user_id) into core.tenant_users. When the script was run with a founder/IA
+// email by mistake, it linked the founder to the client tenant — which then
+// surfaced the client tenant in the founder's tenant picker as if it were
+// "theirs". Now: if the user being linked is a platform-role founder/super
+// admin, refuse the link and instruct the caller to supply the actual buyer's
+// email instead (or rely on the CIAM invitation flow to claim membership).
 async function linkUserToTenant(pool, tenantId, userId) {
+  const founderCheck = await pool.request()
+    .input('uid', sql.UniqueIdentifier, userId)
+    .query(`
+      SELECT TOP 1 1 AS yes
+        FROM core.user_platform_roles upr
+        JOIN core.platform_roles pr ON pr.platform_role_id = upr.platform_role_id
+       WHERE upr.user_id = @uid
+         AND upr.is_active = 1
+         AND pr.is_active = 1
+         AND (pr.role_key IN ('founder','super_admin') OR pr.name = 'SUPER_ADMIN')
+    `);
+  if (founderCheck.recordset.length) {
+    console.warn('  ! Refusing to link founder/super-admin to a client tenant.');
+    console.warn('    Run again with the client owner\'s email, or skip linking and let');
+    console.warn('    them claim membership via the CIAM invitation flow.');
+    return;
+  }
+
   const existing = await pool.request()
     .input('tid', sql.UniqueIdentifier, tenantId)
     .input('uid', sql.UniqueIdentifier, userId)

@@ -445,7 +445,8 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       // token with the same algorithm and timing-safe-compares the hashes.
       const setupTokenHash = (await import('node:crypto'))
         .createHash('sha256').update(setupToken).digest('hex');
-      const setupTokenExpiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
+      // 48h TTL (cut from 72h on 2026-06-27). Recovery via /welcome expired-token resend flow.
+      const setupTokenExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
 
       const provisioningDetailsExisting = {
         flow: 'existing_website',
@@ -826,7 +827,8 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
     const setupToken = generateSetupToken();
     const setupTokenHash = (await import('node:crypto'))
       .createHash('sha256').update(setupToken).digest('hex');
-    const setupTokenExpiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
+    // 48h TTL (cut from 72h on 2026-06-27). Recovery via /welcome expired-token resend flow.
+      const setupTokenExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
 
     // 23. Final state — site is ready. V2 provisioning details record the
     //     AI-WB pipeline outcomes (globals, images, page-by-page publish

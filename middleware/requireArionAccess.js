@@ -83,13 +83,39 @@ export async function requireArionAccess(req, res, next) {
       `);
 
     const row = membership.recordset[0];
-    const tenantUserId = row?.tenant_user_id || null;
-    const isFounderActingOnClient = row && String(row.matched_tenant_id).toUpperCase() === founderTenantId
+    let tenantUserId = row?.tenant_user_id || null;
+    let isFounderActingOnClient = row && String(row.matched_tenant_id).toUpperCase() === founderTenantId
                                           && String(tenantId).toUpperCase() !== founderTenantId;
+    let actingAsConsultant = false;
+
+    // 2026-06-27 — consultant_grant fallback. IA team members consulting on
+    // client tenants get access via core.consultant_grant. See memory:
+    // consultant-grant-model.
     if (!tenantUserId) {
+      const grant = await platformPool
+        .request()
+        .input("tenant_id", sql.UniqueIdentifier, tenantId)
+        .input("user_id", sql.UniqueIdentifier, user.user_id)
+        .query(`
+          SELECT TOP 1 consultant_grant_id, role_key, access_level
+            FROM core.consultant_grant
+           WHERE consultant_user_id = @user_id
+             AND client_tenant_id   = @tenant_id
+             AND is_active          = 1
+             AND (revoked_at IS NULL OR revoked_at > SYSUTCDATETIME());
+        `);
+      if (grant.recordset[0]) {
+        actingAsConsultant = true;
+        isFounderActingOnClient = true;
+      }
+    }
+
+    if (!tenantUserId && !actingAsConsultant) {
       return res.status(403).json({ error: "Not authorized", details: "User is not a member of the selected tenant." });
     }
     req.isFounderActingOnClient = isFounderActingOnClient;
+    req.actingAsConsultant = actingAsConsultant;
+    req.consultantOrg = actingAsConsultant ? 'Intelligent Analytics' : null;
 
     const serviceKey = (process.env.ARION_SERVICE_KEY || "arion").trim();
     const entitlement = await platformPool

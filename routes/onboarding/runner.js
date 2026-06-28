@@ -55,6 +55,36 @@ function assertTenantScope(req, res, bodyTenant) {
   return true;
 }
 
+/**
+ * verifySiteOwnership — confirms `site_id` belongs to `tenantId` before any
+ * write. Previously every runner endpoint took `site_id` from req.body and
+ * UPDATEd / fired events against it without cross-checking the tenant,
+ * meaning tenant A could flip tenant B's `status_phase`, re-enqueue
+ * Hostinger SSH provisioning against the wrong domain, or mint editor
+ * users on the wrong WordPress. Audit finding 3.19. Returns the site row
+ * on success or false on miss (caller sends 404).
+ *
+ * 2026-06-27 — Added.
+ */
+async function verifySiteOwnership(pool, tenantId, siteId) {
+  if (!siteId) return false;
+  try {
+    const r = await pool.request()
+      .input('tid', sql.UniqueIdentifier, tenantId)
+      .input('sid', sql.UniqueIdentifier, siteId)
+      .query(`SELECT TOP 1 site_id, domain, tenant_id, status_phase, provisioning_state
+                FROM arion.site WHERE site_id = @sid AND tenant_id = @tid`);
+    return r.recordset[0] || false;
+  } catch (e) {
+    console.warn('[runner verifySiteOwnership]', e?.message);
+    return false;
+  }
+}
+
+function send404SiteNotFound(res) {
+  return res.status(404).json({ error: { code: 'SITE_NOT_FOUND', message: 'site_id not found for this tenant', status: 404 } });
+}
+
 /* ──────────────────────────────────────────────────────────────────────
  * Helpers
  * ────────────────────────────────────────────────────────────────────── */
@@ -81,19 +111,25 @@ async function loadOrCreateSiteRow(pool, tenantId, domain, domainPath) {
   return r.recordset[0];
 }
 
-async function setStatusPhase(pool, siteId, phase) {
-  // Tries the dedicated status_phase column (added in arion migration 029
-  // alongside the runner) and falls back to the existing
-  // provisioning_details_json.current_phase write when the column hasn't
-  // landed yet. Both writes are best-effort.
+async function setStatusPhase(pool, siteId, phase, tenantId) {
+  // 2026-06-27 — Accept tenantId so the UPDATE WHERE clause includes
+  // `AND tenant_id = @tid`. Belt-and-suspenders: callers should already
+  // have called verifySiteOwnership, but the tenant filter on the UPDATE
+  // protects against race conditions and bugs where a caller forgets to
+  // verify.
   try {
-    await pool.request()
+    const r = pool.request()
       .input('sid', sql.UniqueIdentifier, siteId)
-      .input('phase', sql.NVarChar(60), phase)
-      .query(`
-        IF COL_LENGTH('arion.site', 'status_phase') IS NOT NULL
-          UPDATE arion.site SET status_phase = @phase, updated_at = GETUTCDATE() WHERE site_id = @sid;
-      `);
+      .input('phase', sql.NVarChar(60), phase);
+    let whereClause = 'WHERE site_id = @sid';
+    if (tenantId) {
+      r.input('tid', sql.UniqueIdentifier, tenantId);
+      whereClause += ' AND tenant_id = @tid';
+    }
+    await r.query(`
+      IF COL_LENGTH('arion.site', 'status_phase') IS NOT NULL
+        UPDATE arion.site SET status_phase = @phase, updated_at = GETUTCDATE() ${whereClause};
+    `);
   } catch (e) { /* never block */ }
   try { await updatePhase(pool, siteId, phase); } catch (e) { /* never block */ }
 }
@@ -136,7 +172,7 @@ router.post('/questionnaire', async (req, res) => {
          WHERE tenant_id = @tid;
       `).catch(() => { /* may not exist */ });
 
-    await setStatusPhase(pool, site.site_id, 'questionnaire_saved');
+    await setStatusPhase(pool, site.site_id, 'questionnaire_saved', tid);
     return res.json({ data: { ok: true, site_id: site.site_id } });
   } catch (err) {
     console.error('[onboarding/runner/questionnaire]', err);
@@ -156,19 +192,24 @@ router.post('/mark-for-consulting', async (req, res) => {
     const pool = await getServicesPool();
     const tid = String(req.tenant.tenantId).toUpperCase();
 
-    // Flag on arion.site — column may be new, soft-fail if missing.
+    // 2026-06-27 — verify site_id belongs to this tenant before any write.
     if (site_id) {
+      const owned = await verifySiteOwnership(pool, tid, site_id);
+      if (!owned) return send404SiteNotFound(res);
+
+      // Flag on arion.site — column may be new, soft-fail if missing.
       await pool.request()
         .input('sid', sql.UniqueIdentifier, site_id)
+        .input('tid', sql.UniqueIdentifier, tid)
         .query(`
           IF COL_LENGTH('arion.site', 'consulting_migration_queued_at') IS NOT NULL
             UPDATE arion.site
                SET consulting_migration_queued_at = SYSDATETIMEOFFSET(),
                    status_phase = 'consulting_migration_queued',
                    updated_at = GETUTCDATE()
-             WHERE site_id = @sid;
+             WHERE site_id = @sid AND tenant_id = @tid;
         `).catch(() => { /* column-absent fallback below */ });
-      await setStatusPhase(pool, site_id, 'consulting_migration_queued');
+      await setStatusPhase(pool, site_id, 'consulting_migration_queued', tid);
     }
 
     // Always fire a platform event so iadm-webhooks/notification-processor
@@ -204,21 +245,26 @@ router.post('/hostinger-provision', async (req, res) => {
   }
   try {
     const pool = await getServicesPool();
-    await setStatusPhase(pool, site_id, 'creating_hosting');
+    const tid = String(req.tenant.tenantId).toUpperCase();
+    const owned = await verifySiteOwnership(pool, tid, site_id);
+    if (!owned) return send404SiteNotFound(res);
+
+    await setStatusPhase(pool, site_id, 'creating_hosting', tid);
     // Mark queued — the legacy /onboarding/submit pipeline + worker dispatch
     // already covers the actual Hostinger SSH work. Enqueueing here keeps
     // the runner's contract simple: action() returns once the side-effect
     // is durably queued; waitFor() polls until it lands.
     await pool.request()
       .input('sid', sql.UniqueIdentifier, site_id)
+      .input('tid', sql.UniqueIdentifier, tid)
       .query(`
         UPDATE arion.site
            SET provisioning_state = CASE WHEN provisioning_state = 'ready' THEN provisioning_state ELSE 'queued' END,
                updated_at = GETUTCDATE()
-         WHERE site_id = @sid;
+         WHERE site_id = @sid AND tenant_id = @tid;
       `);
     await firePlatformEvent(pool, {
-      tenantId: String(req.tenant.tenantId).toUpperCase(),
+      tenantId: tid,
       eventType: 'arion.onboarding.hostinger_provision_requested',
       eventRefId: site_id,
       payload: { site_id, domain },
@@ -243,9 +289,12 @@ router.post('/plugin-stack-swap', async (req, res) => {
   if (!site_id) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'site_id required', status: 400 } });
   try {
     const pool = await getServicesPool();
-    await setStatusPhase(pool, site_id, 'installing_plugins');
+    const tid = String(req.tenant.tenantId).toUpperCase();
+    const owned = await verifySiteOwnership(pool, tid, site_id);
+    if (!owned) return send404SiteNotFound(res);
+    await setStatusPhase(pool, site_id, 'installing_plugins', tid);
     await firePlatformEvent(pool, {
-      tenantId: String(req.tenant.tenantId).toUpperCase(),
+      tenantId: tid,
       eventType: 'arion.onboarding.plugin_swap_requested',
       eventRefId: site_id,
       payload: { site_id, domain: domain || null, mode: 'full_stack' },
@@ -269,9 +318,12 @@ router.post('/plugin-install-only', async (req, res) => {
   if (!site_id) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'site_id required', status: 400 } });
   try {
     const pool = await getServicesPool();
-    await setStatusPhase(pool, site_id, 'installing_plugins');
+    const tid = String(req.tenant.tenantId).toUpperCase();
+    const owned = await verifySiteOwnership(pool, tid, site_id);
+    if (!owned) return send404SiteNotFound(res);
+    await setStatusPhase(pool, site_id, 'installing_plugins', tid);
     await firePlatformEvent(pool, {
-      tenantId: String(req.tenant.tenantId).toUpperCase(),
+      tenantId: tid,
       eventType: 'arion.onboarding.plugin_swap_requested',
       eventRefId: site_id,
       payload: { site_id, domain: domain || null, mode: 'ia_plugin_only' },
@@ -294,9 +346,12 @@ router.post('/create-wp-user', async (req, res) => {
   if (!site_id) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'site_id required', status: 400 } });
   try {
     const pool = await getServicesPool();
-    await setStatusPhase(pool, site_id, 'creating_editor_user');
+    const tid = String(req.tenant.tenantId).toUpperCase();
+    const owned = await verifySiteOwnership(pool, tid, site_id);
+    if (!owned) return send404SiteNotFound(res);
+    await setStatusPhase(pool, site_id, 'creating_editor_user', tid);
     await firePlatformEvent(pool, {
-      tenantId: String(req.tenant.tenantId).toUpperCase(),
+      tenantId: tid,
       eventType: 'arion.onboarding.create_wp_user_requested',
       eventRefId: site_id,
       payload: { site_id, domain: domain || null },
@@ -321,9 +376,12 @@ router.post('/ai-website-builder', async (req, res) => {
   if (!site_id) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'site_id required', status: 400 } });
   try {
     const pool = await getServicesPool();
-    await setStatusPhase(pool, site_id, 'generating_pages');
+    const tid = String(req.tenant.tenantId).toUpperCase();
+    const owned = await verifySiteOwnership(pool, tid, site_id);
+    if (!owned) return send404SiteNotFound(res);
+    await setStatusPhase(pool, site_id, 'generating_pages', tid);
     await firePlatformEvent(pool, {
-      tenantId: String(req.tenant.tenantId).toUpperCase(),
+      tenantId: tid,
       eventType: 'arion.onboarding.ai_website_builder_requested',
       eventRefId: site_id,
       payload: { site_id, domain: domain || null },
@@ -347,9 +405,12 @@ router.post('/seo-keywords-seed', async (req, res) => {
   if (!site_id) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'site_id required', status: 400 } });
   try {
     const pool = await getServicesPool();
-    await setStatusPhase(pool, site_id, 'seeding_keywords');
+    const tid = String(req.tenant.tenantId).toUpperCase();
+    const owned = await verifySiteOwnership(pool, tid, site_id);
+    if (!owned) return send404SiteNotFound(res);
+    await setStatusPhase(pool, site_id, 'seeding_keywords', tid);
     await firePlatformEvent(pool, {
-      tenantId: String(req.tenant.tenantId).toUpperCase(),
+      tenantId: tid,
       eventType: 'arion.onboarding.seo_keywords_seed_requested',
       eventRefId: site_id,
       payload: { site_id, questionnaire: questionnaire || {} },
@@ -371,9 +432,12 @@ router.post('/seo-competitors-seed', async (req, res) => {
   if (!site_id) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'site_id required', status: 400 } });
   try {
     const pool = await getServicesPool();
-    await setStatusPhase(pool, site_id, 'seeding_competitors');
+    const tid = String(req.tenant.tenantId).toUpperCase();
+    const owned = await verifySiteOwnership(pool, tid, site_id);
+    if (!owned) return send404SiteNotFound(res);
+    await setStatusPhase(pool, site_id, 'seeding_competitors', tid);
     await firePlatformEvent(pool, {
-      tenantId: String(req.tenant.tenantId).toUpperCase(),
+      tenantId: tid,
       eventType: 'arion.onboarding.seo_competitors_seed_requested',
       eventRefId: site_id,
       payload: { site_id, questionnaire: questionnaire || {} },
@@ -396,11 +460,14 @@ router.post('/bing-oauth-start', async (req, res) => {
   if (!site_id) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'site_id required', status: 400 } });
   try {
     const pool = await getServicesPool();
-    await setStatusPhase(pool, site_id, 'awaiting_bing_oauth');
+    const tid = String(req.tenant.tenantId).toUpperCase();
+    const owned = await verifySiteOwnership(pool, tid, site_id);
+    if (!owned) return send404SiteNotFound(res);
+    await setStatusPhase(pool, site_id, 'awaiting_bing_oauth', tid);
     // Production: lib/bingWebmaster.js owns the OAuth URL builder. For
     // now, mark queued so the engine waits for the integration row.
     await firePlatformEvent(pool, {
-      tenantId: String(req.tenant.tenantId).toUpperCase(),
+      tenantId: tid,
       eventType: 'arion.onboarding.bing_oauth_requested',
       eventRefId: site_id,
       payload: { site_id },
@@ -458,11 +525,14 @@ router.get('/status/:tenantId/:siteId', async (req, res) => {
     try { pd = row.provisioning_details_json ? JSON.parse(row.provisioning_details_json) : null; } catch { /* noop */ }
 
     // Try a focused status_phase read (column exists or not).
+    // 2026-06-27 — tenant_id filter added; outer query already 404s on
+    // tenant mismatch but belt-and-suspenders.
     let statusPhase = null;
     try {
       const phaseRes = await pool.request()
         .input('sid', sql.UniqueIdentifier, siteId)
-        .query(`SELECT status_phase FROM arion.site WHERE site_id = @sid`);
+        .input('tid', sql.UniqueIdentifier, tenantId)
+        .query(`SELECT status_phase FROM arion.site WHERE site_id = @sid AND tenant_id = @tid`);
       statusPhase = phaseRes.recordset?.[0]?.status_phase || null;
     } catch { /* column may not exist */ }
 
