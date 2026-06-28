@@ -20,6 +20,7 @@ import onboardingSubmitRouter from './routes/onboarding/submit.js';
 import onboardingStatusRouter from './routes/onboarding/status.js';
 import onboardingSessionInfoRouter from './routes/onboarding/session-info.js';
 import onboardingActivateRouter from './routes/onboarding/activate.js';
+import onboardingActivateResendRouter from './routes/onboarding/activateResend.js';
 import onboardingRunnerRouter from './routes/onboarding/runner.js';
 import onboardingGoogleOauthRouter from './routes/onboarding/google-oauth.js';
 import onboardingBingOauthRouter from './routes/onboarding/bing-oauth.js';
@@ -102,6 +103,9 @@ app.use('/onboarding/checkout', onboardingCheckoutRouter);
 app.use('/onboarding/submit', onboardingSubmitRouter);
 app.use('/onboarding/status', onboardingStatusRouter);
 app.use('/onboarding/session-info', onboardingSessionInfoRouter);
+// 2026-06-27 — Resend route mounted BEFORE /onboarding/activate so the
+// `/resend` sub-path doesn't get swallowed by activate.js' `POST /` handler.
+app.use('/onboarding/activate/resend', onboardingActivateResendRouter);
 app.use('/onboarding/activate', onboardingActivateRouter);
 
 // OnboardingRunner orchestrator — drives the Portal-side engine in

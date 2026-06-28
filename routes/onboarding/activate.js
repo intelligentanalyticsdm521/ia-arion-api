@@ -112,7 +112,12 @@ router.post('/', async (req, res) => {
         // already does it). Without this, leaked Path A tokens were
         // functionally immortal until used.
         if (arionDetails.welcome_token_expires_at && new Date(arionDetails.welcome_token_expires_at) < new Date()) {
-          return res.status(409).json({ error: { code: 'TOKEN_EXPIRED' } });
+          // 2026-06-27 — Brandon-directed: expired tokens must hand the user
+          // to the resend-verification flow at POST /onboarding/activate/resend.
+          // Portal `/welcome` reads `can_resend` and shows a "Send me a new
+          // link" button. Including the email in the response is intentional
+          // — it's already in the request body, so this leaks nothing.
+          return res.status(409).json({ error: { code: 'TOKEN_EXPIRED', can_resend: true } });
         }
         // F-SEC1.3 (2026-06-21): stored value is the SHA-256 hex hash of the
         // plaintext token. We compare hash-vs-hash via constant-time eq.
@@ -134,7 +139,12 @@ router.post('/', async (req, res) => {
       const oRec = oRow.recordset[0];
       if (oRec?.welcome_token) {
         if (oRec.welcome_token_expires_at && new Date(oRec.welcome_token_expires_at) < new Date()) {
-          return res.status(409).json({ error: { code: 'TOKEN_EXPIRED' } });
+          // 2026-06-27 — Brandon-directed: expired tokens must hand the user
+          // to the resend-verification flow at POST /onboarding/activate/resend.
+          // Portal `/welcome` reads `can_resend` and shows a "Send me a new
+          // link" button. Including the email in the response is intentional
+          // — it's already in the request body, so this leaks nothing.
+          return res.status(409).json({ error: { code: 'TOKEN_EXPIRED', can_resend: true } });
         }
         // F-SEC1.3 (2026-06-21): stored value is SHA-256 hex hash.
         if (timingSafeEq(oRec.welcome_token, setupTokenHash)) {
