@@ -1003,12 +1003,31 @@ router.get('/sites/:siteId/gbp/locations', async (req, res) => {
       }
     }
 
+    // 2026-06-28 — P0 cross-tenant fix mirroring GA4/GSC picker. Filter
+    // returned locations to only domain-matching (match_score >= 1.0) so
+    // Brandon doesn't see Briarwood / IA / MWAG GBPs while connecting RII.
+    // showAll=1 returns the unfiltered list with an amber warning in UI.
+    // can_auto_provision flagged when filter empties AND master service
+    // account JSON is in KV — UI offers "Create new GBP for <domain>".
+    const showAll = String(req.query.showAll || '') === '1';
+    const filteredLocations = showAll ? locations : locations.filter((l) => Number(l.match_score) >= 1.0);
+    let canAutoProvision = false;
+    if (filteredLocations.length === 0) {
+      try {
+        const { isIaMasterConfigured } = await import('../lib/iaMasterGoogle.js');
+        canAutoProvision = await isIaMasterConfigured();
+      } catch { /* keep false */ }
+    }
     res.json({
       data: {
-        locations,
+        locations: filteredLocations,
+        locations_total: locations.length,
+        domain_filter_active: !showAll,
+        no_matching_locations: filteredLocations.length === 0,
+        can_auto_provision: canAutoProvision,
         currently_selected: currentlySelected,
         site_domain: site.domain,
-        suggestion: locations.find((l) => l.match_score >= 1.0)?.location_name || null,
+        suggestion: filteredLocations.find((l) => l.match_score >= 1.0)?.location_name || null,
         auto_selected: autoSelected ? { location_name: autoSelected.location_name, title: autoSelected.title, reason: locations.length === 1 ? 'only_listing' : 'unique_domain_match' } : null,
       },
       meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
