@@ -113,6 +113,10 @@ router.post("/grant", async (req, res) => {
     if (!tenant_id || !Number.isInteger(Number(credits))) {
       return res.status(400).json({ error: { code: "bad_request", message: "tenant_id + integer credits required" } });
     }
+    // 2026-06-27 (M-03) Reject body-supplied tenant_id that doesn't match the session tenant to prevent cross-tenant grant minting.
+    if (String(tenant_id).toUpperCase() !== String(req.tenant.tenantId).toUpperCase()) {
+      return res.status(403).json({ error: { code: "TENANT_MISMATCH" } });
+    }
     const pool = await getServicesPool();
     const r = await pool.request()
       .input("tid",     sql.UniqueIdentifier, tenant_id)

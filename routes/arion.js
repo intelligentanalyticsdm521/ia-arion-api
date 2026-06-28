@@ -6383,11 +6383,16 @@ router.post('/sites/:siteId/plugin/updates/core', async (req, res) => {
 
     const r = await pluginApi.updateCore(site);
 
-    await pool.request()
+    // 2026-06-27 (M-11) scope log-row UPDATE to current tenant to prevent cross-tenant audit corruption
+    const updResult = await pool.request()
       .input('logId', sql.UniqueIdentifier, logId)
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('status', sql.NVarChar(20), r.ok ? 'success' : 'failure')
       .input('errorMsg', sql.NVarChar(sql.MAX), r.ok ? null : (r.errorText || 'unknown'))
-      .query(`UPDATE arion.site_plugin_update_log SET status = @status, error_message = @errorMsg, completed_at = SYSDATETIMEOFFSET() WHERE log_id = @logId`);
+      .query(`UPDATE arion.site_plugin_update_log SET status = @status, error_message = @errorMsg, completed_at = SYSDATETIMEOFFSET() WHERE log_id = @logId AND tenant_id = @tenantId`);
+    if (updResult.rowsAffected[0] === 0) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Log entry not found', status: 404 } });
+    }
 
     res.json({
       data: { success: r.ok, log_id: logId, detail: r.data || null },
