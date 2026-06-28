@@ -25,6 +25,7 @@ import { getServicesPool } from '../../db/servicesPool.js';
 import { getPlatformPool } from '../../db/platformPool.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
 import { sendOnboardingWelcomeEmail, generateSetupToken } from '../../lib/welcomeEmail.js';
+import { upsertTenantInvitation } from '../../lib/tenantInvitations.js';
 import { installPluginsForTier } from '../../lib/pluginStack.js';
 import { stripHostingerOnboardingPlugins, checkWpInstallExists } from '../../lib/hostingerSsh.js';
 
@@ -382,6 +383,21 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
       push('welcome_token', 'failed', (tokenErr.message || '').slice(0, 200));
       console.error('[admin/onboard-existing] persist welcome_token failed:', tokenErr);
     }
+    // 2026-06-27 — C.01: insert/refresh the core.tenant_invitations row so
+    // platform-api/session/verify.js auto-claims this customer into their
+    // tenant on first CIAM verify.
+    try {
+      await upsertTenantInvitation(platformPool, {
+        tenantId,
+        email: safeEmail,
+        roleKey: 'owner',
+      });
+      push('tenant_invitation', 'upserted', `pending invitation for ${safeEmail}`);
+    } catch (invErr) {
+      console.error('[admin/onboard-existing] tenant_invitations upsert failed:', invErr?.message);
+      push('tenant_invitation', 'failed', (invErr?.message || '').slice(0, 200));
+    }
+
     let emailResult;
     try {
       emailResult = await sendOnboardingWelcomeEmail({

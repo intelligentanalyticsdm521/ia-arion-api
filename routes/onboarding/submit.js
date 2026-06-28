@@ -54,7 +54,8 @@ import {
 } from '../../lib/welcomeEmail.js';
 import { createJob, transitionState, getLatestJobForSite } from '../../lib/provisioningJobs.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
-import { updateSharedProfile } from '../../db/platformPool.js';
+import { updateSharedProfile, getPlatformPool } from '../../db/platformPool.js';
+import { upsertTenantInvitation } from '../../lib/tenantInvitations.js';
 import { updatePhase, markFailed } from '../../lib/provisioningPhase.js';
 import { upsertBrandIntake } from '../../lib/brandIntakeClient.js';
 
@@ -482,6 +483,22 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
           WHERE site_id = @siteId
         `);
 
+      // 2026-06-27 — C.01: insert/refresh the core.tenant_invitations row
+      // so platform-api/session/verify.js auto-claims this customer into
+      // their paid tenant the first time they complete CIAM. Best-effort —
+      // if the upsert fails we still send the welcome email; the customer
+      // can self-link via the post-CIAM AppGate flow.
+      try {
+        const platformPool = await getPlatformPool();
+        await upsertTenantInvitation(platformPool, {
+          tenantId: session.tenant_id,
+          email: session.email,
+          roleKey: 'owner',
+        });
+      } catch (invErr) {
+        console.error('[onboarding/submit] tenant_invitations upsert (existing-WP) failed:', invErr?.message);
+      }
+
       // Welcome email — include the plugin download URL so off-Hostinger
       // customers can install it themselves.
       await updatePhase(pool, session.site_id, 'sending_welcome');
@@ -898,6 +915,20 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
             updated_at = GETUTCDATE()
         WHERE site_id = @siteId
       `);
+
+    // 2026-06-27 — C.01: insert/refresh the core.tenant_invitations row
+    // so platform-api/session/verify.js auto-claims this customer into
+    // their paid tenant the first time they complete CIAM.
+    try {
+      const platformPool = await getPlatformPool();
+      await upsertTenantInvitation(platformPool, {
+        tenantId: session.tenant_id,
+        email: session.email,
+        roleKey: 'owner',
+      });
+    } catch (invErr) {
+      console.error('[onboarding/submit] tenant_invitations upsert (new-site) failed:', invErr?.message);
+    }
 
     // 24. Send the "your site is ready + activate your portal" email. Best-effort
     //     but failures are now persisted into provisioning_details_json so the
