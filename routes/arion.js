@@ -41,6 +41,7 @@ import pluginRouter from './arion/plugin.js';
 import blocksRouter from './arion/blocks.js';
 import intelligenceRouter from './arion/intelligence.js';
 import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } from '../lib/websiteBuilder/costGuard.js';
+import { signOAuthState } from '../lib/oauthState.js';
 
 const router = Router();
 
@@ -1119,7 +1120,17 @@ router.post('/integrations/google/connect', async (req, res) => {
   if (!clientId || !redirectUri) {
     return res.status(503).json({ error: { code: 'NOT_CONFIGURED', message: 'Google OAuth not configured', status: 503 } });
   }
-  const state = Buffer.from(JSON.stringify({ tenantId, siteId, setupMode, returnUrl })).toString('base64url');
+  // 2026-06-27 — Sign state via HMAC + embed initiator email so the
+  // callback can reject cross-account refresh-token swaps. See
+  // lib/oauthState.js for the threat model.
+  const initiatorEmail = (req.user?.email || req.tenant?.userEmail || '').toLowerCase() || null;
+  let state;
+  try {
+    state = signOAuthState({ tenantId, siteId, setupMode, returnUrl, initiatorEmail });
+  } catch (e) {
+    console.error('[arion/integrations/google/connect] sign state failed:', e.message);
+    return res.status(503).json({ error: { code: 'NOT_CONFIGURED', message: 'OAuth state signing key not configured', status: 503 } });
+  }
   // v2.0.13: force account picker (select_account) so users can switch Google
   // accounts when reconnecting — was reusing the previously-signed-in account.
   const params = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', scope, state, access_type: 'offline', prompt: 'select_account consent' });

@@ -7,24 +7,25 @@ import { getPlatformPool } from '../db/platformPool.js';
 // sync. Cross-product HTTP call to LUMEN-API; failure NEVER breaks the
 // callback redirect (fire-and-forget).
 import { completeWalkthroughTaskByKindFor } from '../lib/walkthroughClient.js';
+import { verifyOAuthState, decodeGoogleIdTokenEmail } from '../lib/oauthState.js';
 
 const router = Router();
 
 // ─── GET /oauth/google/connect ────────────────────────────────
-// Legacy direct-link flow (portal can also use POST /arion/integrations/google/connect)
-router.get('/google/connect', async (req, res) => {
-  const { scope, redirect_uri, tenant_id, site_id } = req.query;
-  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
-  if (!clientId) {
-    return res.status(503).json({ error: { code: 'SERVICE_UNAVAILABLE', message: 'Google OAuth not configured', status: 503 } });
-  }
-  const state = Buffer.from(JSON.stringify({ tenantId: tenant_id, siteId: site_id, scope })).toString('base64url');
-  const callbackUrl = redirect_uri || process.env.GOOGLE_OAUTH_REDIRECT_URI || '';
-  const params = new URLSearchParams({
-    client_id: clientId, redirect_uri: callbackUrl, response_type: 'code',
-    scope: scope || 'openid profile email', state, access_type: 'offline', prompt: 'consent'
+// 2026-06-27 — DEPRECATED. The legacy unauthenticated `state = base64url(json)`
+// flow was the entry point for a cross-tenant refresh-token swap attack. The
+// portal must use the authenticated POST /arion/integrations/google/connect
+// or POST /onboarding/google-oauth/byo-start, both of which sign state via
+// lib/oauthState.signOAuthState. Returning 410 Gone makes the regression
+// obvious if anything still hits this path.
+router.get('/google/connect', (req, res) => {
+  return res.status(410).json({
+    error: {
+      code: 'ENDPOINT_DEPRECATED',
+      message: 'GET /oauth/google/connect was removed. Use the authenticated POST /arion/integrations/google/connect or POST /onboarding/google-oauth/byo-start instead.',
+      status: 410,
+    },
   });
-  res.json({ data: { oauth_url: 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString() }, meta: { timestamp: new Date().toISOString() } });
 });
 
 // ─── GET /oauth/google/callback ───────────────────────────────
@@ -54,20 +55,25 @@ router.get('/google/callback', async (req, res) => {
     `);
   }
 
-  let stateData;
-  try {
-    stateData = JSON.parse(Buffer.from(state, 'base64url').toString('utf8'));
-  } catch (err) {
-    console.error('[oauth/google/callback] Failed to parse state:', err.message);
+  // 2026-06-27 — Cross-tenant refresh-token swap defense:
+  //   verifyOAuthState rejects unsigned states + states whose HMAC doesn't
+  //   match the configured OAUTH_STATE_SECRET. Anything that gets here
+  //   without a valid signature is either an attacker probe, a stale
+  //   state from before this deploy, or a misconfigured client. All three
+  //   fail closed with a single user-visible "please retry" page.
+  const stateData = verifyOAuthState(state);
+  if (!stateData) {
+    console.warn('[oauth/google/callback] Rejected unsigned or tampered state');
     return res.status(400).send(`
       <html><body>
         <h2>Google Connection Failed</h2>
-        <p>Invalid state parameter.</p>
+        <p>Your sign-in link expired or was rejected for security reasons.</p>
+        <p>Please return to the portal and click <strong>Connect</strong> again.</p>
       </body></html>
     `);
   }
 
-  const { tenantId, siteId, returnUrl } = stateData;
+  const { tenantId, siteId, returnUrl, initiatorEmail } = stateData;
   if (!tenantId || !siteId) {
     return res.status(400).send(`
       <html><body>
@@ -138,6 +144,32 @@ router.get('/google/callback', async (req, res) => {
         <p>Google did not return a refresh token. Please revoke access and try again.</p>
       </body></html>
     `);
+  }
+
+  // 2026-06-27 — Email-match check.
+  // The state HMAC proves the user who started the OAuth was authorised on
+  // this tenant at /connect time. The id_token email proves which Google
+  // account the user just signed into. If they don't match, an attacker
+  // is trying to bind their OWN Google account to someone else's site
+  // (e.g. they intercepted the auth URL or copy-pasted state across
+  // browsers). We require initiatorEmail to be present and to match the
+  // verified id_token email exactly.
+  const googleEmail = decodeGoogleIdTokenEmail(tokens.id_token);
+  if (initiatorEmail) {
+    if (!googleEmail || googleEmail !== String(initiatorEmail).toLowerCase()) {
+      console.warn('[oauth/google/callback] Google email does not match initiator',
+        { tenantId, siteId, initiatorEmail, googleEmail });
+      return res.status(403).send(`
+        <html><body>
+          <h2>Google Connection Failed</h2>
+          <p>The Google account you signed into <strong>(${googleEmail || 'unknown'})</strong>
+             does not match the portal account that started this connection
+             <strong>(${initiatorEmail})</strong>.</p>
+          <p>Please return to the portal and click <strong>Connect</strong> again,
+             then sign into the matching Google account.</p>
+        </body></html>
+      `);
+    }
   }
 
   // Store refresh token and update connection flags in the database

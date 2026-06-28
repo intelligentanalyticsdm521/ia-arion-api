@@ -51,6 +51,7 @@ import {
   isIaMasterConfigured,
 } from '../../lib/iaMasterGoogle.js';
 import { firePlatformEvent } from '../../lib/platformEvents.js';
+import { signOAuthState } from '../../lib/oauthState.js';
 
 const router = Router();
 
@@ -219,12 +220,21 @@ router.post('/byo-start', async (req, res) => {
     return res.status(503).json({ error: { code: 'NOT_CONFIGURED', message: 'Google OAuth not configured', status: 503 } });
   }
   const tid = String(req.tenant.tenantId).toUpperCase();
-  const state = Buffer.from(JSON.stringify({
-    tenantId: tid,
-    siteId: site_id,
-    setupMode: 'ARION_AUTO_SETUP',
-    returnUrl,
-  })).toString('base64url');
+  // 2026-06-27 — HMAC-signed state + initiator email (see lib/oauthState.js).
+  const initiatorEmail = (req.user?.email || req.tenant?.userEmail || '').toLowerCase() || null;
+  let state;
+  try {
+    state = signOAuthState({
+      tenantId: tid,
+      siteId: site_id,
+      setupMode: 'ARION_AUTO_SETUP',
+      returnUrl,
+      initiatorEmail,
+    });
+  } catch (e) {
+    console.error('[google-oauth/byo-start] sign state failed:', e.message);
+    return res.status(503).json({ error: { code: 'NOT_CONFIGURED', message: 'OAuth state signing key not configured', status: 503 } });
+  }
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,

@@ -68,7 +68,16 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
     const pool = await getServicesPool();        // arion.* schema
     const platformPool = await getPlatformPool(); // core.* schema
 
-    // 1. Find or create tenant (core.tenants is in the platform DB)
+    // 1. Find or create tenant (core.tenants is in the platform DB).
+    //
+    // 2026-06-27 — Tightened: previously the WHERE clause was
+    //   t.website_url LIKE '%' + @domain + '%' OR tu.tenant_id IS NOT NULL
+    // which would happily match `intelligentanalyticsdm.com` against
+    // `intelligentanalyticsdm.com.evil.com`, AND would attach this
+    // onboarding to ANY tenant the email-owner already belonged to, even
+    // an unrelated one (e.g. the founder's own tenant). Now: exact
+    // host-only match on website_url, and the email→tenant_users path
+    // additionally requires that tenant to already own this domain.
     let tenantId;
     const tenantHit = await platformPool.request()
       .input('email', sql.NVarChar(254), safeEmail)
@@ -76,9 +85,8 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
       .query(`
         SELECT TOP 1 t.tenant_id, t.name, t.full_name
         FROM core.tenants t
-        LEFT JOIN core.users u ON u.email = @email
-        LEFT JOIN core.tenant_users tu ON tu.user_id = u.user_id AND tu.tenant_id = t.tenant_id
-        WHERE t.website_url LIKE '%' + @domain + '%' OR tu.tenant_id IS NOT NULL
+        WHERE LOWER(REPLACE(REPLACE(REPLACE(ISNULL(t.website_url, ''), 'https://', ''), 'http://', ''), 'www.', ''))
+              IN (@domain, @domain + '/')
       `);
     if (tenantHit.recordset.length > 0) {
       tenantId = tenantHit.recordset[0].tenant_id;
@@ -332,7 +340,10 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
     // Plaintext setupToken only lives in the welcome email URL below.
     const setupTokenHash = (await import('node:crypto'))
       .createHash('sha256').update(setupToken).digest('hex');
-    const setupTokenExpiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
+    // 2026-06-27 — Brandon-directed 48h TTL (down from 72h). The expired-token
+    // resend-verification flow at /onboarding/activate handles users who miss
+    // the window — see `routes/onboarding/activate.js`.
+    const setupTokenExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
     try {
       const existingDetailsRes = await pool.request()
         .input('siteId', sql.UniqueIdentifier, siteId)
