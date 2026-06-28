@@ -6640,9 +6640,48 @@ router.get('/integrations/google/properties', async (req, res) => {
       }
     }
 
+    // 2026-06-28 — P0 cross-tenant fix. Previously returned EVERY GA4/GSC
+    // the user's Google account could see — operator picking one for the
+    // wrong tenant would link e.g. Briarwood's GA4 into RII's arion.site
+    // row (real cross-business data leak). Now we filter the returned
+    // lists to only properties whose name/URL matches THIS site's domain.
+    // When zero match found AND GOOGLE-MASTER-SERVICE-ACCOUNT-JSON is in
+    // KV, the response flags can_auto_provision so the Portal can offer
+    // the master-service-account path. "showAll=1" query param lets the
+    // operator opt into the unfiltered list (legacy escape hatch — should
+    // be rare).
+    const siteHost = String(site.domain || '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '').toLowerCase();
+    const cleanHost = siteHost.replace(/[^a-z0-9]/g, '');
+    const matchesDomain = (haystack) => {
+      const s = String(haystack || '').replace(/^sc-domain:/, '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '').toLowerCase();
+      const clean = s.replace(/[^a-z0-9]/g, '');
+      if (!clean) return false;
+      return clean === cleanHost || clean.includes(cleanHost) || cleanHost.includes(clean);
+    };
+    const showAll = String(req.query.showAll || '') === '1';
+    const filteredGa4 = showAll ? ga4Properties : ga4Properties.filter((p) => matchesDomain(p.displayName));
+    const filteredGsc = showAll ? gscSites : gscSites.filter((s) => matchesDomain(s.siteUrl));
+
+    // If filter dropped everything, check whether master auto-provision is
+    // available so the UI can offer it.
+    let canAutoProvision = false;
+    if (filteredGa4.length === 0 && filteredGsc.length === 0) {
+      try {
+        const { isIaMasterConfigured } = await import('../lib/iaMasterGoogle.js');
+        canAutoProvision = await isIaMasterConfigured();
+      } catch (e) { /* keep false */ }
+    }
+
     res.json({
       data: {
-        ga4Properties, gscSites,
+        ga4Properties: filteredGa4,
+        gscSites: filteredGsc,
+        ga4Properties_total: ga4Properties.length,
+        gscSites_total: gscSites.length,
+        domain_filter_active: !showAll,
+        site_domain: site.domain || null,
+        no_matching_properties: filteredGa4.length === 0 && filteredGsc.length === 0,
+        can_auto_provision: canAutoProvision,
         currentGa4PropertyId: currentGa4,
         currentGscSiteUrl: currentGsc,
         auto_selected: autoSelected,
