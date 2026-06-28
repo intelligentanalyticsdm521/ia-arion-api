@@ -6343,11 +6343,16 @@ router.post('/sites/:siteId/plugin/updates/theme', async (req, res) => {
 
     const r = await pluginApi.updateTheme(site, stylesheet);
 
+    // 2026-06-27 (M-11 sibling) Tenant filter on update — same defect class
+    // as M-11 patched for the plugin endpoint above. Without AND tenant_id=@tenantId
+    // an attacker who enumerates log_id could overwrite another tenant's
+    // theme update audit row.
     await pool.request()
       .input('logId', sql.UniqueIdentifier, logId)
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('status', sql.NVarChar(20), r.ok ? 'success' : 'failure')
       .input('errorMsg', sql.NVarChar(sql.MAX), r.ok ? null : (r.errorText || 'unknown'))
-      .query(`UPDATE arion.site_plugin_update_log SET status = @status, error_message = @errorMsg, completed_at = SYSDATETIMEOFFSET() WHERE log_id = @logId`);
+      .query(`UPDATE arion.site_plugin_update_log SET status = @status, error_message = @errorMsg, completed_at = SYSDATETIMEOFFSET() WHERE log_id = @logId AND tenant_id = @tenantId`);
 
     res.json({
       data: { success: r.ok, stylesheet, log_id: logId },
