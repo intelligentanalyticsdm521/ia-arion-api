@@ -42,7 +42,8 @@ router.post('/', express.raw({ type: 'application/json', limit: '1mb' }), async 
 
   let event;
   try {
-    event = verifyWebhook(req.body, sig);
+    // 2026-06-27 (O-09) pass STRIPE_WEBHOOK_SECRET_OLD as secondary so rotation doesn't drop in-flight events
+    event = verifyWebhook(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET_OLD);
   } catch (err) {
     console.error('[webhook] signature verification failed:', err.message);
     return res.status(400).send('invalid signature');
