@@ -6691,6 +6691,18 @@ router.get('/integrations/google/properties', async (req, res) => {
       } catch (e) { /* keep false */ }
     }
 
+    // Resolve display name + match-state for the currently saved selection so
+    // the UI tile can show "Connected to: <name>" without re-opening the picker.
+    // Note: ga4Properties below is the FULL unfiltered list, so the lookup
+    // succeeds even when the saved property is from a different domain.
+    const normalizedGa4 = currentGa4 ? String(currentGa4).replace(/^properties\//, '') : null;
+    const currentGa4Property = normalizedGa4
+      ? ga4Properties.find((p) => String(p.propertyId) === normalizedGa4)
+      : null;
+    const currentGa4PropertyName = currentGa4Property ? currentGa4Property.displayName : null;
+    const currentGa4MatchesDomain = currentGa4Property ? matchesDomain(currentGa4Property.displayName) : false;
+    const currentGscMatchesDomain = currentGsc ? matchesDomain(currentGsc) : false;
+
     res.json({
       data: {
         ga4Properties: filteredGa4,
@@ -6702,7 +6714,10 @@ router.get('/integrations/google/properties', async (req, res) => {
         no_matching_properties: filteredGa4.length === 0 && filteredGsc.length === 0,
         can_auto_provision: canAutoProvision,
         currentGa4PropertyId: currentGa4,
+        currentGa4PropertyName,
+        currentGa4MatchesDomain,
         currentGscSiteUrl: currentGsc,
+        currentGscMatchesDomain,
         auto_selected: autoSelected,
       },
       meta: { tenant_id: tenantId, timestamp: new Date().toISOString() }
