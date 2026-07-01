@@ -23,6 +23,7 @@ import {
   enableDomainLock,
   enablePrivacyProtection,
   createWhoisProfile,
+  listDomains,
 } from '../../lib/hostinger.js';
 import {
   verifyHostingerNameservers,
@@ -126,6 +127,36 @@ router.post('/check', async (req, res) => {
     data: { results, query: label, tlds_checked: tlds },
     meta: { timestamp: new Date().toISOString() },
   });
+});
+
+// ---------------------------------------------------------------------------
+// GET /hostinger-existing  — list domains already on the IA master Hostinger
+// account. Used by the founder wizard when `domain_choice = 'hostinger_existing'`
+// so the operator can pick from a real dropdown instead of typing an FQDN.
+// Public (signup context); returns just {domain, status, expires_at}, no PII.
+// ---------------------------------------------------------------------------
+router.get('/hostinger-existing', async (req, res) => {
+  try {
+    const raw = await listDomains();
+    // Upstream returns either an array or {data:[...]} or {domains:[...]}.
+    const list = Array.isArray(raw) ? raw : (raw?.data || raw?.domains || []);
+    const domains = list
+      .map((d) => ({
+        domain: d.domain || d.name || null,
+        status: d.status || null,
+        expires_at: d.expires_at || d.expiration_date || null,
+      }))
+      .filter((d) => d.domain);
+    return res.json({
+      data: { domains },
+      meta: { count: domains.length, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    console.error('[onboarding/domains:hostinger-existing]', err);
+    return res.status(502).json({
+      error: { code: 'UPSTREAM_ERROR', message: err.message || 'Hostinger listDomains failed', status: 502 },
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
