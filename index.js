@@ -10,6 +10,7 @@ import { enforceViewAsReadOnly } from './middleware/enforceViewAsReadOnly.js';
 
 import healthRouter from './routes/health.js';
 import arionRouter from './routes/arion.js';
+import ssoRouter from './routes/sso.js';
 import internalRouter from './routes/internal.js';
 import oauthRouter from './routes/oauth.js';
 import submitRouter from './routes/submit.js';
@@ -164,6 +165,10 @@ app.use('/plugin', pluginRouter);
 // requireArionAccess so non-GET requests are 403'd before any tenant-scope
 // logic runs. It is a NO-OP when no x-actas-mode header is sent — normal
 // traffic and "switch" mode are unaffected. Mirrors oliver-api's chain.
+// /arion/sso/* uses X-Arion-Site-Token auth (plugin webhook), NOT Bearer.
+// Must mount BEFORE the requireAuth-protected /arion namespace so first-match
+// routes /arion/sso/verify to ssoRouter instead of falling into requireAuth.
+app.use('/arion/sso', express.json(), ssoRouter);
 app.use('/arion', requireAuth, enforceEmergencyReadOnly(), enforceViewAsReadOnly(), tenantResolution, requireArionAccess, arionRouter);
 // ARGUS AI credit endpoints — gated by standard tenant resolution, not
 // product-access (every tenant can see their balance even without ARION).

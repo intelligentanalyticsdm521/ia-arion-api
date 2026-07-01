@@ -34,7 +34,36 @@ const ARION_API_BASE = (process.env.ARION_API_BASE_URL
 
 // Identity provider for our shared CIAM (Entra External ID)
 const IDENTITY_PROVIDER_ID = '696CA25F-0011-F111-A69A-00224848050B';
-const ARION_SERVICE_ID = '44444444-4444-4444-4444-444444444444';
+
+// Per convention_never_hardcode_service_ids: NEVER hardcode service_ids.
+// loadServiceIds(pool) queries core.services (platform DB) and returns a
+// Map<service_key, service_id>. Result is cached at module scope so we don't
+// re-query on every request. Fallback to the historical hardcoded ARION UUID
+// only if the lookup fails or the row is missing — safe rollback.
+const HARDCODED_FALLBACK_SERVICE_IDS = Object.freeze({
+  arion: '44444444-4444-4444-4444-444444444444',
+});
+let _serviceIdsPromise = null;
+async function loadServiceIds(platformPool) {
+  if (_serviceIdsPromise) return _serviceIdsPromise;
+  _serviceIdsPromise = (async () => {
+    try {
+      const r = await platformPool.request().query(
+        'SELECT service_key, service_id FROM core.services'
+      );
+      const map = new Map();
+      for (const row of r.recordset) {
+        if (row.service_key) map.set(String(row.service_key).toLowerCase(), row.service_id);
+      }
+      return map;
+    } catch (err) {
+      console.warn('[admin/onboard-existing] loadServiceIds() failed, will use hardcoded fallback:', err.message);
+      _serviceIdsPromise = null; // allow retry on next request
+      return new Map();
+    }
+  })();
+  return _serviceIdsPromise;
+}
 
 const router = Router();
 
@@ -155,6 +184,15 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
     }
 
     // 4. Enable ARION service (core.tenant_services in platform DB)
+    // Look up ARION service_id from core.services (cached across requests).
+    // Fall back to the historical hardcoded UUID with a warn if the lookup
+    // returns nothing — safe rollback per convention_never_hardcode_service_ids.
+    const serviceIds = await loadServiceIds(platformPool);
+    let ARION_SERVICE_ID = serviceIds.get('arion');
+    if (!ARION_SERVICE_ID) {
+      ARION_SERVICE_ID = HARDCODED_FALLBACK_SERVICE_IDS.arion;
+      console.warn(`[admin/onboard-existing] core.services has no row for service_key='arion' — falling back to hardcoded ${ARION_SERVICE_ID}`);
+    }
     const svcHit = await platformPool.request()
       .input('tid', sql.UniqueIdentifier, tenantId)
       .input('sid', sql.UniqueIdentifier, ARION_SERVICE_ID)

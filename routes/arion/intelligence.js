@@ -20,7 +20,7 @@ import { getServicesPool } from '../../db/servicesPool.js';
 import { getSearchConsoleDates } from '../../lib/googleServices.js';
 import { plugin as pluginApi } from '../../lib/pluginClient.js';
 import { runAllArionIntelligence, ARION_INTEL_REPORTS } from '../../lib/intelligence/index.js';
-import { CACHE_TTL_MS } from '../../lib/intelligence/utils.js';
+import { CACHE_TTL_MS, siteAgeMultiplier } from '../../lib/intelligence/utils.js';
 
 const router = Router({ mergeParams: true });
 
@@ -104,6 +104,14 @@ async function buildIntelContext({ site, tenantId }) {
     pageSpeedSnapshots = [];
   }
 
+  // F-Onb-D7: site-age dampener. Fresh sites (<=7d) score at 0.5x; sites
+  // 30d+ score at 1.0x; linear ramp between. Applied by calculators via
+  // applyAgeMultiplier() before clamp/tier derivation.
+  const ageMultiplier = siteAgeMultiplier(site?.created_at);
+  const siteAgeDays = site?.created_at
+    ? Math.floor((Date.now() - new Date(site.created_at).getTime()) / (86400 * 1000))
+    : null;
+
   return {
     tier,
     tenantId,
@@ -113,6 +121,8 @@ async function buildIntelContext({ site, tenantId }) {
     pluginSeoAgg,
     totalPages,
     pageSpeedSnapshots,
+    siteAgeMultiplier: ageMultiplier,
+    meta: { siteAgeDays },
     // 2026-06-22 — Readiness fingerprint so cache payloads + downstream
     // diagnostics know which sources were actually available at compute time.
     dataSources: {

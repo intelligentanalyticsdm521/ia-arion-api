@@ -310,12 +310,14 @@ router.post('/auto-provision', async (req, res) => {
       await pool.request()
         .input('sid', sql.UniqueIdentifier, site_id)
         .input('ga4', sql.NVarChar(40), provision.ga4.property_id || null)
+        .input('ga4mid', sql.NVarChar(100), provision.ga4.measurement_id || null)
         .input('gsc', sql.NVarChar(500), provision.gsc.site_url || null)
         .input('gbpLoc', sql.NVarChar(200), provision.gbp.location_name || null)
         .input('gbpFlag', sql.Bit, provision.gbp.ok ? 1 : 0)
         .input('gscFlag', sql.Bit, provision.gsc.ok ? 1 : 0)
         .query(`UPDATE arion.site
                    SET ga4_property_id = COALESCE(@ga4, ga4_property_id),
+                       ga4_measurement_id = COALESCE(@ga4mid, ga4_measurement_id),
                        gsc_site_url    = COALESCE(@gsc, gsc_site_url),
                        gsc_connected   = CASE WHEN @gscFlag = 1 THEN 1 ELSE gsc_connected END,
                        gbp_location_name = COALESCE(@gbpLoc, gbp_location_name),

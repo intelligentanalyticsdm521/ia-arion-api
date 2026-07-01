@@ -34,6 +34,7 @@ import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
 import { updatePhase, markFailed } from '../../lib/provisioningPhase.js';
 import { firePlatformEvent } from '../../lib/platformEvents.js';
+import { plugin as pluginApi } from '../../lib/pluginClient.js';
 
 const router = Router();
 
@@ -475,6 +476,59 @@ router.post('/bing-oauth-start', async (req, res) => {
     return res.json({ data: { ok: true, queued: true, authUrl: null } });
   } catch (err) {
     console.error('[onboarding/runner/bing-oauth-start]', err);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+/* ──────────────────────────────────────────────────────────────────────
+ * POST /onboarding/runner/push-ga4-measurement-id
+ *   F-Onb-D1 — push the GA4 measurement_id (already persisted on arion.site
+ *   by the google-oauth auto-provision step) to the IA WordPress plugin so
+ *   it auto-injects the gtag snippet. The measurement_id is always read
+ *   from arion.site.ga4_measurement_id — any body-supplied value is
+ *   ignored to avoid injecting an unvalidated tracking ID into the
+ *   customer's site. The plugin side respects the `ia_ga4_gtag_enabled`
+ *   WP filter hook so customers can opt out.
+ * ────────────────────────────────────────────────────────────────────── */
+router.post('/push-ga4-measurement-id', async (req, res) => {
+  const { tenant_id, site_id } = req.body || {};
+  if (!assertTenantScope(req, res, tenant_id)) return;
+  if (!site_id) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'site_id required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const tid = String(req.tenant.tenantId).toUpperCase();
+    const owned = await verifySiteOwnership(pool, tid, site_id);
+    if (!owned) return send404SiteNotFound(res);
+
+    // Load the full site row — pluginApi.* helpers need site_token_raw,
+    // domain, wp_admin_url, wp_app_password_ref to authenticate the push.
+    const siteRes = await pool.request()
+      .input('sid', sql.UniqueIdentifier, site_id)
+      .input('tid', sql.UniqueIdentifier, tid)
+      .query(`SELECT TOP 1 site_id, tenant_id, domain, site_token_raw,
+                     wp_admin_url, wp_app_password_ref, ga4_measurement_id
+              FROM arion.site
+              WHERE site_id = @sid AND tenant_id = @tid`);
+    const site = siteRes.recordset[0];
+    if (!site) return send404SiteNotFound(res);
+
+    const measurement_id = site.ga4_measurement_id;
+    if (!measurement_id) {
+      return res.status(409).json({ error: { code: 'no_ga4_measurement_id', message: 'arion.site.ga4_measurement_id is not set — provision GA4 first', status: 409 } });
+    }
+
+    const pushRes = await pluginApi.ga4MeasurementIdSet(site, { measurement_id });
+    const pushed_at = new Date().toISOString();
+    await firePlatformEvent(pool, {
+      tenantId: tid,
+      eventType: 'arion.onboarding.ga4_measurement_id_pushed',
+      eventRefId: site_id,
+      payload: { site_id, measurement_id, pushed_at, plugin_ok: !!pushRes?.ok },
+    }).catch(() => {});
+
+    return res.json({ data: { ok: true, measurement_id, pushed_at, plugin: pushRes } });
+  } catch (err) {
+    console.error('[onboarding/runner/push-ga4-measurement-id]', err);
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });

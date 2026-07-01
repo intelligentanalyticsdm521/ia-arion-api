@@ -22,7 +22,11 @@ function parseArgs() {
 // --- Constants ---------------------------------------------------------------
 const SQL_SERVER = 'sql-iadm-prod-cus.database.windows.net';
 const IDENTITY_PROVIDER_ID = '696CA25F-0011-F111-A69A-00224848050B';
-const SERVICE_IDS = {
+// Per convention_never_hardcode_service_ids: NEVER hardcode service_ids.
+// SERVICE_IDS is hydrated at startup from core.services via loadServiceIds().
+// The values below are HARDCODED FALLBACKS ONLY — used with a console.warn
+// if the DB row is missing for a key. Safe-rollback pattern.
+const HARDCODED_FALLBACK_SERVICE_IDS = {
   arion:  '44444444-4444-4444-4444-444444444444',
   spark:  '1150C64A-4E4C-476E-A89E-2A5073826672',
   oliver: '33333333-3333-3333-3333-333333333333',
@@ -30,6 +34,34 @@ const SERVICE_IDS = {
   forge:  '7EB0DCAD-584F-4B16-9D3B-547799AAAE58',
   argus:  'F00C7716-97D5-4B2F-9050-A45F4394E364',
 };
+let SERVICE_IDS = {};
+
+async function loadServiceIds(platformPool) {
+  try {
+    const r = await platformPool.request().query(
+      'SELECT service_key, service_id FROM core.services'
+    );
+    const map = {};
+    for (const row of r.recordset) {
+      if (row.service_key) map[String(row.service_key).toLowerCase()] = row.service_id;
+    }
+    // Overlay: prefer DB value; fall back to hardcode with warn per-key.
+    const merged = {};
+    const keys = new Set([...Object.keys(HARDCODED_FALLBACK_SERVICE_IDS), ...Object.keys(map)]);
+    for (const k of keys) {
+      if (map[k]) {
+        merged[k] = map[k];
+      } else if (HARDCODED_FALLBACK_SERVICE_IDS[k]) {
+        console.warn("  ! core.services has no row for service_key='" + k + "' — falling back to hardcoded " + HARDCODED_FALLBACK_SERVICE_IDS[k]);
+        merged[k] = HARDCODED_FALLBACK_SERVICE_IDS[k];
+      }
+    }
+    return merged;
+  } catch (err) {
+    console.warn('  ! loadServiceIds() failed (' + err.message + '); using hardcoded fallback map.');
+    return { ...HARDCODED_FALLBACK_SERVICE_IDS };
+  }
+}
 const API_URL = 'https://app-arion-api-prod-e6fuc9gzd8f3hqfe.centralus-01.azurewebsites.net';
 
 // --- Database Helpers --------------------------------------------------------
@@ -325,6 +357,9 @@ async function main() {
   }
 
   try {
+    // Hydrate SERVICE_IDS from core.services before any service-linking step.
+    SERVICE_IDS = await loadServiceIds(platformPool);
+
     console.log('\n[2/6] Finding or creating tenant...');
     const tenant = await findOrCreateTenant(platformPool, args);
 

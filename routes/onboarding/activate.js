@@ -290,11 +290,18 @@ router.post('/', async (req, res) => {
         `);
     }
 
-    // The customer's next stop is the existing CIAM signup flow. Add the
-    // welcome=1 hint so UnifiedSetupCard auto-opens the modal — but only
-    // for Path A (Path B clients are already onboarded by the founder so
-    // the card will see finished_at and self-suppress).
-    const signupUrl = `${PORTAL_BASE}/signup?prefill_email=${encodeURIComponent(email)}&activated=1&post_signup_redirect=${encodeURIComponent('/app/services/command?welcome=1')}`;
+    // 2026-06-30 FIX: /signup was renamed to /pricing (the checkout page) on
+    // 2026-05-20. The old URL still 301-redirected, but landed clients on the
+    // public CHECKOUT page asking them to buy products — not a CIAM signup.
+    // Welcome-email clicks looked like asking the customer to pay again.
+    //
+    // Target the authenticated app shell directly. AppGate detects no MSAL
+    // session, triggers Entra External ID signup/signin (which handles new-
+    // account creation), and on return continues to the welcome=1 query the
+    // UnifiedSetupCard reads to auto-open the orientation modal. Path B
+    // clients (already onboarded by founder) see the card self-suppress via
+    // finished_at; Path A self-onboarders see the modal open.
+    const signupUrl = `${PORTAL_BASE}/app/services/command?welcome=1&prefill_email=${encodeURIComponent(email)}`;
 
     return res.status(200).json({
       ok: true,

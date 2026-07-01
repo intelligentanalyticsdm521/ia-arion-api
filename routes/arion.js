@@ -255,27 +255,77 @@ router.post('/sites/:siteId/requests', async (req, res) => {
 });
 
 // --- GET /arion/sites/:siteId/admin-link ---
+// 2026-06-29 — now mints a single-use SSO launch token bound to the Portal
+// user's email so the IA plugin can wp_set_auth_cookie() them into wp-admin
+// as the matching WP user (matched by email; fallback to iaadmin on the
+// plugin side if no exact email match). 60s TTL, single-use. Plugin
+// redeems via POST /arion/sso/verify with X-Arion-Site-Token.
 router.get('/sites/:siteId/admin-link', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { siteId } = req.params;
+  const callerEmail = (req.user?.email || req.user?.userId || '').toLowerCase() || null;
   try {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    if (!site.wp_admin_url) return res.status(409).json({ error: { code: 'NOT_READY', message: 'Site not yet provisioned', status: 409 } });
-    // wp_admin_url may already end in "/wp-admin" or "/wp-admin/" — normalize
-    // to exactly one trailing "/wp-admin/" without doubling it up.
-    let adminUrl = site.wp_admin_url.replace(/\/+$/, ''); // strip trailing slashes
-    if (!/\/wp-admin$/i.test(adminUrl)) {
-      adminUrl += '/wp-admin';
+    if (!site.domain && !site.wp_admin_url) return res.status(409).json({ error: { code: 'NOT_READY', message: 'Site not yet provisioned', status: 409 } });
+
+    // 2026-06-30 (F-Onb-D6) — Prefer site.domain over site.wp_admin_url when
+    // building the admin URL. wp_admin_url is often the raw provisioning host
+    // (e.g. *.iadmhosting.com) whereas site.domain is the customer-facing
+    // canonical domain. Falls back to wp_admin_url when domain is missing.
+    let adminUrl;
+    if (site.domain && String(site.domain).trim()) {
+      const host = String(site.domain).trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+      adminUrl = `https://${host}/wp-admin/`;
+    } else {
+      adminUrl = site.wp_admin_url.replace(/\/+$/, '');
+      if (!/\/wp-admin$/i.test(adminUrl)) adminUrl += '/wp-admin';
+      adminUrl += '/';
     }
-    adminUrl += '/';
-    res.json({ data: { admin_url: adminUrl }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+
+    // If we have a caller email, mint an SSO token so the plugin auto-logs.
+    let ssoUrl = null;
+    if (callerEmail) {
+      const token = crypto.randomBytes(32).toString('base64url');
+      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+      const expiresAt = new Date(Date.now() + 60_000);
+      try {
+        await pool.request()
+          .input('hash', sql.NVarChar(128), tokenHash)
+          .input('siteId', sql.UniqueIdentifier, site.site_id)
+          .input('tenantId', sql.UniqueIdentifier, site.tenant_id)
+          .input('email', sql.NVarChar(320), callerEmail)
+          .input('exp', sql.DateTimeOffset, expiresAt)
+          .query(`
+            INSERT INTO arion.sso_launch_token (token_hash, site_id, tenant_id, portal_user_email, expires_at)
+            VALUES (@hash, @siteId, @tenantId, @email, @exp);
+          `);
+        // Plugin reads ?ia_sso=<token> on init hook (priority 1) and redeems.
+        ssoUrl = adminUrl + '?ia_sso=' + encodeURIComponent(token);
+      } catch (mintErr) {
+        // Non-fatal — fall back to bare admin URL so the button still works.
+        console.warn('[arion/admin-link] SSO mint failed:', mintErr.message);
+      }
+    }
+
+    res.json({
+      data: {
+        admin_url: ssoUrl || adminUrl,  // SSO URL when caller is auth'd; bare URL fallback
+        sso_url: ssoUrl,                 // null if mint failed or no caller email
+        wp_admin_url: adminUrl,          // always the bare URL
+      },
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
   } catch (err) {
     console.error('[arion/sites/admin-link]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
+
+// POST /arion/sso/verify — MOVED to routes/sso.js (2026-06-29).
+// The route is mounted at /arion/sso BEFORE the requireAuth middleware
+// in index.js so plugins can authenticate via X-Arion-Site-Token.
 
 // ─── AI Website Builder per-tenant spend cap admin ────────────────────────
 // Founder-only. Configures lumen.ai_cap_config — the $-based safety floor
