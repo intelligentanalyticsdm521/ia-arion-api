@@ -323,6 +323,57 @@ router.get('/sites/:siteId/admin-link', async (req, res) => {
   }
 });
 
+// ─── F-Onb-D1: POST /arion/sites/:siteId/plugin/ga4/set ────────────────────
+// Push a GA4 Measurement ID to the IA WordPress plugin so it auto-injects
+// the gtag.js snippet on wp_head. Body: { measurement_id?: "G-XXXX" }. If
+// the body omits measurement_id we fall back to arion.site.ga4_measurement_id
+// (populated by the onboarding google-oauth auto-provision step). Auth: the
+// pluginClient carries either X-Arion-Site-Token (site.site_token_raw) or
+// the WP app-password header — same pattern every other /arion/sites/*
+// plugin proxy uses. Returns the plugin's push status.
+router.post('/sites/:siteId/plugin/ga4/set', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  const bodyMid = (req.body?.measurement_id || '').toString().trim();
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const measurement_id = bodyMid || site.ga4_measurement_id || '';
+    if (!measurement_id) {
+      return res.status(409).json({
+        error: {
+          code: 'no_ga4_measurement_id',
+          message: 'measurement_id not supplied and arion.site.ga4_measurement_id is empty — provision GA4 first',
+          status: 409,
+        },
+      });
+    }
+
+    const pushRes = await pluginApi.ga4MeasurementIdSet(site, { measurement_id });
+    const pushed_at = new Date().toISOString();
+    await firePlatformEvent(pool, {
+      tenantId,
+      eventType: 'arion.onboarding.ga4_measurement_id_pushed',
+      eventRefId: siteId,
+      payload: { site_id: siteId, measurement_id, pushed_at, plugin_ok: !!pushRes?.ok, source: bodyMid ? 'body' : 'arion.site' },
+    }).catch(() => {});
+
+    if (!pushRes?.ok) {
+      return res.status(502).json({
+        error: { code: 'plugin_call_failed', message: pushRes?.errorText || 'plugin rejected ga4-config push', status: 502 },
+        plugin_status: pushRes?.pluginStatus || 'error',
+        pushed_at,
+      });
+    }
+    return res.json({ data: { ok: true, measurement_id, pushed_at, plugin_status: pushRes.pluginStatus || 'connected' } });
+  } catch (err) {
+    console.error('[arion/sites/:siteId/plugin/ga4/set]', err);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // POST /arion/sso/verify — MOVED to routes/sso.js (2026-06-29).
 // The route is mounted at /arion/sso BEFORE the requireAuth middleware
 // in index.js so plugins can authenticate via X-Arion-Site-Token.
