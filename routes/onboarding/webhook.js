@@ -314,18 +314,93 @@ function parseFirstName(fullName) {
 }
 
 async function handleSubscriptionDeleted(pool, sub) {
-  await pool.request()
+  const r = await pool.request()
     .input('subId', sql.NVarChar(200), sub.id)
-    .query(`UPDATE arion.tenant SET status = 'cancelled', updated_at = SYSDATETIMEOFFSET() WHERE stripe_subscription_id = @subId`);
+    .query(`
+      UPDATE arion.tenant SET status = 'cancelled', updated_at = SYSDATETIMEOFFSET()
+      OUTPUT inserted.tenant_id, inserted.primary_email
+      WHERE stripe_subscription_id = @subId
+    `);
+  const row = r.recordset[0];
+  await mirrorCancellationToLumen(row?.tenant_id, row?.primary_email);
 }
 
 async function handleSubscriptionUpdated(pool, sub) {
   // Only act on inactive transitions; active-to-active no-ops are ignored.
   if (['canceled', 'unpaid', 'incomplete_expired', 'past_due'].includes(sub.status)) {
-    await pool.request()
+    const r = await pool.request()
       .input('subId', sql.NVarChar(200), sub.id)
       .input('status', sql.NVarChar(40), sub.status)
-      .query(`UPDATE arion.tenant SET status = @status, updated_at = SYSDATETIMEOFFSET() WHERE stripe_subscription_id = @subId`);
+      .query(`
+        UPDATE arion.tenant SET status = @status, updated_at = SYSDATETIMEOFFSET()
+        OUTPUT inserted.tenant_id, inserted.primary_email
+        WHERE stripe_subscription_id = @subId
+      `);
+    // Only mirror to LUMEN when the transition is a real cancellation
+    // (past_due + unpaid are recoverable — leaving SPARK CRM pill neutral).
+    // Note Stripe uses 'canceled' (one L); lumen.contact.subscription_status
+    // uses 'cancelled' (two L) per migration 048 CHECK — normalize here.
+    if (sub.status === 'canceled') {
+      const row = r.recordset[0];
+      await mirrorCancellationToLumen(row?.tenant_id, row?.primary_email);
+    }
+  }
+}
+
+// #255-B (2026-07-03) — Mirror a Stripe subscription cancellation to the
+// LUMEN CRM so the SPARK Contacts page shows the correct cancelled-sub
+// pill and lumen.contact.lifecycle_stage advances to past_customer.
+//
+// Flag-gated on LUMEN_INTERNAL_TOKEN because the target endpoints
+// (LUMEN /api/v1/contacts/subscription-status + /api/v1/lifecycle/apply-event)
+// require service-to-service auth. Same pattern as
+// arion-api/lib/walkthroughClient.js — set the shared token on both apps'
+// KV refs and this helper starts firing. Until then it no-ops with a warn
+// so a webhook is never blocked on a missing token.
+//
+// CONTRACT: NEVER throws. Best-effort. Failure logs, webhook stays 200 so
+// Stripe doesn't retry the whole handler forever.
+async function mirrorCancellationToLumen(tenantId, email) {
+  try {
+    if (!tenantId || !email) return;
+    const base = (process.env.LUMEN_API_BASE_URL || '').replace(/\/+$/, '');
+    const token = process.env.LUMEN_INTERNAL_TOKEN || '';
+    if (!base || !token) {
+      console.warn(`[#255-B] LUMEN_API_BASE_URL or LUMEN_INTERNAL_TOKEN not set — skipping cancel mirror for tenant=${tenantId}`);
+      return;
+    }
+    const headers = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+      'x-tenant-id': String(tenantId),
+    };
+    // 1) Flip lumen.contact.subscription_status → 'cancelled' for the matching
+    //    contact keyed off tenant + email. LUMEN endpoint at
+    //    LUMEN-API/src/routes/contacts.js:384.
+    const r1 = await fetch(`${base}/api/v1/contacts/subscription-status`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ email, status: 'cancelled' }),
+    });
+    if (!r1.ok) {
+      console.warn(`[#255-B] contacts/subscription-status returned ${r1.status} for tenant=${tenantId}`);
+      return;
+    }
+    // 2) Advance lifecycle_stage → past_customer via the lifecycle event
+    //    transition. LUMEN endpoint at LUMEN-API/src/routes/lifecycle.js:123.
+    //    Requires the contact_id we just touched — LUMEN returns it in the
+    //    subscription-status body per the endpoint contract.
+    const body = await r1.json().catch(() => ({}));
+    const contactId = body?.data?.contact_id || body?.contact_id;
+    if (contactId) {
+      await fetch(`${base}/api/v1/lifecycle/apply-event`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ contact_id: contactId, event_kind: 'all_subs_cancelled' }),
+      }).catch(() => { /* best-effort */ });
+    }
+  } catch (err) {
+    console.warn(`[#255-B] mirrorCancellationToLumen soft-failure:`, err?.message || err);
   }
 }
 
