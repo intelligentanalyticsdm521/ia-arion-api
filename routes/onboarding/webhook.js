@@ -30,7 +30,7 @@ import { paymentFailedEmail } from '../../lib/emailTemplates.js';
 import { sendOnboardingWelcomeEmail } from '../../lib/welcomeEmail.js';
 import { getPlan } from '../../lib/pricing.js';
 import { getPlatformPool } from '../../db/platformPool.js';
-import { resolveTenantForBuyer } from '../../lib/coreTenants.js';
+import { resolveTenantForBuyer, enableServiceForTenant } from '../../lib/coreTenants.js';
 import { seedDefaultTasksForTenant } from '../../lib/walkthroughClient.js';
 
 const router = Router();
@@ -224,6 +224,19 @@ async function handleCheckoutCompleted(pool, session) {
         VALUES
           (@siteId, @tenantId, @domain, @domainMode, @tier, 'awaiting_questionnaire', SYSDATETIMEOFFSET())
       `);
+
+    // Enable the ARION service so the buyer can actually USE ARION after login.
+    // requireArionAccess 403s every arion-api call unless core.tenant_services
+    // (arion, is_enabled=1) exists — the founder path does this; self-serve must
+    // too. Non-fatal: a failure here must NOT throw (Stripe would retry the whole
+    // event and the un-guarded arion.site insert above would duplicate). Logged
+    // loudly; submit.js re-runs this idempotently before the activation email.
+    try {
+      const svc = await enableServiceForTenant(tenantId, 'arion');
+      console.log(`[webhook] ARION service enable for tenant=${tenantId}: ${svc.reason}`);
+    } catch (svcErr) {
+      console.error('[webhook] enableServiceForTenant(arion) failed (buyer may 403 until submit.js re-enables):', svcErr?.message || svcErr);
+    }
 
     // Track signup session for resumption (client lands on /onboarding?session_id=)
     await pool.request()

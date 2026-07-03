@@ -56,6 +56,7 @@ import { createJob, transitionState, getLatestJobForSite } from '../../lib/provi
 import { createProvisionCode } from '../../lib/provisionCodes.js';
 import { updateSharedProfile, getPlatformPool } from '../../db/platformPool.js';
 import { upsertTenantInvitation } from '../../lib/tenantInvitations.js';
+import { enableServiceForTenant } from '../../lib/coreTenants.js';
 import { updatePhase, markFailed } from '../../lib/provisioningPhase.js';
 import { upsertBrandIntake } from '../../lib/brandIntakeClient.js';
 
@@ -499,6 +500,17 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         console.error('[onboarding/submit] tenant_invitations upsert (existing-WP) failed:', invErr?.message);
       }
 
+      // Guarantee the ARION service is enabled before the activation email
+      // goes out (belt-and-suspenders — the Stripe webhook enables it at
+      // tenant creation, but if that failed the buyer would 403 on every
+      // arion-api call after login). Idempotent; best-effort.
+      try {
+        const svc = await enableServiceForTenant(session.tenant_id, 'arion');
+        if (!svc.enabled) console.warn(`[onboarding/submit] ARION enable (existing-WP) not applied: ${svc.reason}`);
+      } catch (svcErr) {
+        console.error('[onboarding/submit] enableServiceForTenant (existing-WP) failed:', svcErr?.message);
+      }
+
       // Welcome email — include the plugin download URL so off-Hostinger
       // customers can install it themselves.
       await updatePhase(pool, session.site_id, 'sending_welcome');
@@ -928,6 +940,16 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
       });
     } catch (invErr) {
       console.error('[onboarding/submit] tenant_invitations upsert (new-site) failed:', invErr?.message);
+    }
+
+    // Guarantee ARION service enabled before the activation email (belt-and-
+    // suspenders vs. the Stripe webhook enable). Without core.tenant_services
+    // the buyer 403s on every arion-api call after login. Idempotent.
+    try {
+      const svc = await enableServiceForTenant(session.tenant_id, 'arion');
+      if (!svc.enabled) console.warn(`[onboarding/submit] ARION enable (new-site) not applied: ${svc.reason}`);
+    } catch (svcErr) {
+      console.error('[onboarding/submit] enableServiceForTenant (new-site) failed:', svcErr?.message);
     }
 
     // 24. Send the "your site is ready + activate your portal" email. Best-effort
