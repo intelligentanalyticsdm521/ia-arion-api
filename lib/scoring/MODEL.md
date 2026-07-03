@@ -162,36 +162,36 @@ Legacy report keys kept in `CALCULATORS` for cache back-compat but demoted out o
 
 ### siteAgeMultiplier
 
-The prompt's spec expected a `siteAgeMultiplier(ctx)` + `applyAgeMultiplier()` helper in `utils.js`. As of 2026-07-01 this helper is **not present in the codebase** (grep across `arion-api/lib` returns zero matches). The current `utils.js` only exports `clamp`, `scoreToTier`, `insufficient`, `locked`, `result`, `fmtNum`, `fmtPct`. See §5 and §12.
+`siteAgeMultiplier(createdAt)` + `applyAgeMultiplier(rawScore, multiplier)` land in `arion-api/lib/intelligence/utils.js` as of 2026-07-03. See §5 for behavior and §6 for the paired `SIGNAL_REGISTRY`. Six calculators (competitivePresence, crawlDepth, pageSpeedDistribution, schemaCoverage, seoAuthority, visibilityTrajectory) consume `ctx.siteAgeMultiplier` seeded by `routes/arion/intelligence.js` and export a `SIGNALS_USED` array of canonical registry keys for provenance.
 
 ---
 
 ## 5. Site age multiplier
 
-**Status: NOT YET IMPLEMENTED as of 2026-07-01.** The F-Onb-D7 spec described a `siteAgeMultiplier()` (linear ramp 0.5 at age ≤ 7d → 1.0 at age ≥ 30d, applied post-score-formula, pre-clamp, pre-tier). Grep of `arion-api/lib` confirms no `siteAgeMultiplier`, `applyAgeMultiplier`, or `SIGNAL_REGISTRY` symbols exist.
-
-Intended design (from D7 spec, to be added under `arion-api/lib/intelligence/utils.js`):
+**Status: SHIPPED as of 2026-07-03** (F-Onb-D7). Location: `arion-api/lib/intelligence/utils.js` `siteAgeMultiplier(createdAt)` + `applyAgeMultiplier(rawScore, multiplier)`.
 
 - **Formula:** linear ramp — `0.5` when `ageDays ≤ 7`, `1.0` when `ageDays ≥ 30`, linear between.
 - **Application order:** post-score-formula, pre-clamp, pre-tier.
 - **Rationale:** brand-new sites lack historical data; showing an "A" score is misleading. Dampening surfaces "we don't know yet" without hiding the report card.
-- **Consumers:** every calculator in `arion-api/lib/intelligence/*.js`, reading `ctx.siteAgeMultiplier` seeded by `routes/arion/intelligence.js` before the aggregator runs.
-
-Tracked as open item in §12.
+- **Consumers:** six calculators (competitivePresence, crawlDepth, pageSpeedDistribution, schemaCoverage, seoAuthority, visibilityTrajectory) call `applyAgeMultiplier(rawScore, ctx?.siteAgeMultiplier ?? 1.0)` and surface an observation when the multiplier < 1.0. `routes/arion/intelligence.js` seeds `ctx.siteAgeMultiplier` from `site.created_at` before the aggregator runs.
+- **Verification:** grep confirms all 6 active calculators wire the helper. NULL/insufficient_data scores pass through unchanged (guarded at `applyAgeMultiplier` line 162).
 
 ---
 
 ## 6. Signal registry
 
-**Status: NOT YET IMPLEMENTED as of 2026-07-01.** The F-Onb-D7 spec described a `SIGNAL_REGISTRY` table in `utils.js` mapping every signal used by an intelligence calculator to `{ key, tier, label, source }`. Grep confirms no such symbol exists.
+**Status: SHIPPED as of 2026-07-03** (F-Onb-D7). Location: `arion-api/lib/intelligence/utils.js` `SIGNAL_REGISTRY` (line 107+).
 
-Tier legend (from spec, for when the table lands):
+Tier legend:
 
-- `free` — no paid dependency (GSC, GA4, GBP, PageSpeed public API, IA Plugin data)
-- `paid-wordfence` — requires Wordfence Premium (advanced malware + vulnerability payloads)
+- `free` — no paid dependency (GSC, PageSpeed public API, IA Plugin data including free Wordfence signals)
 - `paid-seranking` — requires an SE Ranking project + AIRT key
 
-Tracked as open item in §12.
+`SIGNAL_REGISTRY` keys currently mapped: GSC (impressions_trend / projected_impressions / avg_position), PSI (snapshot + CWV lcp/cls/inp), IA Plugin (rankmath / security), SE Ranking (own_visibility / competitor_avg / referring_domains / dofollow_backlinks / gap_count / gap_rate / keywords_tracked / audit).
+
+Each calculator exports a `SIGNALS_USED` array of canonical keys. The audit / modal layer reads `SIGNAL_REGISTRY[key]` to render provenance ("GSC average position — Google Search Console") and gate paid signals when the tenant lacks the SE Ranking add-on.
+
+Note: the earlier spec included a `paid-wordfence` tier. In practice Wordfence signals are surfaced via the IA Plugin free tier (rule-based scan output) so they are registered as `plugin.security` under `free`. If a future Wordfence Premium integration exposes a metered API, add a `paid-wordfence` tier and re-classify accordingly.
 
 ---
 
