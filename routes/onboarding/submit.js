@@ -956,6 +956,21 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
     //     but failures are now persisted into provisioning_details_json so the
     //     Portal can surface a "resend email" button.
     await updatePhase(pool, session.site_id, 'sending_welcome');
+    // PB-5 (existing-tenant-adds-product): detect whether this tenant already has
+    // a registered user. If so, this ARION site is a SECOND product on an existing
+    // account — the welcome email must NOT carry a fresh CIAM registration link
+    // (send a "your ARION is ready — log in" note instead). Brand-new tenants
+    // (no tenant_users yet) still get the activation link.
+    let alreadyRegistered = false;
+    try {
+      const platformPool = await getPlatformPool();
+      const reg = await platformPool.request()
+        .input('tid', sql.UniqueIdentifier, session.tenant_id)
+        .query(`SELECT COUNT(*) AS n FROM core.tenant_users WHERE tenant_id = @tid`);
+      alreadyRegistered = (reg.recordset[0]?.n || 0) > 0;
+    } catch (regErr) {
+      console.warn('[onboarding/submit] tenant_users existing-check failed (defaulting to registration flow):', regErr?.message);
+    }
     let welcomeEmailStatus = 'unknown';
     let welcomeEmailError = null;
     try {
@@ -968,6 +983,7 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         wpAdminLogin: adminLogin,
         wpAdminPassword: adminPassword,
         setupToken,
+        alreadyRegistered,
       });
       welcomeEmailStatus = emailRes.ok ? 'sent' : 'failed';
       if (!emailRes.ok) {
