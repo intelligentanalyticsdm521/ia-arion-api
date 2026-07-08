@@ -68,25 +68,44 @@ export async function requireArionAccess(req, res, next) {
     // any client tenant by setting x-tenant-key. Audit columns still stamp
     // the founder's identity.
     const founderTenantId = (process.env.FOUNDER_TENANT_ID || "8C9527B9-8999-4B31-A306-F3D4CCC39FBD").trim().toUpperCase();
+    // P1-2 (Agency Foundation) — DUAL-READ window. Accept EITHER the legacy
+    // FOUNDER_TENANT_ID arm OR the generalized `tenant_kind='platform_owner'`
+    // arm. IA is BOTH today (byte-identical); the platform_owner arm only adds
+    // forward-compat. Logs which arm fired before P1-3 removes the GUID arm.
     const membership = await platformPool
       .request()
       .input("tenant_id", sql.UniqueIdentifier, tenantId)
       .input("founder_tenant_id", sql.UniqueIdentifier, founderTenantId || tenantId)
       .input("user_id", sql.UniqueIdentifier, user.user_id)
       .query(`
-        SELECT TOP 1 tenant_user_id, tenant_id AS matched_tenant_id
-        FROM core.tenant_users
-        WHERE user_id = @user_id
-          AND tenant_id IN (@tenant_id, @founder_tenant_id)
-          AND (status IS NULL OR status = 'active')
-        ORDER BY CASE WHEN tenant_id = @tenant_id THEN 0 ELSE 1 END;
+        SELECT TOP 1 tu.tenant_user_id, tu.tenant_id AS matched_tenant_id,
+               t.tenant_kind AS matched_kind, t.provider_tenant_id AS matched_provider
+        FROM core.tenant_users tu
+        JOIN core.tenants t ON t.tenant_id = tu.tenant_id
+        WHERE tu.user_id = @user_id
+          AND (tu.status IS NULL OR tu.status = 'active')
+          AND (tu.tenant_id = @tenant_id
+               OR tu.tenant_id = @founder_tenant_id
+               OR t.tenant_kind = 'platform_owner')
+        ORDER BY CASE WHEN tu.tenant_id = @tenant_id THEN 0
+                      WHEN tu.tenant_id = @founder_tenant_id THEN 1
+                      ELSE 2 END;
       `);
 
     const row = membership.recordset[0];
     let tenantUserId = row?.tenant_user_id || null;
-    let isFounderActingOnClient = row && String(row.matched_tenant_id).toUpperCase() === founderTenantId
-                                          && String(tenantId).toUpperCase() !== founderTenantId;
+    const matchedTenantUpper = row ? String(row.matched_tenant_id).toUpperCase() : null;
+    const targetUpper = String(tenantId).toUpperCase();
+    const actingViaFounderGuid = !!row && matchedTenantUpper === founderTenantId && targetUpper !== founderTenantId;
+    const actingViaPlatformOwner = !!row && row.matched_kind === "platform_owner" && matchedTenantUpper !== targetUpper;
+    let isFounderActingOnClient = actingViaFounderGuid || actingViaPlatformOwner;
     let actingAsConsultant = false;
+    if (isFounderActingOnClient) {
+      const arm = actingViaFounderGuid
+        ? (actingViaPlatformOwner ? "founder_guid+platform_owner" : "founder_guid")
+        : "platform_owner";
+      console.log(`[access-dualread:arion] user=${user.user_id} target=${tenantId} arm=${arm}`);
+    }
 
     // 2026-06-27 — consultant_grant fallback. IA team members consulting on
     // client tenants get access via core.consultant_grant. See memory:
@@ -116,6 +135,16 @@ export async function requireArionAccess(req, res, next) {
     req.isFounderActingOnClient = isFounderActingOnClient;
     req.actingAsConsultant = actingAsConsultant;
     req.consultantOrg = actingAsConsultant ? 'Intelligent Analytics' : null;
+    // P1-3 (Agency Foundation) — generalized provider context (byte-identical
+    // today; forward-compatible for multi-agency).
+    req.isProvider = row?.matched_kind === "platform_owner" || row?.matched_kind === "agency";
+    req.actorProviderTenantId = row?.matched_provider || null;
+    // P1-4 (Agency Foundation) — provider catalog scope (mirror of oliver-api;
+    // arion-api has no consulting catalog reads today but keeps the stamp
+    // identical to avoid mirror-file drift). See requireOliverAccess.js.
+    req.actorProviderScopeTenantId = req.isProvider
+      ? (row?.matched_tenant_id || null)
+      : (row?.matched_provider || null);
 
     const serviceKey = (process.env.ARION_SERVICE_KEY || "arion").trim();
     const entitlement = await platformPool
@@ -136,6 +165,51 @@ export async function requireArionAccess(req, res, next) {
     const service = entitlement.recordset[0] || null;
     if (!service) {
       return res.status(403).json({ error: "ARION is not enabled for this tenant." });
+    }
+
+    // ── Tier 3-3a (roles enforcement, 2026-07-04) — BYTE-SAFE primitive ──
+    // Mirror of requireOliverAccess.js. Resolve the platform TENANT role
+    // (core.tenant_user_role: admin|user|read_only) + the per-user product gate
+    // (core.tenant_user_product_access, product_key='arion'). Both default to
+    // admin/allow when no row exists → byte-identical for every existing user.
+    // Founder/consultant acting on a client has no row → admin + full access.
+    // FAIL-OPEN on any error so a transient DB hiccup can never lock a tenant out.
+    let tenantRole = "admin";
+    let productDenied = false;
+    try {
+      const roleR = await platformPool
+        .request()
+        .input("tenant_id", sql.UniqueIdentifier, tenantId)
+        .input("user_id", sql.UniqueIdentifier, user.user_id)
+        .query(`
+          SELECT
+            (SELECT TOP 1 role FROM core.tenant_user_role
+               WHERE tenant_id = @tenant_id AND user_id = @user_id) AS role,
+            (SELECT TOP 1 can_access FROM core.tenant_user_product_access
+               WHERE tenant_id = @tenant_id AND user_id = @user_id
+                 AND product_key = 'arion') AS can_access;
+        `);
+      const rr = roleR.recordset[0] || {};
+      if (rr.role === "user" || rr.role === "read_only") tenantRole = rr.role;
+      if (rr.can_access === false || rr.can_access === 0) productDenied = true;
+    } catch (e) {
+      console.warn("[requireArionAccess] role/product read failed; defaulting to admin/allow:", e.message);
+      tenantRole = "admin";
+      productDenied = false;
+    }
+    req.tenantRole = tenantRole;
+    if (productDenied && !isFounderActingOnClient) {
+      return res.status(403).json({
+        error: "product_access_denied",
+        details: "Your account has not been granted access to ARION for this business.",
+      });
+    }
+    const isMutation = !["GET", "HEAD", "OPTIONS"].includes((req.method || "GET").toUpperCase());
+    if (tenantRole === "read_only" && isMutation && !isFounderActingOnClient) {
+      return res.status(403).json({
+        error: "read_only",
+        details: "Your account has read-only access to this business.",
+      });
     }
 
     req.platformUser = {

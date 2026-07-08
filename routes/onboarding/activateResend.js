@@ -92,7 +92,7 @@ router.post('/', async (req, res) => {
     // Look up the tenant (we'll use it for emails + the email-match check).
     const tRow = await platformPool.request()
       .input('tid', sql.UniqueIdentifier, tenantId)
-      .query(`SELECT TOP 1 tenant_id, full_name, name, primary_contact_email, primary_contact_first_name
+      .query(`SELECT TOP 1 tenant_id, full_name, name, primary_contact_email
                 FROM core.tenants WHERE tenant_id = @tid`);
     const tenantRow = tRow.recordset[0];
     if (!tenantRow) {

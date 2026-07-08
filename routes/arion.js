@@ -3,8 +3,10 @@ import sql from 'mssql';
 import crypto from 'node:crypto';
 import { getServicesPool } from '../db/servicesPool.js';
 import { getPlatformPool } from '../db/platformPool.js';
+import { requireArionTenantAdmin } from '../middleware/requireArionTenantAdmin.js';
 import { firePlatformEvent } from '../lib/platformEvents.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
+import { getEmailFromClaims } from '../lib/claims.js';
 import { getSearchConsoleData, getSearchConsolePages, getSearchConsoleDevices, getSearchConsoleCountries, getSearchConsoleDates, getSearchConsolePageQuery, getAnalyticsData, resolveGscProperty } from '../lib/googleServices.js';
 import {
   fetchBusinessInfo as gbpFetchInfo,
@@ -44,6 +46,19 @@ import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } fro
 import { signOAuthState } from '../lib/oauthState.js';
 
 const router = Router();
+
+// Tier 3-3b (roles enforcement, 2026-07-04) — gate ARION admin-config MUTATIONS on
+// the platform tenant role. Placed BEFORE all sub-router mounts + route defs so it
+// intercepts first; it is write-only (reads pass) and byte-safe (everyone defaults
+// to admin today; only an explicit `user`/`read_only` is restricted; founder/
+// consultant bypass). Covers: integration connect/select (Google), Bing connect/
+// verify/disconnect, SEO project reconfigure, GBP connect/select/disconnect, and all
+// WordPress plugin config/maintenance. Content/SEO work routes are NOT gated.
+router.use('/integrations', requireArionTenantAdmin);
+router.use('/bing', requireArionTenantAdmin);
+router.use('/seo/project/reconfigure', requireArionTenantAdmin);
+router.use('/sites/:siteId/gbp', requireArionTenantAdmin);
+router.use('/sites/:siteId/plugin', requireArionTenantAdmin);
 
 // Sub-routers for site-scoped data (blueprint routes)
 router.use('/sites/:siteId/forms', formsRouter);
@@ -263,7 +278,11 @@ router.post('/sites/:siteId/requests', async (req, res) => {
 router.get('/sites/:siteId/admin-link', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { siteId } = req.params;
-  const callerEmail = (req.user?.email || req.user?.userId || '').toLowerCase() || null;
+  // 2026-07-05 fix: read the caller identity from req.auth (set by requireAuth),
+  // NOT req.user (never populated in arion-api) — the old req.user path made
+  // callerEmail always null, so the SSO launch token was never minted and the
+  // "WP Admin" button returned a bare URL (no ?ia_sso=) → no auto-login.
+  const callerEmail = (getEmailFromClaims(req.auth || {}) || '').toLowerCase() || null;
   try {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
@@ -3228,9 +3247,9 @@ router.get('/seo/market-monitor/suggestions', async (req, res) => {
         .input('siteId', sql.UniqueIdentifier, siteId)
         .query(`
           SELECT TOP 15 page, SUM(clicks) AS clicks, SUM(impressions) AS impressions
-          FROM arion.gsc_page_performance
+          FROM arion.gsc_data
           WHERE site_id = @siteId
-            AND date_recorded >= DATEADD(DAY, -90, CAST(GETUTCDATE() AS DATE))
+            AND report_date >= DATEADD(DAY, -90, CAST(GETUTCDATE() AS DATE))
           GROUP BY page
           ORDER BY SUM(clicks) DESC
         `);
@@ -5991,17 +6010,16 @@ router.get('/sites/:siteId/vulnerabilities', async (req, res) => {
       pluginErr = pluginInv.errorText || `plugin_status=${pluginInv.pluginStatus}`;
     }
 
-    // v2.0.11 — Pull Wordfence scan findings from the installed plugin.
-    // Wordfence keeps its vulnerability DB updated locally and flags
-    // known-vuln plugins during its scans. Those findings come through
+    // Pull Shield Security scan findings from the installed plugin.
+    // Shield keeps its vulnerability data locally and flags known-vuln
+    // plugins during its scans. Those findings come through
     // /security/scan-issues with type indicating vulnerable-plugin.
     const scanRes = await pluginApi.securityScanIssues(site);
     const scanIssues = (scanRes?.data?.issues || []);
-    const wfInstalled = scanRes?.data?.installed !== false;
+    const securityInstalled = scanRes?.data?.installed !== false;
 
-    // Build CVE-style vulnerability list from Wordfence scan findings that
-    // reference plugins. Wordfence categorizes these with type patterns like
-    // 'wfPluginVulnerability' / 'knownfile_vulnerability'.
+    // Build CVE-style vulnerability list from Shield Security scan findings
+    // that reference plugins.
     const pluginLookup = new Map();
     for (const p of plugins) {
       pluginLookup.set((p.slug || '').toLowerCase(), p);
@@ -6033,7 +6051,7 @@ router.get('/sites/:siteId/vulnerabilities', async (req, res) => {
         cve: cveMatch ? cveMatch[0] : null,
         title,
         detected_at: iss.detected_at,
-        recommendation: matched?.update_available ? `Update to ${matched.new_version || 'latest'}` : 'Review in Wordfence and patch',
+        recommendation: matched?.update_available ? `Update to ${matched.new_version || 'latest'}` : 'Review in Shield Security and patch',
       });
     }
 
@@ -6048,12 +6066,13 @@ router.get('/sites/:siteId/vulnerabilities', async (req, res) => {
         high: vulns.filter((v) => v.severity === 'high').length,
         medium: vulns.filter((v) => v.severity === 'medium').length,
         low: vulns.filter((v) => v.severity === 'low').length,
-        wordfence_status: wfInstalled ? 'installed' : 'not_installed',
-        wordfence_scan_findings_total: scanIssues.length,
+        security_status: securityInstalled ? 'installed' : 'not_installed',
+        security_scan_findings_total: scanIssues.length,
+        security_provider: 'shield',
         plugin_source: pluginErr ? 'failed' : 'plugin',
         plugin_list_error: pluginErr,
-        data_source: 'wordfence_local_scan',
-        data_source_note: 'CVE matches come from Wordfence scan findings on the site (local DB, auto-updated). Outdated plugins are the primary actionable signal.',
+        data_source: 'shield_local_scan',
+        data_source_note: 'CVE matches come from Shield Security scan findings on the site (local DB, auto-updated). Outdated plugins are the primary actionable signal.',
         checked_at: new Date().toISOString(),
       },
       meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
