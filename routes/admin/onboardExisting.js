@@ -265,9 +265,9 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
     // never calling installPluginsForTier. That meant a migrated Pro-tier site
     // like Rolling In It got the customer's existing plugins (whatever Kodee
     // had left behind) PLUS the IA Plugin via self-install — but NO Elementor
-    // Pro, NO Wordfence, NO EWWW config, NO Hostinger-stock-plugin strip, NO
-    // SE Ranking crawler whitelist. Diagnostic confirmed elementor-pro and
-    // wordfence MISSING from rollinginitllc.com despite being Pro tier.
+    // Pro, NO Shield Security, NO EWWW config, NO Hostinger-stock-plugin strip,
+    // NO SE Ranking crawler whitelist. Diagnostic confirmed elementor-pro and
+    // wp-simple-firewall MISSING from rollinginitllc.com despite being Pro tier.
     //
     // Now: pre-flight check WP is reachable over SSH; strip Hostinger's stock
     // onboarding plugins; install the Golden Master stack with onlySlugs
@@ -309,7 +309,7 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
         //   - intelligent-analytics (CRITICAL; the whole reason for onboarding)
         //   - hello-elementor theme (required base for Elementor Pro)
         //   - elementor + elementor-pro (Pro-tier promise)
-        //   - wordfence + SE Ranking whitelist (Intelligence reports need this)
+        //   - wp-simple-firewall (Shield) + SE Ranking whitelist (Intelligence reports need this)
         //   - ewww-image-optimizer with IA defaults (perf baseline)
         //   - seo-by-rank-math (only if Kodee didn't already install it)
         //   - litespeed-cache + safe-svg + wp-mail-smtp + advanced-custom-fields
@@ -325,7 +325,7 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
             'hello-elementor',
             'elementor',
             'elementor-pro',
-            'wordfence',
+            'wp-simple-firewall',
             'ewww-image-optimizer',
             'seo-by-rank-math',
             'litespeed-cache',

@@ -422,8 +422,8 @@ router.post('/webhooks/site-event', requireSiteToken, async (req, res) => {
           `);
       }
 
-      // ── Wordfence security events ──
-      if (event_type.startsWith('wordfence.')) {
+      // ── Shield Security events (accepts legacy 'wordfence.*' too) ──
+      if (event_type.startsWith('shield.') || event_type.startsWith('wordfence.')) {
         const severity = /attack|block|malware|lockout/i.test(event_type) ? 'critical' : 'warning';
         await transaction.request()
           .input('tenantId', sql.UniqueIdentifier, tenantId)
@@ -675,11 +675,11 @@ router.post('/webhooks/beacon', async (req, res) => {
       .input('viewedAt', sql.NVarChar(50), timestamp || new Date().toISOString())
       .query(`
         INSERT INTO arion.site_page_view
-          (page_view_id, tenant_id, site_id, page_url, referrer,
-           scroll_depth, time_on_page, screen_width, viewed_at, created_at)
+          (view_id, site_id, page_url, referrer,
+           scroll_depth, time_on_page, screen_width, created_at)
         VALUES
-          (@pageViewId, @tenantId, @siteId, @pageUrl, @referrer,
-           @scrollDepth, @timeOnPage, @screenWidth, @viewedAt, SYSDATETIMEOFFSET())
+          (@pageViewId, @siteId, @pageUrl, @referrer,
+           @scrollDepth, @timeOnPage, @screenWidth, SYSDATETIMEOFFSET())
       `);
 
     res.json({ ok: true });
