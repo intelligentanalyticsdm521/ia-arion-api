@@ -244,7 +244,40 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // Mark used.
+    // Brandon 2026-07-09: "already used" = the client actually REGISTERED, not
+    // merely that the link was clicked. If a user with this email is already a
+    // member of this tenant, the activation is spent — send them to sign in.
+    // (Path A / arion keeps its own used-at semantics below.)
+    if (matched.source !== 'arion') {
+      try {
+        const regPool = await getPlatformPool();
+        const regRow = await regPool.request()
+          .input('tenant_id', sql.UniqueIdentifier, tenantId)
+          .input('email', sql.NVarChar(320), providedEmail)
+          .query(`
+            SELECT TOP 1 1 AS yes
+              FROM core.tenant_users tu
+              JOIN core.users u ON u.user_id = tu.user_id
+             WHERE tu.tenant_id = @tenant_id AND LOWER(u.email) = LOWER(@email)
+          `);
+        if (regRow.recordset.length) {
+          return res.status(409).json({ error: { code: 'TOKEN_ALREADY_USED' } });
+        }
+      } catch (e) {
+        console.error('[onboarding/activate] registration check failed (non-fatal):', e.message);
+      }
+    }
+
+    // Brandon 2026-07-09: DO NOT consume the token on click. Consuming it the
+    // instant the /welcome page validated it broke real signups — a client who
+    // clicked the link but hadn't finished creating their account (reloaded, or
+    // waiting on the email verification code) found the link dead
+    // ("NO_WELCOME_TOKEN") on the next click. The token must survive the whole
+    // signup window. It still expires naturally (48h TTL) and the tenant
+    // invitation is one-time (claimed once on first sign-in); the registration
+    // check above is what marks the link spent, once the account actually exists.
+    //
+    // Path A (arion self-serve) is a separate flow and keeps consume-on-activate.
     if (matched.source === 'arion') {
       arionDetails.welcome_token_used_at = new Date().toISOString();
       arionDetails.welcome_email_activated_by = email;
@@ -252,43 +285,9 @@ router.post('/', async (req, res) => {
         .input('siteId', sql.UniqueIdentifier, arionSite.site_id)
         .input('details', sql.NVarChar(sql.MAX), JSON.stringify(arionDetails))
         .query(`UPDATE arion.site SET provisioning_details_json=@details, updated_at=GETUTCDATE() WHERE site_id=@siteId`);
-    } else if (matched.source === 'oliver_onboarding_users') {
-      // 2026-06-27 (C.02) — Multi-user: stamp ONLY this user's row in
-      // state_json.users[]. The other users' tokens remain valid.
-      if (oliverOnboardingState && oliverMatchedUserIndex >= 0) {
-        const usersArr = oliverOnboardingState.users || [];
-        const userRow = usersArr[oliverMatchedUserIndex];
-        if (userRow) {
-          userRow.used_at = new Date().toISOString();
-          userRow.hash = null; // null out so a stolen plaintext can't replay
-        }
-        // If this was the LAST user (whose hash mirrors the legacy column),
-        // also clear the legacy column so the resend / activate paths agree.
-        const anyRemaining = usersArr.some(u => u && u.hash && !u.used_at);
-        await pool.request()
-          .input('tenantId', sql.UniqueIdentifier, tenantId)
-          .input('state', sql.NVarChar(sql.MAX), JSON.stringify(oliverOnboardingState))
-          .query(`
-            UPDATE oliver.tenant_onboarding_state
-               SET state_json = @state,
-                   welcome_token = ${anyRemaining ? 'welcome_token' : 'NULL'},
-                   welcome_token_expires_at = ${anyRemaining ? 'welcome_token_expires_at' : 'NULL'},
-                   last_saved_at = SYSUTCDATETIME()
-             WHERE tenant_id = @tenantId
-          `);
-      }
-    } else {
-      // Path B legacy single-user: null out the token + record used-at so
-      // it can't be replayed.
-      await pool.request()
-        .input('tenantId', sql.UniqueIdentifier, tenantId)
-        .query(`
-          UPDATE oliver.tenant_onboarding_state
-             SET welcome_token = NULL,
-                 welcome_token_expires_at = NULL
-           WHERE tenant_id = @tenantId
-        `);
     }
+    // Path B (oliver_onboarding / oliver_onboarding_users): token intentionally
+    // NOT consumed here — see note above.
 
     // 2026-06-30 FIX: /signup was renamed to /pricing (the checkout page) on
     // 2026-05-20. The old URL still 301-redirected, but landed clients on the
