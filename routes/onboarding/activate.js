@@ -104,27 +104,29 @@ router.post('/', async (req, res) => {
       try {
         arionDetails = arionSite.provisioning_details_json ? JSON.parse(arionSite.provisioning_details_json) : {};
       } catch { arionDetails = {}; }
-      if (arionDetails.welcome_token) {
+      // 2026-07-15 fix: only enforce used/expired on the ARION token when the
+      // client is actually PRESENTING it (their setup_token hash matches it).
+      // Previously an ARION token that was expired/used short-circuited to
+      // TOKEN_EXPIRED / TOKEN_ALREADY_USED even when the client's link carried
+      // the (valid) oliver_onboarding token — so a stale ARION welcome token
+      // shadowed every fresh Path-B link on any tenant that has both an ARION
+      // site AND an oliver onboarding token (e.g. clients with a website).
+      // Match FIRST; only then apply used/expiry to the token the user holds.
+      // F-SEC1.3 (2026-06-21): stored value is the SHA-256 hex hash; compare
+      // hash-vs-hash via constant-time eq.
+      if (arionDetails.welcome_token && timingSafeEq(arionDetails.welcome_token, setupTokenHash)) {
         if (arionDetails.welcome_token_used_at) {
           return res.status(409).json({ error: { code: 'TOKEN_ALREADY_USED' } });
         }
-        // F-A.1 (2026-06-19): enforce expiry on the arion path (Path B path
-        // already does it). Without this, leaked Path A tokens were
-        // functionally immortal until used.
+        // F-A.1 (2026-06-19): enforce expiry (expired → resend flow via
+        // POST /onboarding/activate/resend; Portal /welcome reads can_resend).
         if (arionDetails.welcome_token_expires_at && new Date(arionDetails.welcome_token_expires_at) < new Date()) {
-          // 2026-06-27 — Brandon-directed: expired tokens must hand the user
-          // to the resend-verification flow at POST /onboarding/activate/resend.
-          // Portal `/welcome` reads `can_resend` and shows a "Send me a new
-          // link" button. Including the email in the response is intentional
-          // — it's already in the request body, so this leaks nothing.
           return res.status(409).json({ error: { code: 'TOKEN_EXPIRED', can_resend: true } });
         }
-        // F-SEC1.3 (2026-06-21): stored value is the SHA-256 hex hash of the
-        // plaintext token. We compare hash-vs-hash via constant-time eq.
-        if (timingSafeEq(arionDetails.welcome_token, setupTokenHash)) {
-          matched = { source: 'arion' };
-        }
+        matched = { source: 'arion' };
       }
+      // If the client's token is NOT the ARION token, fall through to the
+      // oliver_onboarding token below instead of wrongly rejecting here.
     }
 
     let oliverOnboardingState = null;
