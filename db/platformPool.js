@@ -12,6 +12,21 @@ const authMode = process.env.AUTH_MODE || "LOCAL_DEV";
 const sqlServer = process.env.PLATFORM_SQL_SERVER || process.env.SQL_SERVER;
 const sqlDatabase = process.env.PLATFORM_SQL_DATABASE || "iadm_platform";
 
+// LOCAL-DEV SQL AUTH SEAM (added 2026-07-16)
+// Azure SQL only accepts AAD tokens; the local Docker container (compose.yml
+// "iadm-sqlserver") speaks SQL auth and presents a self-signed cert. That
+// mismatch -- not the config files -- is why local dev never actually ran.
+// Active ONLY when BOTH SQL_USER and SQL_PASSWORD are set. Prod sets neither
+// (verified 2026-07-16), so prod keeps the identical AAD path + encrypt:true.
+// SQL_SERVER may be "localhost,1433"; the mssql driver needs server/port split.
+const sqlUser = process.env.SQL_USER;
+const sqlPassword = process.env.SQL_PASSWORD;
+const useSqlAuth = Boolean(sqlUser && sqlPassword);
+function parseServer(raw) {
+  const [h, p] = String(raw || "").split(",");
+  return { host: h.trim(), port: p ? Number(p.trim()) : undefined };
+}
+
 export const SQL_SCOPE = "https://database.windows.net/.default";
 
 function withTimeout(promise, ms, label) {
@@ -73,16 +88,19 @@ export async function getPlatformPool() {
 
   poolTokenExpiresAt = token.expiresOnTimestamp || (Date.now() + 50 * 60 * 1000);
 
+  const { host: sqlHost, port: sqlPort } = parseServer(sqlServer);
   const config = {
-    server: sqlServer,
+    server: sqlHost,
+    ...(sqlPort ? { port: sqlPort } : {}),
     database: sqlDatabase,
-    options: { encrypt: true },
+    options: useSqlAuth
+      ? { encrypt: false, trustServerCertificate: true }
+      : { encrypt: true },
     connectionTimeout: connectTimeoutMs,
     requestTimeout: Number(process.env.SQL_REQUEST_TIMEOUT_MS || "15000"),
-    authentication: {
-      type: "azure-active-directory-access-token",
-      options: { token: token.token },
-    },
+    authentication: useSqlAuth
+      ? { type: "default", options: { userName: sqlUser, password: sqlPassword } }
+      : { type: "azure-active-directory-access-token", options: { token: token.token } },
     pool: {
       max: 10,
       min: 0,

@@ -26,6 +26,12 @@ function isGuid(value) {
  */
 export async function tenantResolution(req, res, next) {
   try {
+    // devAuth (lib/devAuth.js) already resolved req.tenant from the allow-listed
+    // x-dev-tenant header. Without this a dev request 400s here for a missing
+    // x-tenant-key it was never going to send. Inert in prod — req._devAuth is
+    // only ever set when DEV_AUTH=1 and NODE_ENV !== production.
+    if (req._devAuth) return next();
+
     const tenantKeyRaw = req.header("x-tenant-key") || null;
 
     if (!tenantKeyRaw || !tenantKeyRaw.trim()) {

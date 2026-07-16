@@ -9,6 +9,7 @@
 //   attaches req.auth + req.surface for downstream handlers.
 
 import { createRemoteJWKSet, jwtVerify, decodeJwt, decodeProtectedHeader } from "jose";
+import { requestedDevTenant, applyDevContext } from "../lib/devAuth.js";
 
 // Cache: jwks resolvers per jwks_uri
 const jwksByUri = new Map();
@@ -85,6 +86,19 @@ function resolveSurfaceFromClientId(clientId) {
 
 export async function requireAuth(req, res, next) {
   try {
+    // LOCAL TEST-ONLY seam — first, so a dev request never trips the prod
+    // auth-config checks below. Inert unless DEV_AUTH=1 and non-prod; only
+    // allow-listed test tenants, never the founder tenant. See lib/devAuth.js.
+    const devTenant = requestedDevTenant(req);
+    if (devTenant) {
+      try {
+        await applyDevContext(req, devTenant);
+        return next();
+      } catch (err) {
+        return res.status(err.statusCode || 500).json({ error: "dev auth failed", details: err.message });
+      }
+    }
+
     const authHeader = req.headers.authorization || "";
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
 

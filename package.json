@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
+    "dev": "node --watch index.js",
     "test": "node --experimental-vm-modules node_modules/.bin/jest --forceExit"
   },
   "dependencies": {
