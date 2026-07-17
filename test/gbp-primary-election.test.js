@@ -425,3 +425,52 @@ test("F5: when the primary is removed by the reconcile, a new one is elected", a
   assert.equal(primaries.length, 1, "🔴 tenant left with NO primary after its primary was removed");
   assert.equal(primaries[0].gbp_location_id, "L_B");
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F8 — arion.site.gbp_location_name and business_location.is_primary are two
+// stores of "which location is mine", written by paths that never consulted each
+// other. Divergence was guaranteed, not possible.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("F8: the PICKER wins — an explicitly picked location becomes primary", async () => {
+  const { syncAllLocations } = await loadSync();
+  const pool = makeMockPool([]);
+  // The user picked Midwest Ag. Nothing matches their site domain, so the
+  // heuristic alone would elect NOTHING (or, before the fix, Briarwood).
+  pool.selectedLocationNames = ["accounts/103357467018828514362/locations/33333333333333333333"];
+
+  await syncAllLocations("777c1093-0000-0000-0000-000000000000", "tok", {
+    siteDomain: "midwestagservices.com",
+    injectedClient: async () => riiRemote(),
+    injectedPool: pool,
+  });
+
+  const primaries = [...pool.rows.values()].filter((r) => r.is_primary);
+  assert.equal(primaries.length, 1, "the picked location must be elected primary");
+  assert.equal(primaries[0].gbp_location_id, "33333333333333333333",
+    `elected ${primaries[0].display_name} — the two stores disagree, which is F8`);
+  assert.ok(/Midwest/i.test(String(primaries[0].display_name)));
+});
+
+test("F8: a human's pick OVERRULES the domain heuristic", async () => {
+  const { syncAllLocations } = await loadSync();
+  const pool = makeMockPool([]);
+  const remote = [
+    loc("L_MATCH", "Domain Match Co", "https://mine.example.com", 1.0),
+    loc("L_PICKED", "Actually Mine", "https://different.example", 0),
+  ];
+  remote.sort((a, b) => (b.match_score - a.match_score) || a.title.localeCompare(b.title));
+  // The domain heuristic would pick L_MATCH. The human said L_PICKED.
+  pool.selectedLocationNames = ["accounts/103357467018828514362/locations/L_PICKED"];
+
+  await syncAllLocations("dddd8888-0000-0000-0000-000000000000", "tok", {
+    siteDomain: "mine.example.com",
+    injectedClient: async () => remote,
+    injectedPool: pool,
+  });
+
+  const primaries = [...pool.rows.values()].filter((r) => r.is_primary);
+  assert.equal(primaries.length, 1);
+  assert.equal(primaries[0].display_name, "Actually Mine",
+    "a domain heuristic must never overrule a person who told us the answer");
+});
