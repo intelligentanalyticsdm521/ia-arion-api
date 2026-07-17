@@ -3989,10 +3989,25 @@ router.get('/seo/decay', async (req, res) => {
     const monthAgo = new Date(today.getTime() - 30 * 24 * 3600 * 1000);
     const fmt = (d) => d.toISOString().slice(0, 10);
 
+    // The three `.catch(() => [])` that used to be here were DEAD, and their
+    // deadness was actively harmful.
+    //
+    // Both lib/seranking.js#getPositionsHistory (:406-409) and #getProjectKeywords
+    // already `catch (err) { console.error(...); return []; }` internally, so
+    // neither promise can EVER reject and neither .catch could ever fire. But
+    // reading this line, the errors look handled — which is precisely why the
+    // real swallow, forty lines away in another file, has never been questioned.
+    // Dead defensiveness is worse than none: it answers the question "is this
+    // handled?" wrongly.
+    //
+    // Deleted rather than kept "just in case". The genuine defect — that a total
+    // SE Ranking outage returns [] and renders as a clean bill of health rather
+    // than an error — lives in seranking.js and is scoped separately; it cannot
+    // be fixed from here, and pretending otherwise is what this line was doing.
     const [current, prior, keywordMeta] = await Promise.all([
-      getPositionsHistory(site.se_ranking_project_id, fmt(monthAgo), fmt(today), tenantId).catch(() => []),
-      getPositionsHistory(site.se_ranking_project_id, fmt(new Date(monthAgo.getTime() - 30 * 24 * 3600 * 1000)), fmt(monthAgo), tenantId).catch(() => []),
-      getProjectKeywords(site.se_ranking_project_id, tenantId).catch(() => []),
+      getPositionsHistory(site.se_ranking_project_id, fmt(monthAgo), fmt(today), tenantId),
+      getPositionsHistory(site.se_ranking_project_id, fmt(new Date(monthAgo.getTime() - 30 * 24 * 3600 * 1000)), fmt(monthAgo), tenantId),
+      getProjectKeywords(site.se_ranking_project_id, tenantId),
     ]);
     const metaById = {};
     for (const m of keywordMeta || []) {
