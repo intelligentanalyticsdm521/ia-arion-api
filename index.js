@@ -181,6 +181,35 @@ app.use('/intelligence', requireAuth, enforceEmergencyReadOnly(), enforceViewAsR
 
 app.use((req, res) => res.status(404).json({ error: 'not_found', method: req.method, path: req.path }));
 
+// FINAL JSON ERROR RESPONDER.
+//
+// Without a 4-arity handler here, Express's own finalhandler answers every
+// unhandled error -- with text/html, and (finalhandler/index.js:176)
+// `if (env !== "production") msg = err.stack` puts the STACK IN THE RESPONSE
+// BODY. express/lib/application.js:78 reads `process.env.NODE_ENV ||
+// "development"`, so an app with NODE_ENV merely UNSET runs in development
+// mode and leaks.
+//
+// That is not hypothetical: api-platform-iadm-prod had no NODE_ENV and was
+// publishing stack traces and its entire CORS allowlist to anonymous callers
+// until 2026-07-17. This app currently sets NODE_ENV=production, so the leak is
+// MASKED -- but that makes safety depend on an app setting staying correct,
+// which is the bug that bit the hub. This handler does not depend on it.
+//
+// 4-arity is load-bearing: Express only treats a middleware as an error handler
+// if fn.length === 4. Do not drop the unused `next` -- doing so silently
+// un-registers this and restores the leak with no error anywhere.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  const status = Number(err?.status || err?.statusCode) || 500;
+  console.error(`[error] ${req.method} ${req.originalUrl} -> ${status}:`, err?.stack || err);
+  if (res.headersSent) return;
+  res.status(status).json({
+    error: status === 400 ? "bad_request" : status < 500 ? "request_failed" : "internal_error",
+    status,
+  });
+});
+
 app.listen(port, () => {
   console.log('ARION API listening on http://localhost:' + port);
   console.log('[CORS] allowedOrigins: ' + allowedOrigins.join(', '));
