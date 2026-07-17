@@ -202,6 +202,22 @@ async function loadSiteRow(siteId, tenantId) {
   // Owner contact is sourced separately from arion.signup_session (transient
   // wizard data) by handlers that need it. See memory:
   // reference_data_ownership_architecture.
+  //
+  // 2026-07-16 — se_ranking_project_id was NOT in this SELECT, and that omission
+  // was a MONEY bug, not a cosmetic one.
+  //
+  // configureForTier (lib/seoOnboarding.js:270) reads
+  //     let projectId = site.se_ranking_project_id || null;
+  // to decide whether this site already has an SE Ranking project. With the
+  // column absent here it was always undefined, so :271's `if (!projectId)` was
+  // ALWAYS true and it created a BRAND NEW, BILLABLE project every time the
+  // runner reached configure-seo — even for a site that already had one. The
+  // idempotency guard was not weak; it was blind.
+  //
+  // SE Ranking bills by keywords tracked, so a duplicate project is a duplicate
+  // bill, forever, silently. A real orphan existed: project 4537010
+  // (shimsremodeling.com) was billing 220 keywords on daily checks for a
+  // cancelled client, with no arion.site row pointing at it. Deleted 2026-07-16.
   const pool = await getServicesPool();
   const r = await pool.request()
     .input('siteId', sql.UniqueIdentifier, siteId)
@@ -209,7 +225,8 @@ async function loadSiteRow(siteId, tenantId) {
     .query(`
       SELECT site_id, tenant_id, domain, arion_tier AS tier, feature_addons_json,
              status_phase, plugin_status,
-             hostinger_website_id, hostinger_subscription_id, provisioning_state
+             hostinger_website_id, hostinger_subscription_id, provisioning_state,
+             se_ranking_project_id
       FROM arion.site WHERE site_id = @siteId AND tenant_id = @tenantId`);
   return r.recordset[0] || null;
 }
@@ -509,8 +526,41 @@ router.post('/runner/advance/configure-seo', requireIngestKey, async (req, res) 
 
     const { configureForTier, persistResult } = await import('../lib/seoOnboarding.js');
     const result = await configureForTier(site, site.tier || 'starter');
-    try { if (typeof persistResult === 'function') await persistResult(site_id, result); }
-    catch (e) { console.warn('[runner:configure-seo] persistResult warn:', e.message); }
+
+    // persistResult is declared persistResult(pool, tenantId, siteId, result) —
+    // FOUR arguments. It was called with TWO: persistResult(site_id, result).
+    // So `pool` was a site_id string, `pool.request()` threw a TypeError, the
+    // catch swallowed it, and the route still returned ok:true.
+    //
+    // Net effect: configureForTier (above) had ALREADY created a billable SE
+    // Ranking project, and then we failed to record its id — so the next run
+    // couldn't know it existed and would create another one. Combined with
+    // loadSiteRow not selecting se_ranking_project_id (fixed above), that is a
+    // duplicate paid project on every pass, silently.
+    //
+    // 🪤 Fixing ONLY the arity would have been WORSE than the bug: the guard
+    // would still be blind, so it would still create the duplicate — and now
+    // successfully SAVE it, overwriting the real project id. Both halves or
+    // neither. (Third time this shape has appeared: the campaign_recipient
+    // INSERT needed the NOT NULL too, and suppression_list needed `domain`
+    // relaxed, not just `email` added.)
+    //
+    // Still guarded: a failure to record must not fail the runner step, because
+    // the project was created and re-running is safe now that the guard works.
+    // But it is an ERROR, not a warning — an unrecorded project id is exactly
+    // how an orphan is born (see project 4537010, shimsremodeling.com: a real
+    // orphan billing 220 keywords daily for a cancelled client, deleted
+    // 2026-07-16).
+    try {
+      if (typeof persistResult === 'function') {
+        // loadSiteRow opens its own pool internally, so this scope has none —
+        // getServicesPool() is cached, so this is a lookup, not a new connection.
+        const pool = await getServicesPool();
+        await persistResult(pool, tenant_id, site_id, result);
+      }
+    } catch (e) {
+      console.error('[runner:configure-seo] persistResult FAILED — project id not recorded, this creates an orphan:', e.message);
+    }
 
     res.json({ ok: true, data: result || { configured: true } });
   } catch (err) {
