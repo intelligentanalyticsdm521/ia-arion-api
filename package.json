@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "test": "node --experimental-vm-modules node_modules/.bin/jest --forceExit"
+    "test": "node --test test/"
   },
   "dependencies": {
     "@azure/identity": "^4.13.0",
@@ -25,9 +25,7 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "@jest/globals": "^29.7.0",
     "@playwright/test": "^1.49.0",
-    "archiver": "^7.0.1",
-    "jest": "^29.7.0"
+    "archiver": "^7.0.1"
   }
 }
