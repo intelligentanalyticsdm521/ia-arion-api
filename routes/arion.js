@@ -6162,8 +6162,34 @@ function pluginResponseFallback(pool, tenantId, siteId) {
     `)
     .then((r) => {
       if (r.recordset.length === 0) return null;
-      try { return { fallback: true, ...JSON.parse(r.recordset[0].payload_json || '{}'), snapshot_date: r.recordset[0].snapshot_date, captured_at: r.recordset[0].captured_at }; }
+      let payload;
+      try { payload = JSON.parse(r.recordset[0].payload_json || '{}'); }
       catch { return null; }
+
+      // payload_json is { snapshot_date, raw }, where raw is keyed by the
+      // snapshot puller's endpoint names — each entry either { data } when that
+      // pull succeeded or { error, status } when it failed. Reshape into the
+      // same payloads the live security/performance routes below return.
+      const raw = payload.raw || {};
+      const dataOf = (entry) => entry?.data || null;
+
+      return {
+        fallback: true,
+        security: {
+          // raw.shield is the current key; rows written before the Shield
+          // relabel carry raw.wordfence.
+          wordfence: dataOf(raw.shield ?? raw.wordfence),
+          core_health: dataOf(raw.coreHealth),
+          users: dataOf(raw.users),
+        },
+        performance: {
+          litespeed: dataOf(raw.litespeed),
+          server: dataOf(raw.server),
+          cron: dataOf(raw.cron),
+        },
+        snapshot_date: r.recordset[0].snapshot_date,
+        captured_at: r.recordset[0].captured_at,
+      };
     })
     .catch(() => null);
 }
