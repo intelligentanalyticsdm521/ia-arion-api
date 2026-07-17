@@ -61,6 +61,17 @@ function makeMockPool(initialRows = []) {
           if (/SELECT location_id, gbp_location_id, is_primary/i.test(s)) {
             return { recordset: [...rows.values()] };
           }
+          // F2 — the tenant boundary reads the picker's answer from arion.site.
+          if (/FROM arion\.site/i.test(s)) {
+            return { recordset: (pool.selectedLocationNames || []).map((n) => ({ gbp_location_name: n })) };
+          }
+          // F5 — post-reconcile "is anything still primary?". Must answer from
+          // the CURRENT rows, not a canned []: a mock that always says "no
+          // primary" would exercise the re-election path even when it should not
+          // run, and hide a regression.
+          if (/SELECT TOP 1 1 AS hit[\s\S]*is_primary = 1/i.test(s)) {
+            return { recordset: [...rows.values()].some((r) => r.is_primary) ? [{ hit: 1 }] : [] };
+          }
           if (/^\s*DELETE FROM arion\.business_location/im.test(s)) {
             rows.delete(inputs.gbpLocationId);
             return { recordset: [], rowsAffected: [1] };
@@ -302,4 +313,115 @@ test("a lookalike domain must NOT score as a partial match (F9)", async () => {
   // and a genuine subdomain must STILL match
   assert.equal(fixed("shop.example.com", "example.com"), true, "a real subdomain must still match");
   assert.equal(fixed("example.com", "shop.example.com"), true, "and in the other direction");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F2 — the tenant boundary. This is the bleed at its SOURCE: the loop used to
+// import every listing the Google identity could reach, with no notion of whose
+// they were. That is why 4 tenants each held the same 3 businesses.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("F2: RII imports NOTHING — none of the three businesses are theirs", async () => {
+  const { syncAllLocations } = await loadSync();
+  const pool = makeMockPool([]);
+  pool.selectedLocationNames = []; // RII never used the picker — arion.site.gbp_location_name is NULL
+
+  const res = await syncAllLocations("12839687-0000-0000-0000-000000000000", "tok", {
+    siteDomain: "rollinginitllc.com",
+    injectedClient: async () => riiRemote(),
+    injectedPool: pool,
+  });
+
+  // Google returned 3 listings; none match rollinginitllc.com and none were
+  // picked. Importing zero is CORRECT — importing somebody else's dental
+  // practice is the leak.
+  assert.equal(pool.rows.size, 0, `🔴 imported ${pool.rows.size} foreign listing(s) into RII`);
+  assert.equal(res.added, 0);
+  assert.equal(res.skippedForeign, 3, "should report the 3 skipped listings, not silently show a short list");
+  assert.equal(res.total, 3, "total must still reflect what Google returned");
+});
+
+test("F2: a picked location IS imported even with no domain match", async () => {
+  const { syncAllLocations } = await loadSync();
+  const pool = makeMockPool([]);
+  // The picker is the escape hatch for a listing whose websiteUri doesn't match.
+  pool.selectedLocationNames = ["accounts/103357467018828514362/locations/33333333333333333333"];
+
+  const res = await syncAllLocations("777c1093-0000-0000-0000-000000000000", "tok", {
+    siteDomain: "midwestagservices.com",
+    injectedClient: async () => riiRemote(), // nothing scores a match
+    injectedPool: pool,
+  });
+
+  assert.equal(pool.rows.size, 1, "the explicitly picked location must be imported");
+  assert.equal(res.skippedForeign, 2, "the other two are not theirs");
+  const [only] = [...pool.rows.values()];
+  assert.equal(only.gbp_location_id, "33333333333333333333");
+});
+
+test("F2: domain matches are imported and foreign ones are not, in the same run", async () => {
+  const { syncAllLocations } = await loadSync();
+  const pool = makeMockPool([]);
+  pool.selectedLocationNames = [];
+
+  const remote = [
+    loc("L_MINE", "My Shop", "https://myshop.example.com", 1.0),
+    loc("L_THEIRS", "Someone Else Ltd", "https://other.example", 0),
+  ];
+  remote.sort((a, b) => (b.match_score - a.match_score) || a.title.localeCompare(b.title));
+
+  const res = await syncAllLocations("cccc3333-0000-0000-0000-000000000000", "tok", {
+    siteDomain: "myshop.example.com",
+    injectedClient: async () => remote,
+    injectedPool: pool,
+  });
+
+  assert.equal(pool.rows.size, 1);
+  assert.equal([...pool.rows.values()][0].display_name, "My Shop");
+  assert.equal(res.skippedForeign, 1);
+});
+
+test("F2: a single reachable listing is imported even with no domain match", async () => {
+  const { syncAllLocations } = await loadSync();
+  const pool = makeMockPool([]);
+  pool.selectedLocationNames = [];
+  // One listing and one tenant — it is theirs by definition. Preserves the case
+  // where a small business's GBP has no websiteUri set.
+  await syncAllLocations("bbbb2222-0000-0000-0000-000000000000", "tok", {
+    siteDomain: "solo.example.com",
+    injectedClient: async () => [loc("L_ONLY", "Solo Biz", "https://unrelated.example", 0)],
+    injectedPool: pool,
+  });
+  assert.equal(pool.rows.size, 1, "a lone listing must still import");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F5 — hadPrimary was computed BEFORE the reconcile and never refreshed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("F5: when the primary is removed by the reconcile, a new one is elected", async () => {
+  const { syncAllLocations } = await loadSync();
+  // A and B stored; A is the primary. Google authoritatively returns only B.
+  const pool = makeMockPool([
+    { gbp_location_id: "L_A", location_name: "accounts/1/locations/L_A", display_name: "A Biz", is_primary: true },
+    { gbp_location_id: "L_B", location_name: "accounts/1/locations/L_B", display_name: "B Biz", is_primary: false },
+  ]);
+  pool.selectedLocationNames = [];
+
+  const remote = [loc("L_B", "B Biz", "https://x.example.com", 1.0)];
+  Object.defineProperty(remote, "complete", { value: true, enumerable: false });
+
+  await syncAllLocations("ffff7777-0000-0000-0000-000000000000", "tok", {
+    siteDomain: "x.example.com",
+    injectedClient: async () => remote,
+    injectedPool: pool,
+  });
+
+  // Before the fix: hadPrimary was still true from the pre-reconcile snapshot,
+  // so the re-election never ran and the tenant was left with ZERO primaries —
+  // permanently, and unfixable by re-syncing.
+  const primaries = [...pool.rows.values()].filter((r) => r.is_primary);
+  assert.ok(!pool.rows.has("L_A"), "the removed listing should be gone");
+  assert.equal(primaries.length, 1, "🔴 tenant left with NO primary after its primary was removed");
+  assert.equal(primaries[0].gbp_location_id, "L_B");
 });
