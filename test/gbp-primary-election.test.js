@@ -283,3 +283,23 @@ test("a genuine single removal still reconciles", async () => {
   assert.ok(!pool.rows.has("L_C"), "the genuinely-removed listing should be gone");
   assert.equal(pool.rows.size, 2);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F9 — the domain match must respect the label boundary
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("a lookalike domain must NOT score as a partial match (F9)", async () => {
+  // Reproduces the real pairing: Briarwood's listing vs a lookalike site domain.
+  // "notbriarwoodsmiles.com".endsWith("briarwoodsmiles.com") === true, so the
+  // old bare endsWith scored an unrelated company as a 0.5 partial match. That
+  // score feeds primary election, so a false match is a route to the bleed.
+  const bare = (locHost, siteHost) => locHost.endsWith(siteHost) || siteHost.endsWith(locHost);
+  const fixed = (locHost, siteHost) => locHost.endsWith("." + siteHost) || siteHost.endsWith("." + locHost);
+
+  assert.equal(bare("notbriarwoodsmiles.com", "briarwoodsmiles.com"), true, "the old rule DID match a lookalike");
+  assert.equal(fixed("notbriarwoodsmiles.com", "briarwoodsmiles.com"), false, "🔴 lookalike still matches");
+
+  // and a genuine subdomain must STILL match
+  assert.equal(fixed("shop.example.com", "example.com"), true, "a real subdomain must still match");
+  assert.equal(fixed("example.com", "shop.example.com"), true, "and in the other direction");
+});

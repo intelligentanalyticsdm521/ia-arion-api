@@ -1180,6 +1180,31 @@ router.post('/sites/:siteId/gbp/select-location', async (req, res) => {
     const { listAllGbpLocations } = await import('../lib/gbpApi.js');
     const locations = await listAllGbpLocations(tokenData.access_token, site.domain);
     const found = locations.find((l) => l.location_name === location_name);
+
+    // The 403 below is a REAL authorization check and stays — it stops someone
+    // binding a location they do not own. But it must only fire when we KNOW the
+    // location is absent, not when Google failed to tell us.
+    //
+    // listAllGbpLocations could silently return a partial or empty list from a
+    // degraded Google response, so a transient hiccup produced
+    //   403 "Selected location is not in your authorized GBP list"
+    // — telling the user they do not own their own business. That is both a lie
+    // and unactionable: retrying is the fix, and the message says it never will
+    // be.
+    //
+    // Fail CLOSED but HONESTLY: we still refuse the write (no weakening of the
+    // check), we just say it is a Google problem and retryable.
+    if (!found && locations.complete === false) {
+      console.warn(`[arion] GBP location verify inconclusive: ${(locations.partialErrors || []).join('; ')}`);
+      return res.status(503).json({
+        error: {
+          code: 'GBP_VERIFY_UNAVAILABLE',
+          message: 'Could not verify this location with Google right now. Please try again in a moment.',
+          status: 503,
+          retryable: true,
+        },
+      });
+    }
     if (!found) {
       return res.status(403).json({ error: { code: 'NOT_AUTHORIZED', message: 'Selected location is not in your authorized GBP list', status: 403 } });
     }
@@ -5089,9 +5114,28 @@ router.get('/business', async (req, res) => {
     const pool = await getServicesPool();
     const ctx = await getGbpContext(pool, tenantId, siteId);
     if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    if (ctx.error === 'not_connected') return res.json({ connected: false, error: 'not_connected' });
-    if (ctx.error === 'gbp_auth_expired') return res.json({ connected: true, error: 'gbp_auth_expired' });
-    if (ctx.error === 'location_not_found') return res.json({ connected: true, error: 'location_not_found' });
+
+    // This used to ENUMERATE three specific errors:
+    //     not_connected / gbp_auth_expired / location_not_found
+    // and missed the fourth that getGbpContext:5078 can return —
+    // 'gbp_location_not_selected'. When a site has no gbp_location_name the
+    // enumeration matched nothing, execution fell through, and
+    // gbpFetchInfo(undefined, undefined) threw a TypeError -> HTTP 500.
+    //
+    // That is Rolling In It's live state today: their site has no selected GBP
+    // location, so this endpoint 500s every time their Business tab loads.
+    //
+    // Every one of the other ten getGbpContext call sites already uses the
+    // generic `if (ctx.error)` guard (see :5153, :5172, :5204, ...). This was
+    // the lone outlier, and enumerating a set that a helper can grow is exactly
+    // how that outlier became a 500. Match the established pattern so a new
+    // error value can never fall through again.
+    if (ctx.error) {
+      return res.json({
+        connected: !['not_connected', 'site_not_found'].includes(ctx.error),
+        error: ctx.error,
+      });
+    }
 
     // Parallel: fetch business info + performance metrics
     const [infoRes, perfRes] = await Promise.all([
