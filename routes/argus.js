@@ -196,12 +196,21 @@ router.get("/margin", async (req, res) => {
         SELECT
           a.action_type,
           COUNT(*) AS call_count,
-          SUM(a.credits_charged) AS credits_sold,
+          -- Net credits actually kept as revenue. An outlier-refunded row keeps
+          -- credits_charged (so the spend + provider cost stay visible) but
+          -- contributes ZERO revenue — otherwise the refunded credits inflate
+          -- the margin. credits_refunded surfaces the offset explicitly.
+          SUM(CASE WHEN a.outlier_refunded = 1 THEN 0 ELSE a.credits_charged END) AS credits_sold,
+          SUM(CASE WHEN a.outlier_refunded = 1 THEN a.credits_charged ELSE 0 END) AS credits_refunded,
           SUM(a.cost_basis_usd) AS cost_basis_total,
           AVG(a.cost_basis_usd) AS avg_cost_basis,
-          SUM(a.cost_basis_usd) / NULLIF(SUM(CAST(a.credits_charged AS DECIMAL(18,4))) * 0.10, 0) AS cost_ratio,
-          1.0 - (SUM(a.cost_basis_usd) / NULLIF(SUM(CAST(a.credits_charged AS DECIMAL(18,4))) * 0.10, 0)) AS margin_ratio,
-          SUM(CASE WHEN a.outlier_refunded=1 THEN 1 ELSE 0 END) AS outlier_count
+          -- Margin math runs on NET (non-refunded) credits at $0.10/credit, so an
+          -- outlier correctly reads as pure cost with no offsetting revenue.
+          SUM(a.cost_basis_usd)
+            / NULLIF(SUM(CASE WHEN a.outlier_refunded = 1 THEN 0 ELSE CAST(a.credits_charged AS DECIMAL(18,4)) END) * 0.10, 0) AS cost_ratio,
+          1.0 - (SUM(a.cost_basis_usd)
+            / NULLIF(SUM(CASE WHEN a.outlier_refunded = 1 THEN 0 ELSE CAST(a.credits_charged AS DECIMAL(18,4)) END) * 0.10, 0)) AS margin_ratio,
+          SUM(CASE WHEN a.outlier_refunded = 1 THEN 1 ELSE 0 END) AS outlier_count
         FROM lumen.ai_call_audit a
        WHERE a.created_at > DATEADD(day, -@days, SYSUTCDATETIME())
          AND a.credits_charged > 0
