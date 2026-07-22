@@ -662,7 +662,9 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
     //     re-write the actual page sections from scratch but copyBundle gives
     //     a fallback if any emitter fails.
     await updatePhase(pool, session.site_id, 'generating_copy');
-    const copyBundle = await generateSiteCopy(answers);
+    // Telemetry ctx (2026-07-22): the Opus copy call now logs to
+    // lumen.ai_usage — it was the only cost-invisible LLM call in the stack.
+    const copyBundle = await generateSiteCopy(answers, { pool, tenantId: session.tenant_id });
 
     // 17. NEW (V2 F-201) — Set Elementor Globals (brand colors + fonts) via
     //     the Elementor v1/globals REST API. Cascades automatically through
