@@ -234,13 +234,13 @@ Both gates below are ON as of 2026-07-01 and stay ON until Brandon walks this MO
 
 When Intelligence is NULL or all reports are locked, the Portal Platform Score falls back to 100 % Trend Score. Documented at `Portal/src/arion/pages/iainsights/ArionIAInsightsHealthPage.tsx` L20-25 (and mirrored in the Oliver and Spark equivalents). Backend `platformPulse.js` `combineComponents()` L128-… mirrors the same behavior (partial: true, pulse = trend).
 
-**Weighting discrepancy** — see §2:
-- Backend Platform Pulse = 50/50 when both present.
-- Portal per-product Platform Score = 60/40 when both present.
-- Portal shared `platformScoreWeights()` helper = 50/50 when both present.
-- ARGUS Health page = 50/50 when both present.
-
-This inconsistency is a known gap (§12). Pick one and delete the other before Brandon walks.
+**Weighting discrepancy — RESOLVED 2026-07-22 (August score-weight fix):**
+all four implementations now compute **50/50** when both components are
+present, per Brandon's locked 2026-06-21 rule (`platformPulse.js` L3-5). The
+three per-product Portal pages (`ArionIAInsightsHealthPage.tsx`,
+`OliverIAInsightsHealthPage.tsx`, `SparkIAInsightsHealthPage.tsx`) were the
+60/40 outliers; corrected in the same pass along with the "60% Trend + 40%
+Intelligence weighted." message string.
 
 ---
 
@@ -255,11 +255,11 @@ This inconsistency is a known gap (§12). Pick one and delete the other before B
 
 ## 12. Known gaps / open items
 
-1. **Weight discrepancy (§2).** Backend Platform Pulse uses 50/50; Portal per-product health pages use 60/40; Portal shared helper + ARGUS use 50/50. Pick one. Recommendation: adopt 50/50 across the board (matches Brandon's locked note at `platformPulse.js` L3-5) and delete the 60/40 helpers in `ArionIAInsightsHealthPage.tsx` L22-25, `OliverIAInsightsHealthPage.tsx` L15-18, `SparkIAInsightsHealthPage.tsx` L16-18.
-2. **siteAgeMultiplier not implemented (§5).** F-Onb-D7 designed it but no code landed. All calculators currently score brand-new sites at face value.
-3. **SIGNAL_REGISTRY not implemented (§6).** No signals-to-tier mapping exists in code; documentation of "which signals feed which report and at what tier" lives only in per-file comments.
+1. ~~**Weight discrepancy (§2).**~~ **CLOSED 2026-07-22** — 50/50 adopted everywhere (see §10). The 60/40 helpers in the three per-product health pages were corrected in place.
+2. ~~**siteAgeMultiplier not implemented (§5).**~~ **STALE — it IS shipped**: `lib/intelligence/utils.js` L140 (verified 2026-07-22; consumed by 6 calculators, e.g. `visibilityTrajectory.js` L98).
+3. ~~**SIGNAL_REGISTRY not implemented (§6).**~~ **STALE — it IS shipped**: `lib/intelligence/utils.js` L107 (verified 2026-07-22).
 4. **Legacy vs shelf intelligence-key mismatch (§2f, §4).** `platformPulse.js` `ARION_INTEL_REPORT_KEYS` (L44-51) is the pre-doc-64 legacy 6-key set. `index.js` `ARION_INTEL_REPORTS` (L54-64) is the current doc-64 9-key shelf. The Intelligence component of Platform Pulse averages the legacy set, so Platform Pulse currently ignores the 7 new-shelf keys entirely. Update `platformPulse.js` to read from `ARION_INTEL_REPORTS` (imported) once the Phase 2-4 calculators land.
-5. **Phase-1 stub reports (§4).** 7 of 9 shelf reports return `pendingImplementationStub` payloads (score=null, state=`insufficient_data`). Real calculators land in doc-64 Phases 2-4.
+5. **Phase-1 stub reports (§4).** 7 of 9 shelf reports return `pendingImplementationStub` payloads (score=null, state=`insufficient_data`). Real calculators land in doc-64 Phases 2-4. **2026-07-22 R1 brand fix:** the 7 stub CARDS are pulled from the Portal shelf (`arionIntelligenceEngines.ts` `ARION_INTEL_KEYS` → only `visibility_trajectory` + `competitive_presence_gap` render); the backend stubs remain but are unrendered. Note both gates that §8 claims are ON are actually OFF in code (`INSIGHTS_GLOBAL_GATE=false`; `withInsightsComingSoon` has zero call sites) — the card removal replaces them as the brand protection.
 6. **Business Pulse gauge input mapping (§7).** Not enumerated in this doc — needs a walk of `platform-api/routes/argus/businessPulse.js` before publication.
 7. **Open questions from F-Onb-D8 scoping** (5 items, deferred to Brandon):
    - Which weight wins — 50/50 or 60/40?
