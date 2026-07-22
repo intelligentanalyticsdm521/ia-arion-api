@@ -33,7 +33,7 @@ import { plugin as pluginApi, pluginGet, pluginPost, pluginFetchAll } from '../l
 import { meetsMinTier } from '../lib/tierCheck.js';
 import { getKeywordPositions, getProjectCompetitors, getAuditSummary, getProjectKeywords, getSiteOverview, getPositionsHistory, startSiteAudit, addCompetitor as seRankingAddCompetitor, rawRequest as seRankingRaw } from '../lib/seranking.js';
 import { getKeywordData as seRankingKeywordData } from '../lib/serankingData.js';
-import { parsePositions, computeAggregateStats, resolveRange, buildEngineMetaMap } from '../lib/serankingParse.js';
+import { parsePositions, computeAggregateStats, resolveRange, buildEngineMetaMap, computeDecayingKeywords } from '../lib/serankingParse.js';
 import formsRouter from './arion/forms.js';
 import bookingsRouter from './arion/bookings.js';
 import gbpRouter from './arion/gbp.js';
@@ -930,7 +930,7 @@ router.get('/seo', async (req, res) => {
     if (site.se_ranking_project_id) {
       const projectId = site.se_ranking_project_id;
       const range = resolveRange('30d');
-      const positionsRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}`);
+      const positionsRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}&with_landing_pages=1`);
       const engineBlocks = Array.isArray(positionsRaw.data) ? positionsRaw.data : [];
       const engineIds = Array.from(new Set(engineBlocks.map((b) => String(b.site_engine_id))));
       const engineMetaById = await loadEngineMetaForProject(projectId, engineIds).catch(() => ({}));
@@ -952,7 +952,7 @@ router.get('/seo', async (req, res) => {
         volume: k.searchVolume,
         difficulty: k.difficulty,
         serp_features: [],
-        url: null,
+        url: k.url ?? null,
         engines: k.perEngine.map((e) => e.engineId),
       }));
 
@@ -2333,8 +2333,8 @@ router.get('/seo/rankings', async (req, res) => {
     // Fetch both current-period and prior-period positions so we can compute
     // period-over-period stat deltas without a second deploy cycle.
     const [curRaw, priorRaw] = await Promise.all([
-      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}`),
-      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.prior.start}&date_to=${range.prior.end}`),
+      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}&with_landing_pages=1`),
+      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.prior.start}&date_to=${range.prior.end}&with_landing_pages=1`),
     ]);
     const curBlocks = Array.isArray(curRaw.data) ? curRaw.data : [];
     const priorBlocks = Array.isArray(priorRaw.data) ? priorRaw.data : [];
@@ -2441,8 +2441,8 @@ router.get('/seo/overview', async (req, res) => {
     const range = resolveRange(rangeCode);
 
     const [curRaw, priorRaw] = await Promise.all([
-      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}`),
-      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.prior.start}&date_to=${range.prior.end}`),
+      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}&with_landing_pages=1`),
+      seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.prior.start}&date_to=${range.prior.end}&with_landing_pages=1`),
     ]);
     const curBlocks = Array.isArray(curRaw.data) ? curRaw.data : [];
     const priorBlocks = Array.isArray(priorRaw.data) ? priorRaw.data : [];
@@ -2643,7 +2643,7 @@ router.get('/seo/keyword/:keywordId', async (req, res) => {
 
     const projectId = site.se_ranking_project_id;
     const range = resolveRange(rangeCode);
-    const posRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}`);
+    const posRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}&with_landing_pages=1`);
     const blocks = Array.isArray(posRaw.data) ? posRaw.data : [];
     const engineIds = Array.from(new Set(blocks.map((b) => String(b.site_engine_id))));
     const engineMetaById = await loadEngineMetaForProject(projectId, engineIds).catch(() => ({}));
@@ -4431,40 +4431,13 @@ router.get('/seo/decay', async (req, res) => {
       if (id != null) metaById[String(id)] = { keyword: m.name || m.keyword || '', volume: Number(m.volume ?? 0) };
     }
 
-    // Group by keyword_id, take the best (lowest) position per period.
-    const bestByPeriod = (rows) => {
-      const m = {};
-      for (const r of rows || []) {
-        const id = String(r.keyword_id ?? r.id ?? '');
-        if (!id) continue;
-        const pos = Number(r.pos ?? r.position ?? 0);
-        if (!pos) continue;
-        if (m[id] == null || pos < m[id].pos) m[id] = { pos, url: r.url || r.landing_url || null };
-      }
-      return m;
-    };
-    const curMap = bestByPeriod(current);
-    const priorMap = bestByPeriod(prior);
-
-    const decaying = [];
-    for (const [id, cur] of Object.entries(curMap)) {
-      const p = priorMap[id];
-      if (!p) continue;
-      const delta = cur.pos - p.pos; // positive delta = rank got worse (further from #1)
-      if (delta >= 3) {
-        const meta = metaById[id] || {};
-        decaying.push({
-          keywordId: Number(id),
-          keyword: meta.keyword || '',
-          url: cur.url || null,
-          priorPosition: p.pos,
-          currentPosition: cur.pos,
-          change: delta,
-          searchVolume: meta.volume || 0,
-        });
-      }
-    }
-    decaying.sort((a, b) => b.change - a.change);
+    // getPositionsHistory returns RAW /positions engine blocks
+    // ([{ site_engine_id, keywords: [...] }]) — NOT flat keyword rows.
+    // computeDecayingKeywords flattens block.keywords before the per-keyword
+    // best-position comparison; the previous inline version iterated the
+    // blocks themselves as if they were keyword rows, so every row was
+    // skipped and this route could only ever return decaying: [].
+    const decaying = computeDecayingKeywords(current, prior, metaById);
 
     res.json({ connected: true, decaying });
   } catch (err) {
