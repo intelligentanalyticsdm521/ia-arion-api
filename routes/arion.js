@@ -1286,6 +1286,422 @@ router.post('/sites/:siteId/gbp/disconnect', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// GBP Connect Batch B (2026-07-22) — CLIENT-owned listing creation + in-ARION
+// verification. All routes live under /sites/:siteId/gbp/* so the existing
+// requireArionTenantAdmin mount (router.use at :60) gates them, same as
+// select-location/disconnect.
+//
+// OWNERSHIP CONTRACT (locked by the founder): the listing is created on the
+// CLIENT'S OAuth token under the CLIENT'S account, so the client is
+// PRIMARY_OWNER. Never the IA master account — lib/iaMasterGoogle.js
+// autoProvisionGoogle is the SUPERSEDED wrong-ownership model; do not call it.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Shared context resolver for the Batch B routes — mirrors the
+// select-location guards (site ownership → connected → token) plus the
+// selected-location requirement the verification routes need.
+async function getGbpBatchBContext(pool, tenantId, siteId, { requireLocation = true } = {}) {
+  const site = await getSiteForTenant(pool, tenantId, siteId);
+  if (!site) return { status: 404, code: 'NOT_FOUND', message: 'Site not found' };
+  if (!site.gbp_connected || !site.gbp_oauth_token_ref) return { status: 400, code: 'NOT_CONNECTED', message: 'Connect Google first' };
+  if (requireLocation && !site.gbp_location_name) return { status: 400, code: 'NO_LOCATION_SELECTED', message: 'No Google Business Profile listing is selected for this site yet' };
+  const tokenData = await getAccessToken(site.gbp_oauth_token_ref).catch(() => null);
+  if (!tokenData) return { status: 401, code: 'AUTH_EXPIRED', message: 'Google authorization expired — reconnect' };
+  return { site, accessToken: tokenData.access_token, locationName: site.gbp_location_name || null };
+}
+
+// Persist verification-flow state onto arion.business_location (migration 042
+// columns). Best-effort: a pre-042 database warns and skips rather than
+// failing the route — the Google-side state is authoritative and re-readable.
+async function persistGbpVerificationColumns(pool, tenantId, locationName, cols) {
+  const gbpLocationId = String(locationName || '').match(/locations\/([^/]+)/)?.[1] || null;
+  if (!gbpLocationId) return;
+  try {
+    const sets = [];
+    const req2 = pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('gbpLocationId', sql.NVarChar(100), gbpLocationId);
+    if (cols.method !== undefined) { req2.input('vMethod', sql.NVarChar(40), cols.method); sets.push('verification_method = @vMethod'); }
+    if (cols.name !== undefined) { req2.input('vName', sql.NVarChar(300), cols.name); sets.push('verification_name = @vName'); }
+    if (cols.state !== undefined) { req2.input('vState', sql.NVarChar(40), cols.state); sets.push('verification_state = @vState'); }
+    if (cols.stampRequestedAt) sets.push('verification_requested_at = SYSDATETIMEOFFSET()');
+    // T5 fail-closed semantics: callers pass isVerified ONLY on an explicit
+    // hasVoiceOfMerchant boolean from Google; absence means "don't touch".
+    if (cols.isVerified !== undefined) { req2.input('vVerified', sql.Bit, cols.isVerified ? 1 : 0); sets.push('is_verified = @vVerified'); }
+    if (!sets.length) return;
+    sets.push('updated_at = SYSDATETIMEOFFSET()');
+    await req2.query(`UPDATE arion.business_location SET ${sets.join(', ')} WHERE tenant_id = @tenantId AND gbp_location_id = @gbpLocationId`);
+  } catch (e) {
+    console.warn('[gbp/verification] state persist skipped (migration 042 applied?):', e.message);
+  }
+}
+
+function gbpErrorResponse(res, tag, err) {
+  console.error(`[${tag}]`, err);
+  const status = err.code === 'gbp_quota_exceeded' ? 429
+    : err.code === 'gbp_api_disabled' ? 403
+    : (err.status >= 400 && err.status < 500) ? err.status
+    : 500;
+  return res.status(status).json({ error: { code: err.code || 'INTERNAL_ERROR', message: err.message, status } });
+}
+
+// --- POST /arion/sites/:siteId/gbp/create-listing ---
+// Option 2 "I need one created": the client filled the intake form and
+// OAuth'd their own Google account; create the listing under THEIR account.
+router.post('/sites/:siteId/gbp/create-listing', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  const { title, primary_category, address, service_area, phone, website_uri, account_name } = req.body || {};
+
+  if (!title || !String(title).trim() || !primary_category || !String(primary_category).trim() || !phone || !String(phone).trim()) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'title, primary_category and phone are required', status: 400 } });
+  }
+  const addressLines = Array.isArray(address?.addressLines) ? address.addressLines.map((l) => String(l || '').trim()).filter(Boolean) : [];
+  const hasAddress = addressLines.length > 0;
+  if (!hasAddress && !service_area) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Provide a business address or mark the business as serving customers at their locations', status: 400 } });
+  }
+
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpBatchBContext(pool, tenantId, siteId, { requireLocation: false });
+    if (ctx.code) return res.status(ctx.status).json({ error: { code: ctx.code, message: ctx.message, status: ctx.status } });
+    const accessToken = ctx.accessToken;
+
+    const { listGbpAccounts, createGbpLocation, searchGbpCategories } = await import('../lib/gbpApi.js');
+
+    // Pick the CLIENT'S account. Rule: first PERSONAL account, else the only
+    // account. Ambiguity (several non-personal accounts) is bounced back as
+    // 409 multiple_accounts; the portal re-submits with account_name.
+    const accounts = await listGbpAccounts(accessToken);
+    if (accounts.length === 0) {
+      return res.status(400).json({ error: { code: 'NO_GBP_ACCOUNT', message: 'No Google Business Profile account exists on this Google login yet. Sign in once at business.google.com to initialize it, then retry.', status: 400 } });
+    }
+    let account = null;
+    if (account_name) {
+      account = accounts.find((a) => a.name === account_name);
+      if (!account) return res.status(403).json({ error: { code: 'NOT_AUTHORIZED', message: 'account_name is not one of your Google Business Profile accounts', status: 403 } });
+    } else {
+      const personal = accounts.filter((a) => a.type === 'PERSONAL');
+      if (personal.length >= 1) account = personal[0];
+      else if (accounts.length === 1) account = accounts[0];
+      else return res.status(409).json({ error: 'multiple_accounts', accounts });
+    }
+
+    // Resolve the free-text category to Google's canonical id. The Location
+    // create API requires categories.primaryCategory.name ("categories/gcid:…");
+    // displayName is output-only. Free text goes through the category search
+    // and takes the top hit; a raw gcid passes straight through.
+    let primaryCategory;
+    const catText = String(primary_category).trim();
+    if (/^(categories\/)?gcid:/i.test(catText)) {
+      primaryCategory = { name: catText.startsWith('categories/') ? catText : `categories/${catText}` };
+    } else {
+      let matches = [];
+      try {
+        matches = await searchGbpCategories(accessToken, catText, { regionCode: address?.regionCode || 'US' });
+      } catch (catErr) {
+        console.warn('[gbp/create-listing] category search failed:', catErr.message);
+      }
+      if (matches.length > 0) {
+        primaryCategory = { name: matches[0].name };
+      } else {
+        // Last resort — let Google adjudicate the raw text; its VALIDATION
+        // error is clearer to the client than anything we can invent here.
+        primaryCategory = { displayName: catText };
+      }
+    }
+
+    const locationBody = {
+      title: String(title).trim(),
+      languageCode: 'en',
+      categories: { primaryCategory },
+      phoneNumbers: { primaryPhone: String(phone).trim() },
+    };
+    if (website_uri && String(website_uri).trim()) locationBody.websiteUri = String(website_uri).trim();
+    if (hasAddress) {
+      locationBody.storefrontAddress = {
+        regionCode: address?.regionCode || 'US',
+        addressLines,
+        ...(address?.locality ? { locality: String(address.locality).trim() } : {}),
+        ...(address?.administrativeArea ? { administrativeArea: String(address.administrativeArea).trim() } : {}),
+        ...(address?.postalCode ? { postalCode: String(address.postalCode).trim() } : {}),
+      };
+    }
+    if (service_area) {
+      locationBody.serviceArea = { businessType: hasAddress ? 'CUSTOMER_AND_BUSINESS_LOCATION' : 'CUSTOMER_LOCATION_ONLY' };
+    }
+
+    // Deterministic requestId: an immediate portal retry of the SAME intake
+    // (same tenant/site/title) reuses the id, so Google's idempotency layer
+    // dedupes instead of minting a duplicate listing.
+    const ridHex = crypto.createHash('sha256').update(`gbp-create|${tenantId}|${siteId}|${locationBody.title}`).digest('hex');
+    const requestId = `${ridHex.slice(0, 8)}-${ridHex.slice(8, 12)}-${ridHex.slice(12, 16)}-${ridHex.slice(16, 20)}-${ridHex.slice(20, 32)}`;
+
+    const created = await createGbpLocation(accessToken, account.name, locationBody, requestId);
+
+    // created.name is "locations/{l}"; the rest of ARION stores the full
+    // "accounts/{a}/locations/{l}" resource name — persist exactly like
+    // select-location does.
+    const fullLocationName = `${account.name}/${created.name}`;
+    const gbpLocationId = (created.name || '').split('/').pop() || null;
+    const placeId = created.metadata?.placeId || null;
+    const reviewUri = created.metadata?.newReviewUri
+      || (placeId ? `https://search.google.com/local/writereview?placeid=${placeId}` : null);
+
+    await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('locationName', sql.NVarChar(200), fullLocationName)
+      .input('placeId', sql.NVarChar(80), placeId)
+      .query('UPDATE arion.site SET gbp_location_name = @locationName, gbp_place_id = @placeId WHERE tenant_id = @tenantId AND site_id = @siteId');
+
+    // Cross-product share (same guarded write as select-location) — a brand
+    // new listing usually has no placeId until verified, so this often skips.
+    if (placeId || reviewUri) {
+      try {
+        const platformPool = await getPlatformPool();
+        await platformPool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('placeId', sql.NVarChar(80), placeId)
+          .input('reviewUrl', sql.NVarChar(500), reviewUri)
+          .query('UPDATE core.tenants SET google_place_id = @placeId, google_review_url = @reviewUrl WHERE tenant_id = @tenantId');
+      } catch (shareErr) {
+        console.warn('[gbp/create-listing] shared-profile write skipped (migration 004 not applied?):', shareErr.message);
+      }
+    }
+
+    // Direct upsert into arion.business_location with is_verified=0 — a brand
+    // new listing has no VoiceOfMerchant yet (T5 fail-closed). Best-effort:
+    // the listing already exists on Google, so a local persistence hiccup
+    // must not report failure and bait a duplicate-create retry.
+    if (gbpLocationId) {
+      try {
+        const parsedAccountId = (account.name || '').split('/').pop() || null;
+        const existing = await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('gbpLocationId', sql.NVarChar(100), gbpLocationId)
+          .query('SELECT location_id FROM arion.business_location WHERE tenant_id = @tenantId AND gbp_location_id = @gbpLocationId');
+        if (existing.recordset.length === 0) {
+          const hasPrimary = await pool.request()
+            .input('tenantId', sql.UniqueIdentifier, tenantId)
+            .query('SELECT TOP 1 1 AS hit FROM arion.business_location WHERE tenant_id = @tenantId AND is_primary = 1');
+          await pool.request()
+            .input('tenantId', sql.UniqueIdentifier, tenantId)
+            .input('siteId', sql.UniqueIdentifier, siteId)
+            .input('gbpAccountId', sql.NVarChar(100), parsedAccountId)
+            .input('gbpLocationId', sql.NVarChar(100), gbpLocationId)
+            .input('locationName', sql.NVarChar(200), fullLocationName)
+            .input('displayName', sql.NVarChar(200), locationBody.title)
+            .input('addressLine1', sql.NVarChar(500), hasAddress ? addressLines.join(', ') : null)
+            .input('city', sql.NVarChar(100), address?.locality || null)
+            .input('region', sql.NVarChar(100), address?.administrativeArea || null)
+            .input('postalCode', sql.NVarChar(20), address?.postalCode || null)
+            .input('country', sql.NVarChar(2), hasAddress ? (address?.regionCode || 'US') : null)
+            .input('phone', sql.NVarChar(50), String(phone).trim())
+            .input('website', sql.NVarChar(500), locationBody.websiteUri || null)
+            .input('primaryCategory', sql.NVarChar(200), primaryCategory.displayName || primaryCategory.name || null)
+            .input('placeId', sql.NVarChar(100), placeId)
+            .input('reviewUri', sql.NVarChar(500), reviewUri)
+            .input('isPrimary', sql.Bit, hasPrimary.recordset.length ? 0 : 1)
+            .query(`
+              INSERT INTO arion.business_location
+                (tenant_id, site_id, gbp_account_id, gbp_location_id, location_name,
+                 display_name, address_line1, city, region, postal_code, country,
+                 phone, website, primary_category, place_id, review_uri,
+                 is_verified, is_primary, last_synced_at)
+              VALUES
+                (@tenantId, @siteId, @gbpAccountId, @gbpLocationId, @locationName,
+                 @displayName, @addressLine1, @city, @region, @postalCode, @country,
+                 @phone, @website, @primaryCategory, @placeId, @reviewUri,
+                 0, @isPrimary, SYSDATETIMEOFFSET())
+            `);
+        }
+        // Migration 042 marker: nothing requested yet, but the flow has begun.
+        await persistGbpVerificationColumns(pool, tenantId, fullLocationName, { state: 'UNVERIFIED' });
+      } catch (blErr) {
+        console.warn('[gbp/create-listing] business_location upsert skipped (migration 027/042 applied?):', blErr.message);
+      }
+    }
+
+    res.status(201).json({
+      data: {
+        location_name: fullLocationName,
+        title: created.title || locationBody.title,
+        account_name: account.name,
+        verification_required: true,
+      },
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    return gbpErrorResponse(res, 'gbp/create-listing', err);
+  }
+});
+
+// --- GET /arion/sites/:siteId/gbp/verification-options ---
+router.get('/sites/:siteId/gbp/verification-options', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpBatchBContext(pool, tenantId, siteId);
+    if (ctx.code) return res.status(ctx.status).json({ error: { code: ctx.code, message: ctx.message, status: ctx.status } });
+    const { fetchVerificationOptions } = await import('../lib/gbpVerifications.js');
+    const data = await fetchVerificationOptions(ctx.accessToken, ctx.locationName);
+    res.json({
+      data: { options: data.options || [], location_name: ctx.locationName },
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    return gbpErrorResponse(res, 'gbp/verification-options', err);
+  }
+});
+
+// --- POST /arion/sites/:siteId/gbp/request-verification ---
+// body: { option } — either a method string or the option object returned by
+// verification-options (optionally enriched with emailAddress/mailerContact).
+router.post('/sites/:siteId/gbp/request-verification', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  const { option } = req.body || {};
+  const method = typeof option === 'string' ? option : (option?.verificationMethod || option?.method);
+  if (!method) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'option (with a verificationMethod) is required', status: 400 } });
+  }
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpBatchBContext(pool, tenantId, siteId);
+    if (ctx.code) return res.status(ctx.status).json({ error: { code: ctx.code, message: ctx.message, status: ctx.status } });
+    const { requestVerification } = await import('../lib/gbpVerifications.js');
+    const data = await requestVerification(ctx.accessToken, ctx.locationName, option);
+    const verification = data.verification || null;
+    await persistGbpVerificationColumns(pool, tenantId, ctx.locationName, {
+      method: verification?.method || method,
+      name: verification?.name || null,
+      state: verification?.state || 'PENDING',
+      stampRequestedAt: true,
+    });
+    res.json({
+      data: { verification, location_name: ctx.locationName },
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    return gbpErrorResponse(res, 'gbp/request-verification', err);
+  }
+});
+
+// --- POST /arion/sites/:siteId/gbp/complete-verification ---
+// body: { verification_name, pin }
+router.post('/sites/:siteId/gbp/complete-verification', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  const { verification_name, pin } = req.body || {};
+  if (!verification_name || !pin || !String(pin).trim()) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'verification_name and pin are required', status: 400 } });
+  }
+  if (!/^locations\/[^/]+\/verifications\/[^/]+$/.test(String(verification_name))) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'verification_name must match locations/{l}/verifications/{v}', status: 400 } });
+  }
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpBatchBContext(pool, tenantId, siteId);
+    if (ctx.code) return res.status(ctx.status).json({ error: { code: ctx.code, message: ctx.message, status: ctx.status } });
+    const { completeVerification, getVoiceOfMerchantState, normalizeLocationName } = await import('../lib/gbpVerifications.js');
+
+    // The verification must belong to THIS site's selected listing — refuse a
+    // verification_name pointed at some other location.
+    const locOnly = normalizeLocationName(ctx.locationName);
+    if (!String(verification_name).startsWith(`${locOnly}/verifications/`)) {
+      return res.status(403).json({ error: { code: 'NOT_AUTHORIZED', message: 'verification_name does not belong to the listing selected for this site', status: 403 } });
+    }
+
+    const data = await completeVerification(ctx.accessToken, String(verification_name), String(pin).trim());
+    const verification = data.verification || null;
+    await persistGbpVerificationColumns(pool, tenantId, ctx.locationName, {
+      state: verification?.state || 'COMPLETED',
+    });
+
+    // Opportunistic VoiceOfMerchant check — Google may grant it immediately
+    // after a successful PIN. T5 fail-closed: only an EXPLICIT boolean writes.
+    let hasVoiceOfMerchant = null;
+    try {
+      const vom = await getVoiceOfMerchantState(ctx.accessToken, ctx.locationName);
+      if (vom.hasVoiceOfMerchant === true) {
+        hasVoiceOfMerchant = true;
+        await persistGbpVerificationColumns(pool, tenantId, ctx.locationName, { isVerified: true, state: 'COMPLETED' });
+      } else if (vom.hasVoiceOfMerchant === false) {
+        hasVoiceOfMerchant = false;
+      }
+    } catch (vomErr) {
+      console.warn('[gbp/complete-verification] VoiceOfMerchant check failed (non-fatal):', vomErr.message);
+    }
+
+    res.json({
+      data: { verification, has_voice_of_merchant: hasVoiceOfMerchant, location_name: ctx.locationName },
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    return gbpErrorResponse(res, 'gbp/complete-verification', err);
+  }
+});
+
+// --- GET /arion/sites/:siteId/gbp/verification-status ---
+// Live VoiceOfMerchant state + the stored tracking row. On an explicit
+// hasVoiceOfMerchant boolean the stored is_verified bit is refreshed (mirrors
+// T5: true → 1, false → 0, absent → untouched — fail-closed).
+router.get('/sites/:siteId/gbp/verification-status', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpBatchBContext(pool, tenantId, siteId);
+    if (ctx.code) return res.status(ctx.status).json({ error: { code: ctx.code, message: ctx.message, status: ctx.status } });
+    const { getVoiceOfMerchantState } = await import('../lib/gbpVerifications.js');
+    const vom = await getVoiceOfMerchantState(ctx.accessToken, ctx.locationName);
+    const explicitVom = vom.hasVoiceOfMerchant === true ? true : vom.hasVoiceOfMerchant === false ? false : null;
+    if (explicitVom !== null) {
+      await persistGbpVerificationColumns(pool, tenantId, ctx.locationName, {
+        isVerified: explicitVom,
+        ...(explicitVom ? { state: 'COMPLETED' } : {}),
+      });
+    }
+
+    let stored = null;
+    try {
+      const gbpLocationId = String(ctx.locationName || '').match(/locations\/([^/]+)/)?.[1] || null;
+      if (gbpLocationId) {
+        const r = await pool.request()
+          .input('tenantId', sql.UniqueIdentifier, tenantId)
+          .input('gbpLocationId', sql.NVarChar(100), gbpLocationId)
+          .query(`SELECT is_verified, verification_method, verification_name, verification_state, verification_requested_at
+                  FROM arion.business_location WHERE tenant_id = @tenantId AND gbp_location_id = @gbpLocationId`);
+        stored = r.recordset[0] || null;
+      }
+    } catch (readErr) {
+      console.warn('[gbp/verification-status] stored-state read skipped (migration 042 applied?):', readErr.message);
+    }
+
+    res.json({
+      data: {
+        location_name: ctx.locationName,
+        has_voice_of_merchant: explicitVom === true,
+        is_verified: explicitVom !== null ? explicitVom : !!(stored?.is_verified),
+        voice_of_merchant_state: vom,
+        verification: stored ? {
+          method: stored.verification_method || null,
+          name: stored.verification_name || null,
+          state: stored.verification_state || null,
+          requested_at: stored.verification_requested_at || null,
+        } : null,
+      },
+      meta: { tenant_id: tenantId, timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    return gbpErrorResponse(res, 'gbp/verification-status', err);
+  }
+});
+
 // --- POST /arion/integrations/google/connect ---
 router.post('/integrations/google/connect', async (req, res) => {
   const tenantId = req.tenant.tenantId;
