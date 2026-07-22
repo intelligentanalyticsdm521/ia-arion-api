@@ -5522,6 +5522,23 @@ async function getGbpContext(pool, tenantId, siteId) {
   return { site, refreshToken, locationName };
 }
 
+// A brand-new listing is CONNECTED but has no reviews/posts/performance
+// until Google verifies it — reporting that state as an error made every
+// sub-page claim "Not Connected" minutes after a successful create
+// (walkthrough catch 2026-07-22). Reads the is_verified flag the sync
+// keeps current (T5).
+async function gbpListingUnverified(pool, tenantId, locationName) {
+  try {
+    const locId = String(locationName || '').split('/').pop();
+    if (!locId) return false;
+    const r = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('locId', sql.NVarChar(80), locId)
+      .query('SELECT is_verified FROM arion.business_location WHERE tenant_id=@tenantId AND gbp_location_id=@locId');
+    return r.recordset.length > 0 && r.recordset[0].is_verified === false;
+  } catch { return false; }
+}
+
 // --- GET /arion/business?siteId= ---
 // Live GBP profile + 30-day performance metrics.
 router.get('/business', async (req, res) => {
@@ -5614,7 +5631,12 @@ router.get('/business/reviews', async (req, res) => {
     if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
     if (ctx.error) return res.json({ connected: !['not_connected','site_not_found'].includes(ctx.error), error: ctx.error });
     const r = await gbpFetchReviews(ctx.refreshToken, ctx.locationName);
-    if (r?.error) return res.json({ connected: true, error: r.error, totalReviewCount: 0, averageRating: 0, reviews: [] });
+    if (r?.error) {
+      if (await gbpListingUnverified(pool, tenantId, ctx.locationName)) {
+        return res.json({ connected: true, pendingVerification: true, totalReviewCount: 0, averageRating: 0, reviews: [] });
+      }
+      return res.json({ connected: true, error: r.error, totalReviewCount: 0, averageRating: 0, reviews: [] });
+    }
     res.json({ connected: true, totalReviewCount: r.totalReviewCount, averageRating: r.averageRating, reviews: r.reviews });
   } catch (err) {
     console.error('[arion/business/reviews]', err);
@@ -5634,7 +5656,12 @@ router.get('/business/insights', async (req, res) => {
     if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
     if (ctx.error) return res.json({ connected: !['not_connected','site_not_found'].includes(ctx.error), error: ctx.error });
     const perf = await gbpFetchPerformance(ctx.refreshToken, ctx.locationName, period);
-    if (perf?.error) return res.json({ connected: true, error: perf.error, period });
+    if (perf?.error) {
+      if (await gbpListingUnverified(pool, tenantId, ctx.locationName)) {
+        return res.json({ connected: true, pendingVerification: true, period });
+      }
+      return res.json({ connected: true, error: perf.error, period });
+    }
     const sum = gbpSummarizePerf(perf.data);
     res.json({
       connected: true,
@@ -5857,7 +5884,12 @@ router.get('/business/posts', async (req, res) => {
     if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
     if (ctx.error) return res.json({ connected: !['not_connected','site_not_found'].includes(ctx.error), error: ctx.error, posts: [] });
     const r = await gbpFetchLocalPosts(ctx.refreshToken, ctx.locationName);
-    if (r?.error) return res.json({ connected: true, error: r.error, posts: [] });
+    if (r?.error) {
+      if (await gbpListingUnverified(pool, tenantId, ctx.locationName)) {
+        return res.json({ connected: true, pendingVerification: true, posts: [] });
+      }
+      return res.json({ connected: true, error: r.error, posts: [] });
+    }
     res.json({ connected: true, posts: r.posts });
   } catch (err) {
     console.error('[arion/business/posts]', err);
