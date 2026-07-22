@@ -1430,7 +1430,21 @@ router.post('/sites/:siteId/gbp/create-listing', async (req, res) => {
       };
     }
     if (service_area) {
-      locationBody.serviceArea = { businessType: hasAddress ? 'CUSTOMER_AND_BUSINESS_LOCATION' : 'CUSTOMER_LOCATION_ONLY' };
+      // Google requires the actual served areas: serviceArea.places.placeInfos
+      // (placeName-only entries are accepted; max 20). A bare boolean used to
+      // ship businessType with no places → INVALID_ARGUMENT on
+      // service_area.places (walkthrough catch 2026-07-22).
+      const placeNames = (Array.isArray(service_area) ? service_area : [])
+        .map((p) => String(p || '').trim())
+        .filter(Boolean)
+        .slice(0, 20);
+      if (!placeNames.length) {
+        return res.status(400).json({ error: { code: 'SERVICE_AREA_PLACES_REQUIRED', message: 'List at least one area you serve (e.g. "Dallas, TX") for a service-area business.', status: 400 } });
+      }
+      locationBody.serviceArea = {
+        businessType: hasAddress ? 'CUSTOMER_AND_BUSINESS_LOCATION' : 'CUSTOMER_LOCATION_ONLY',
+        places: { placeInfos: placeNames.map((placeName) => ({ placeName })) },
+      };
     }
 
     // Deterministic requestId: an immediate portal retry of the SAME intake
