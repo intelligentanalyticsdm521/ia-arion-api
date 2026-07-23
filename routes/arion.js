@@ -22,6 +22,7 @@ import {
   deleteLocalPost as gbpDeleteLocalPost,
   fetchQuestions as gbpFetchQuestions,
   answerQuestion as gbpAnswerQuestion,
+  fetchServices as gbpFetchServices,
   resolveGbpLocationName,
 } from '../lib/gbpApi.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
@@ -5911,11 +5912,84 @@ router.get('/business/services', async (req, res) => {
   if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
   try {
     const pool = await getServicesPool();
-    const site = await getSiteForTenant(pool, tenantId, siteId);
-    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    res.json({ services: [] });
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.json({ connected: !['not_connected','site_not_found'].includes(ctx.error), error: ctx.error, services: [], suggested: [] });
+    const r = await gbpFetchServices(ctx.refreshToken, ctx.locationName);
+    if (r?.error) return res.json({ connected: true, error: r.error, services: [], suggested: [] });
+    // Normalize for the UI: one flat list with type + display fields; keep
+    // the raw item so PUT can round-trip without loss.
+    const services = (r.serviceItems || []).map((item) => {
+      if (item.structuredServiceItem) {
+        const sid = item.structuredServiceItem.serviceTypeId;
+        const match = (r.suggested || []).find((s) => s.serviceTypeId === sid);
+        return { type: 'structured', serviceTypeId: sid, displayName: match?.displayName || sid, description: item.structuredServiceItem.description || null };
+      }
+      return {
+        type: 'free',
+        displayName: item.freeFormServiceItem?.label?.displayName || '',
+        description: item.freeFormServiceItem?.label?.description || null,
+      };
+    });
+    res.json({ connected: true, services, suggested: r.suggested || [], categoryName: r.categoryName });
   } catch (err) {
     console.error('[arion/business/services]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- PUT /arion/business/services?siteId= ---
+// Body: { services: [ { type:'structured', serviceTypeId, description? }
+//                   | { type:'free', displayName, description? } ] }
+// Replaces the location's serviceItems wholesale (Google's model — the
+// field is a full list, not a delta). Editable pre-verification.
+router.put('/business/services', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  const list = Array.isArray(req.body?.services) ? req.body.services : null;
+  if (!list) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'services array required', status: 400 } });
+  if (list.length > 100) return res.status(400).json({ error: { code: 'TOO_MANY', message: 'At most 100 services', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.status(409).json({ error: { code: 'NOT_CONNECTED', message: ctx.error, status: 409 } });
+    // Need the primary category id — free-form services must be filed under it.
+    const info = await gbpFetchServices(ctx.refreshToken, ctx.locationName);
+    if (info?.error) return res.status(502).json({ error: { code: 'GBP_ERROR', message: info.error, status: 502 } });
+    const infoFull = await gbpFetchInfo(ctx.refreshToken, ctx.locationName);
+    const categoryName = infoFull?.location?.categories?.primaryCategory?.name || null;
+    const serviceItems = [];
+    for (const s of list) {
+      if (s?.type === 'structured' && s.serviceTypeId) {
+        serviceItems.push({ structuredServiceItem: { serviceTypeId: String(s.serviceTypeId), ...(s.description ? { description: String(s.description).slice(0, 300) } : {}) } });
+      } else if (s?.type === 'free' && String(s.displayName || '').trim()) {
+        if (!categoryName) return res.status(409).json({ error: { code: 'NO_CATEGORY', message: 'The listing needs a primary category before adding custom services.', status: 409 } });
+        serviceItems.push({
+          freeFormServiceItem: {
+            category: categoryName,
+            label: {
+              displayName: String(s.displayName).trim().slice(0, 120),
+              ...(s.description ? { description: String(s.description).slice(0, 300) } : {}),
+            },
+          },
+        });
+      }
+    }
+    const out = await gbpPatchInfo(ctx.refreshToken, ctx.locationName, 'serviceItems', { serviceItems });
+    if (out?.error) {
+      // A location that READS fine but 404s on writes is Google still
+      // propagating a just-created listing (same window in which
+      // verification options are empty). Say so instead of a raw 502.
+      if (/Google API 404/.test(String(out.error))) {
+        return res.status(409).json({ error: { code: 'LISTING_PROPAGATING', message: 'Google is still activating your new listing — edits usually unlock within a few hours (and always after verification). Please try again later.', status: 409 } });
+      }
+      return res.status(502).json({ error: { code: 'GBP_ERROR', message: out.error, status: 502 } });
+    }
+    res.json({ ok: true, count: serviceItems.length });
+  } catch (err) {
+    console.error('[arion/business/services PUT]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
