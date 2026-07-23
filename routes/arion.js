@@ -23,8 +23,12 @@ import {
   fetchQuestions as gbpFetchQuestions,
   answerQuestion as gbpAnswerQuestion,
   fetchServices as gbpFetchServices,
+  fetchMedia as gbpFetchMedia,
+  createMediaItem as gbpCreateMedia,
+  deleteMediaItem as gbpDeleteMedia,
   resolveGbpLocationName,
 } from '../lib/gbpApi.js';
+import { draftReviewReply } from '../lib/gbpAiReply.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
 import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats, getUrlInfo as bingGetUrlInfo, verifyKey as bingVerifyKey, getRankAndTrafficStats as bingGetRankAndTrafficStats, getKeywordStats as bingGetKeywordStats, addSite as bingAddSite, getSiteEntry as bingGetSiteEntry, pollUntilVerified as bingPollUntilVerified } from '../lib/bingWebmaster.js';
 import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing, listGoogleSitemaps } from '../lib/sitemapGenerator.js';
@@ -5756,6 +5760,154 @@ router.post('/business/reviews/:reviewId/reply', async (req, res) => {
   }
 });
 
+// --- POST /arion/business/reviews/:reviewId/draft-reply?siteId= ---
+// AI-drafts a brand-voice reply, metered on the tenant wallet
+// (my_brand.review_reply, 1cr). Review text comes from the body so we don't
+// re-fetch the whole list. Does NOT post to Google — returns a draft the
+// owner edits and submits via the existing reply route.
+router.post('/business/reviews/:reviewId/draft-reply', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const reviewId = req.params.reviewId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  const { reviewerName, starRating, comment } = req.body || {};
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const out = await draftReviewReply({
+      pool, tenantId, userId: req.platformUser?.userId || null,
+      review: { reviewId, reviewerName, starRating, comment },
+    });
+    if (out.ok) return res.json({ draft: out.draft, credits_charged: out.creditsCharged });
+    if (out.code === 'insufficient_credits') {
+      return res.status(402).json({ error: { code: 'insufficient_credits', message: out.message, balance: out.balance, required: out.required, status: 402 } });
+    }
+    if (out.code === 'not_configured') {
+      return res.status(503).json({ error: { code: 'NOT_CONFIGURED', message: 'AI drafting is not configured', status: 503 } });
+    }
+    return res.status(502).json({ error: { code: 'DRAFT_FAILED', message: out.message || out.code, status: 502 } });
+  } catch (err) {
+    console.error('[arion/business/reviews/draft-reply]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/business/reviews/auto-reply?siteId= ---
+router.get('/business/reviews/auto-reply', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    res.json({
+      enabled: site.gbp_auto_reply === true || site.gbp_auto_reply === 1,
+      minStars: site.gbp_auto_reply_min_stars ?? 4,
+      tier: site.arion_tier,
+      allowed: meetsMinTier(site.arion_tier, 'pro'),
+    });
+  } catch (err) {
+    console.error('[arion/business/reviews/auto-reply:get]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- PUT /arion/business/reviews/auto-reply?siteId= ---  (Pro+)
+router.put('/business/reviews/auto-reply', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  const enabled = req.body?.enabled === true;
+  const minStars = Math.max(1, Math.min(5, parseInt(req.body?.minStars, 10) || 4));
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (enabled && !meetsMinTier(site.arion_tier, 'pro')) {
+      return res.status(402).json({ error: { code: 'TIER_LIMIT_REACHED', message: 'Auto-reply requires Pro tier or above', status: 402, upgrade: { current_tier: site.arion_tier, required_tier: 'pro' } } });
+    }
+    await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .input('siteId', sql.UniqueIdentifier, siteId)
+      .input('enabled', sql.Bit, enabled ? 1 : 0)
+      .input('minStars', sql.TinyInt, minStars)
+      .query('UPDATE arion.site SET gbp_auto_reply = @enabled, gbp_auto_reply_min_stars = @minStars WHERE tenant_id = @tenantId AND site_id = @siteId');
+    res.json({ enabled, minStars });
+  } catch (err) {
+    console.error('[arion/business/reviews/auto-reply:put]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/business/media?siteId=  (photos) ---
+router.get('/business/media', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.json({ connected: !['not_connected','site_not_found'].includes(ctx.error), error: ctx.error, media: [] });
+    const r = await gbpFetchMedia(ctx.refreshToken, ctx.locationName);
+    if (r?.error) {
+      if (await gbpListingUnverified(pool, tenantId, ctx.locationName)) return res.json({ connected: true, pendingVerification: true, media: [] });
+      return res.json({ connected: true, error: r.error, media: [] });
+    }
+    res.json({ connected: true, media: r.media });
+  } catch (err) {
+    console.error('[arion/business/media:get]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- POST /arion/business/media?siteId=  { sourceUrl, category? } ---
+router.post('/business/media', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  const sourceUrl = String(req.body?.sourceUrl || '').trim();
+  const category = String(req.body?.category || 'ADDITIONAL').toUpperCase();
+  if (!/^https?:\/\//.test(sourceUrl)) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'sourceUrl (public https URL) required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.status(409).json({ error: { code: 'NOT_CONNECTED', message: ctx.error, status: 409 } });
+    const r = await gbpCreateMedia(ctx.refreshToken, ctx.locationName, sourceUrl, category);
+    if (r?.error) {
+      if (/Google API 404/.test(String(r.error))) return res.status(409).json({ error: { code: 'LISTING_PROPAGATING', message: 'Google is still activating your new listing — photos unlock within a few hours (and after verification).', status: 409 } });
+      return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: r.error, status: 502 } });
+    }
+    res.json({ ok: true, media: r.media });
+  } catch (err) {
+    console.error('[arion/business/media:post]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- DELETE /arion/business/media/:mediaId?siteId= ---
+router.delete('/business/media/:mediaId', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const siteId = req.query.siteId;
+  const mediaId = req.params.mediaId;
+  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
+  try {
+    const pool = await getServicesPool();
+    const ctx = await getGbpContext(pool, tenantId, siteId);
+    if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    if (ctx.error) return res.status(409).json({ error: { code: 'NOT_CONNECTED', message: ctx.error, status: 409 } });
+    const r = await gbpDeleteMedia(ctx.refreshToken, ctx.locationName, mediaId);
+    if (r?.error) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: r.error, status: 502 } });
+    res.status(204).end();
+  } catch (err) {
+    console.error('[arion/business/media:delete]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // --- DELETE /arion/business/reviews/:reviewId/reply?siteId= ---
 router.delete('/business/reviews/:reviewId/reply', async (req, res) => {
   const tenantId = req.tenant.tenantId;
@@ -5786,8 +5938,19 @@ router.post('/business/posts/create', async (req, res) => {
     const ctx = await getGbpContext(pool, tenantId, siteId);
     if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
     if (ctx.error) return res.status(400).json({ error: { code: ctx.error.toUpperCase(), message: ctx.error, status: 400 } });
-    const r = await gbpCreateLocalPost(ctx.refreshToken, ctx.locationName, req.body || {});
-    if (r.error) return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: r.error, status: 502 } });
+    // Convenience: an `imageUrl` (Design Studio export / Media Library asset,
+    // publicly reachable) becomes a PHOTO media entry. Explicit `media` wins.
+    const body = { ...(req.body || {}) };
+    const imageUrl = String(body.imageUrl || '').trim();
+    delete body.imageUrl;
+    if (!body.media && /^https?:\/\//.test(imageUrl)) {
+      body.media = [{ mediaFormat: 'PHOTO', sourceUrl: imageUrl }];
+    }
+    const r = await gbpCreateLocalPost(ctx.refreshToken, ctx.locationName, body);
+    if (r.error) {
+      if (/Google API 404/.test(String(r.error))) return res.status(409).json({ error: { code: 'LISTING_PROPAGATING', message: 'Google is still activating your new listing — posting unlocks within a few hours (and after verification).', status: 409 } });
+      return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: r.error, status: 502 } });
+    }
     res.json({ ok: true, post: r.post });
   } catch (err) {
     console.error('[arion/business/posts/create]', err);
