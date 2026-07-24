@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import sql from 'mssql';
+import { demoDataEnabled, siteIsUnconnected, demoAnalytics, demoSearchPerformance, demoGbp, demoGbpReviews } from '../lib/demoData.js';
 import crypto from 'node:crypto';
 import { getServicesPool } from '../db/servicesPool.js';
 import { getPlatformPool } from '../db/platformPool.js';
@@ -4496,7 +4497,17 @@ router.get('/search/performance', async (req, res) => {
 
     if (provider === 'google') {
       const refreshToken = site.gbp_oauth_token_ref;
-      if (!refreshToken) return res.json({ provider, period, summary, breakdowns, error: 'Google not connected' });
+      if (!refreshToken) {
+        // DEV ONLY (ARION_DEMO_DATA): serve seeded Search Console data so the
+        // demo tenants actually score instead of every report reading
+        // "unmeasured". A live connection always wins; with the flag unset this
+        // branch is unreachable and prod behaviour is unchanged.
+        if (demoDataEnabled() && siteIsUnconnected(site)) {
+          const demo = await demoSearchPerformance(pool, site, period);
+          if (demo) return res.json(demo);
+        }
+        return res.json({ provider, period, summary, breakdowns, error: 'Google not connected' });
+      }
       const siteUrl = 'https://' + site.domain;
 
       // Fetch based on groupBy — default 'all' fetches everything in parallel
@@ -5571,6 +5582,14 @@ router.get('/business', async (req, res) => {
     // how that outlier became a 500. Match the established pattern so a new
     // error value can never fall through again.
     if (ctx.error) {
+      // DEV ONLY (ARION_DEMO_DATA) — see /search/performance for the rationale.
+      if (demoDataEnabled()) {
+        const site = await getSiteForTenant(pool, tenantId, siteId);
+        if (site && siteIsUnconnected(site)) {
+          const demo = await demoGbp(pool, site);
+          if (demo) return res.json(demo);
+        }
+      }
       return res.json({
         connected: !['not_connected', 'site_not_found'].includes(ctx.error),
         error: ctx.error,
@@ -5634,7 +5653,17 @@ router.get('/business/reviews', async (req, res) => {
     const pool = await getServicesPool();
     const ctx = await getGbpContext(pool, tenantId, siteId);
     if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    if (ctx.error) return res.json({ connected: !['not_connected','site_not_found'].includes(ctx.error), error: ctx.error });
+    if (ctx.error) {
+      // DEV ONLY (ARION_DEMO_DATA) — see /search/performance for the rationale.
+      if (demoDataEnabled()) {
+        const site = await getSiteForTenant(pool, tenantId, siteId);
+        if (site && siteIsUnconnected(site)) {
+          const demo = await demoGbpReviews(pool, site);
+          if (demo) return res.json(demo);
+        }
+      }
+      return res.json({ connected: !['not_connected','site_not_found'].includes(ctx.error), error: ctx.error });
+    }
     const r = await gbpFetchReviews(ctx.refreshToken, ctx.locationName);
     if (r?.error) {
       if (await gbpListingUnverified(pool, tenantId, ctx.locationName)) {
@@ -7632,6 +7661,11 @@ router.get('/analytics', async (req, res) => {
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
 
     if (!site.gbp_oauth_token_ref || !site.ga4_property_id) {
+      // DEV ONLY (ARION_DEMO_DATA) — see /search/performance for the rationale.
+      if (demoDataEnabled() && siteIsUnconnected(site)) {
+        const demo = await demoAnalytics(pool, site, period);
+        if (demo) return res.json(demo);
+      }
       return res.json({ connected: false, error: 'not_connected' });
     }
 
