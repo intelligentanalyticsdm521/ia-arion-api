@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import sql from 'mssql';
-import { demoDataEnabled, siteIsUnconnected, demoAnalytics, demoSearchPerformance, demoGbp, demoGbpReviews } from '../lib/demoData.js';
+import { demoDataEnabled, demoShouldServe, demoAnalytics, demoSearchPerformance, demoGbp, demoGbpReviews } from '../lib/demoData.js';
 import crypto from 'node:crypto';
 import { getServicesPool } from '../db/servicesPool.js';
 import { getPlatformPool } from '../db/platformPool.js';
@@ -4496,16 +4496,16 @@ router.get('/search/performance', async (req, res) => {
     let breakdowns = { queries: [], pages: [], dates: [], devices: [], countries: [], pageQueries: [] };
 
     if (provider === 'google') {
+      // DEV ONLY (ARION_DEMO_DATA): seeded Search Console data, checked BEFORE
+      // the live path. A stale dev OAuth token looks connected but returns
+      // nothing, which scored reports 0 with no explanation. Returns null when
+      // the site has no seeded rows, so real sites still go live.
+      if (demoShouldServe(site)) {
+        const demo = await demoSearchPerformance(pool, site, period);
+        if (demo) return res.json(demo);
+      }
       const refreshToken = site.gbp_oauth_token_ref;
       if (!refreshToken) {
-        // DEV ONLY (ARION_DEMO_DATA): serve seeded Search Console data so the
-        // demo tenants actually score instead of every report reading
-        // "unmeasured". A live connection always wins; with the flag unset this
-        // branch is unreachable and prod behaviour is unchanged.
-        if (demoDataEnabled() && siteIsUnconnected(site)) {
-          const demo = await demoSearchPerformance(pool, site, period);
-          if (demo) return res.json(demo);
-        }
         return res.json({ provider, period, summary, breakdowns, error: 'Google not connected' });
       }
       const siteUrl = 'https://' + site.domain;
@@ -5581,15 +5581,17 @@ router.get('/business', async (req, res) => {
     // the lone outlier, and enumerating a set that a helper can grow is exactly
     // how that outlier became a 500. Match the established pattern so a new
     // error value can never fall through again.
-    if (ctx.error) {
+    if (true) {
       // DEV ONLY (ARION_DEMO_DATA) — see /search/performance for the rationale.
       if (demoDataEnabled()) {
         const site = await getSiteForTenant(pool, tenantId, siteId);
-        if (site && siteIsUnconnected(site)) {
+        if (site && demoShouldServe(site)) {
           const demo = await demoGbp(pool, site);
           if (demo) return res.json(demo);
         }
       }
+    }
+    if (ctx.error) {
       return res.json({
         connected: !['not_connected', 'site_not_found'].includes(ctx.error),
         error: ctx.error,
@@ -5653,15 +5655,15 @@ router.get('/business/reviews', async (req, res) => {
     const pool = await getServicesPool();
     const ctx = await getGbpContext(pool, tenantId, siteId);
     if (ctx.status === 404) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    if (ctx.error) {
-      // DEV ONLY (ARION_DEMO_DATA) — see /search/performance for the rationale.
-      if (demoDataEnabled()) {
-        const site = await getSiteForTenant(pool, tenantId, siteId);
-        if (site && siteIsUnconnected(site)) {
-          const demo = await demoGbpReviews(pool, site);
-          if (demo) return res.json(demo);
-        }
+    // DEV ONLY (ARION_DEMO_DATA) — see /search/performance for the rationale.
+    if (demoDataEnabled()) {
+      const siteForDemo = await getSiteForTenant(pool, tenantId, siteId);
+      if (siteForDemo && demoShouldServe(siteForDemo)) {
+        const demo = await demoGbpReviews(pool, siteForDemo);
+        if (demo) return res.json(demo);
       }
+    }
+    if (ctx.error) {
       return res.json({ connected: !['not_connected','site_not_found'].includes(ctx.error), error: ctx.error });
     }
     const r = await gbpFetchReviews(ctx.refreshToken, ctx.locationName);
@@ -7660,12 +7662,12 @@ router.get('/analytics', async (req, res) => {
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
 
+    // DEV ONLY (ARION_DEMO_DATA) — see /search/performance for the rationale.
+    if (demoShouldServe(site)) {
+      const demo = await demoAnalytics(pool, site, period);
+      if (demo) return res.json(demo);
+    }
     if (!site.gbp_oauth_token_ref || !site.ga4_property_id) {
-      // DEV ONLY (ARION_DEMO_DATA) — see /search/performance for the rationale.
-      if (demoDataEnabled() && siteIsUnconnected(site)) {
-        const demo = await demoAnalytics(pool, site, period);
-        if (demo) return res.json(demo);
-      }
       return res.json({ connected: false, error: 'not_connected' });
     }
 
