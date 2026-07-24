@@ -8145,7 +8145,7 @@ function monthBounds(dateStr) {
 router.post('/ia-insights/scores', async (req, res) => {
   try {
     const tenantId = req.tenant.tenantId;
-    const { siteId, periodEnd, scores } = req.body || {};
+    const { siteId, periodEnd, scores, sections } = req.body || {};
     if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required' } });
     if (!scores || typeof scores !== 'object') return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'scores object required' } });
     if (!periodEnd) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'periodEnd required (YYYY-MM-DD)' } });
@@ -8159,6 +8159,28 @@ router.post('/ia-insights/scores', async (req, res) => {
     let written = 0;
     for (const [reportKey, scoreVal] of Object.entries(scores)) {
       const intScore = Math.max(0, Math.min(100, Math.round(Number(scoreVal) || 0)));
+      // Per-SECTION values for this report. `sections` is the engine's
+      // scoreInputs array — the major contributors to the report score.
+      // Persisting them is what makes month-over-month movement available
+      // PER SECTION instead of only for the report as a whole; without it a
+      // client can see the score fell but not which part of the business
+      // caused it. Column existed since the original schema and was never
+      // written (prod: 88 rows, 88 NULL).
+      let sectionsJson = null;
+      const raw = sections && sections[reportKey];
+      if (Array.isArray(raw) && raw.length) {
+        try {
+          const trimmed = raw.slice(0, 12).map((si) => ({
+            key: String(si.key ?? '').slice(0, 60),
+            value: si.value === null || si.value === undefined ? null : si.value,
+            weight: Number(si.weight) || 0,
+            note: si.note ? String(si.note).slice(0, 240) : undefined,
+          }));
+          const j = JSON.stringify(trimmed);
+          // Guard the column against a runaway payload.
+          if (j.length <= 8000) sectionsJson = j;
+        } catch { /* leave null — a bad payload must never block the score */ }
+      }
       try {
         await pool.request()
           .input('tenantId', sql.UniqueIdentifier, tenantId)
@@ -8167,12 +8189,14 @@ router.post('/ia-insights/scores', async (req, res) => {
           .input('periodEnd', sql.Date, bounds.end)
           .input('periodStart', sql.Date, bounds.start)
           .input('score', sql.Int, intScore)
+          .input('sections', sql.NVarChar(sql.MAX), sectionsJson)
           .query(`MERGE arion.ia_insights_score_history AS tgt
                   USING (SELECT @tenantId AS tenant_id, @siteId AS site_id, @reportKey AS report_key, @periodEnd AS period_end) AS src
                   ON tgt.tenant_id=src.tenant_id AND tgt.site_id=src.site_id AND tgt.report_key=src.report_key AND tgt.period_end=src.period_end
-                  WHEN MATCHED THEN UPDATE SET score=@score, period_start=@periodStart, updated_at=SYSUTCDATETIME()
-                  WHEN NOT MATCHED THEN INSERT (tenant_id, site_id, report_key, period_end, period_start, score)
-                    VALUES (@tenantId, @siteId, @reportKey, @periodEnd, @periodStart, @score);`);
+                  WHEN MATCHED THEN UPDATE SET score=@score, period_start=@periodStart,
+                    score_inputs_json=COALESCE(@sections, tgt.score_inputs_json), updated_at=SYSUTCDATETIME()
+                  WHEN NOT MATCHED THEN INSERT (tenant_id, site_id, report_key, period_end, period_start, score, score_inputs_json)
+                    VALUES (@tenantId, @siteId, @reportKey, @periodEnd, @periodStart, @score, @sections);`);
         written++;
       } catch (e) { console.warn('[ia-insights/scores] upsert failed', reportKey, e.message); }
     }
