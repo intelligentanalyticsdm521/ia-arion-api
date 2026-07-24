@@ -8116,15 +8116,44 @@ router.get('/analytics', async (req, res) => {
 // Trends page persist the resulting scores per period and look up the
 // prior period's scores for ghost-bar comparison.
 
+// ── Monthly period normalization (Brandon, 2026-07-24) ───────────────
+//
+// These are MONTHLY reports. The underlying feeds can be daily or weekly,
+// but a score belongs to a calendar month and there must be exactly ONE
+// row per (site, report, month).
+//
+// Before this, period_end was whatever date the browser happened to post,
+// so the page writing a row on every visit produced several rows inside a
+// single month (prod IA tenant: 2026-06-17, 06-21, 06-22, 06-26 — four
+// "periods" in June). That made the MoM comparison meaningless and made
+// the sparkline read as noise.
+//
+// Normalizing to month boundaries makes the MERGE key collapse naturally:
+// repeated visits inside a month UPDATE the same row, so the current
+// month is a running score and closed months are final.
+function monthBounds(dateStr) {
+  const d = new Date(`${String(dateStr).slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return null;
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth();
+  const start = new Date(Date.UTC(y, m, 1));
+  const end = new Date(Date.UTC(y, m + 1, 0)); // day 0 of next month = last day of this one
+  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+}
+
 // POST /arion/ia-insights/scores — upsert current-period scores
 router.post('/ia-insights/scores', async (req, res) => {
   try {
     const tenantId = req.tenant.tenantId;
-    const { siteId, periodStart, periodEnd, scores } = req.body || {};
+    const { siteId, periodEnd, scores } = req.body || {};
     if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required' } });
     if (!scores || typeof scores !== 'object') return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'scores object required' } });
     if (!periodEnd) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'periodEnd required (YYYY-MM-DD)' } });
-    const periodStartDate = periodStart || new Date(new Date(periodEnd).getTime() - 90 * 86400000).toISOString().slice(0, 10);
+
+    // Snap whatever the caller sent to the calendar month it falls in. The
+    // client no longer controls the period boundary — one row per month.
+    const bounds = monthBounds(periodEnd);
+    if (!bounds) return res.status(400).json({ error: { code: 'BAD_PARAM', message: 'periodEnd must be YYYY-MM-DD' } });
 
     const pool = await getServicesPool();
     let written = 0;
@@ -8135,8 +8164,8 @@ router.post('/ia-insights/scores', async (req, res) => {
           .input('tenantId', sql.UniqueIdentifier, tenantId)
           .input('siteId', sql.UniqueIdentifier, siteId)
           .input('reportKey', sql.NVarChar(40), reportKey)
-          .input('periodEnd', sql.Date, periodEnd)
-          .input('periodStart', sql.Date, periodStartDate)
+          .input('periodEnd', sql.Date, bounds.end)
+          .input('periodStart', sql.Date, bounds.start)
           .input('score', sql.Int, intScore)
           .query(`MERGE arion.ia_insights_score_history AS tgt
                   USING (SELECT @tenantId AS tenant_id, @siteId AS site_id, @reportKey AS report_key, @periodEnd AS period_end) AS src
