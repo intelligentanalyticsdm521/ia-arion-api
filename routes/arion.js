@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import sql from 'mssql';
 import { demoDataEnabled, demoShouldServe, demoAnalytics, demoSearchPerformance, demoGbp, demoGbpReviews } from '../lib/demoData.js';
+import { getArionMetrics } from '../lib/arionMetrics.js';
 import crypto from 'node:crypto';
 import { getServicesPool } from '../db/servicesPool.js';
 import { getPlatformPool } from '../db/platformPool.js';
@@ -8143,6 +8144,28 @@ router.get('/analytics', async (req, res) => {
   } catch (err) {
     console.error('[arion/analytics]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// ── Monthly metric series — the storage foundation for the Trends model ──
+// GET /arion/insights/metrics?siteId=&months=12
+// Returns 12 months of every ARION data point so the client builds all six
+// Trends dashboards from one fetch. Demo-generated in dev, arion.metric_monthly
+// in prod. See lib/arionMetrics.js + INSIGHTS_MODEL_SPEC.md.
+router.get('/insights/metrics', async (req, res) => {
+  try {
+    const tenantId = req.tenant.tenantId;
+    const siteId = req.query.siteId;
+    const months = Math.min(24, Math.max(3, parseInt(req.query.months) || 12));
+    if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required' } });
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found' } });
+    const out = await getArionMetrics(pool, site, months);
+    res.json(out);
+  } catch (err) {
+    console.error('[arion/insights/metrics]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
