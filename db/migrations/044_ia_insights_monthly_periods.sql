@@ -44,10 +44,25 @@ WHERE period_start <> DATEFROMPARTS(YEAR(period_end), MONTH(period_end), 1)
    OR period_end   <> EOMONTH(period_end);
 
 -- 3. Enforce one row per report per month at the database level.
+--
+-- Check by COLUMN SET, not by index name. The base schema already ships
+-- UX_arion_ia_score_history_unique over exactly these four columns; an
+-- earlier revision of this migration checked only for its own name and so
+-- created a second, redundant unique index over the same key. Migration 045
+-- drops that duplicate.
 IF NOT EXISTS (
-  SELECT 1 FROM sys.indexes
-  WHERE name = 'UQ_ia_insights_score_month'
-    AND object_id = OBJECT_ID('arion.ia_insights_score_history')
+  SELECT 1
+  FROM sys.indexes i
+  WHERE i.object_id = OBJECT_ID('arion.ia_insights_score_history')
+    AND i.is_unique = 1
+    AND (SELECT COUNT(*) FROM sys.index_columns ic
+         WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id) = 4
+    AND NOT EXISTS (
+      SELECT 1 FROM sys.index_columns ic
+      JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+      WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id
+        AND c.name NOT IN ('tenant_id', 'site_id', 'report_key', 'period_end')
+    )
 )
   CREATE UNIQUE INDEX UQ_ia_insights_score_month
     ON arion.ia_insights_score_history (tenant_id, site_id, report_key, period_end);
