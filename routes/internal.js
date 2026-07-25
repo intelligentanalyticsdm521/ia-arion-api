@@ -42,6 +42,22 @@ router.post('/gbp-auto-reply-tick', requireIngestKey, async (req, res) => {
   }
 });
 
+// POST /internal/insights-snapshot-tick — monthly IA Insights refresh,
+// triggered by the arion-func timer on the 1st (same thin-scheduler split as
+// gbp-auto-reply-tick). Aggregates SE Ranking position history + pulls the
+// last 2 months of GSC/GA4/GBP into arion.metric_monthly. MERGE-idempotent.
+router.post('/insights-snapshot-tick', requireIngestKey, async (req, res) => {
+  try {
+    const pool = await getServicesPool();
+    const { runFullInsightsSnapshot } = await import('../lib/insightsSnapshot.js');
+    const summary = await runFullInsightsSnapshot(pool, (m) => console.log(`[insights-snapshot] ${m}`));
+    res.json({ ok: true, summary });
+  } catch (err) {
+    console.error('[internal:insights-snapshot-tick]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // POST /internal/sites/:siteId/complete-provisioning
 // Called by admin after manual Golden Master setup is done
 router.post('/sites/:siteId/complete-provisioning', requireIngestKey, async (req, res) => {
