@@ -36,7 +36,7 @@ const TENANTS = [
 const MONTHS: string[] = [];
 {
   const now = new Date();
-  for (let m = 11; m >= 0; m--) {
+  for (let m = 12; m >= 0; m--) {
     const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - m, 1));
     MONTHS.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
   }
@@ -45,11 +45,11 @@ const idxOf = (ym: string) => MONTHS.indexOf(ym);
 
 /** rows [{ym, v}] → 12-length series; null BEFORE first activity, 0 after. */
 function toSeries(rows: Array<{ ym: string; v: number | null }>, opts?: { zeroFill?: boolean }): Array<number | null> {
-  const s: Array<number | null> = new Array(12).fill(null);
+  const s: Array<number | null> = new Array(MONTHS.length).fill(null);
   for (const r of rows) { const i = idxOf(r.ym); if (i >= 0 && r.v != null) s[i] = Number(r.v); }
   if (opts?.zeroFill !== false) {
     const first = s.findIndex((v) => v != null);
-    if (first >= 0) for (let i = first; i < 12; i++) if (s[i] == null) s[i] = 0;
+    if (first >= 0) for (let i = first; i < s.length; i++) if (s[i] == null) s[i] = 0;
   }
   return s;
 }
@@ -122,7 +122,7 @@ try {
     // (score the last COMPLETE month for sums; all-zero series = unmeasured).
     const ARION_SUM_KEYS = new Set(['gsc_impressions', 'gsc_clicks', 'bing_impressions', 'bing_clicks', 'gbp_impressions', 'gbp_impr_maps', 'gbp_impr_search', 'gbp_calls', 'gbp_directions', 'gbp_website_clicks', 'gbp_posts', 'ga_sessions', 'ga_users', 'ga_new_users', 'ga_conversions', 'form_submissions', 'content_pageviews']);
     for (const key of Object.keys(arionMetrics)) {
-      if (ARION_SUM_KEYS.has(key)) arionMetrics[key][11] = null;
+      if (ARION_SUM_KEYS.has(key)) arionMetrics[key][MONTHS.length - 1] = null;
       const vals = arionMetrics[key].filter((v) => v != null);
       if (!vals.length || vals.every((v) => v === 0)) delete arionMetrics[key];
     }
@@ -157,7 +157,7 @@ try {
     sput('delivery_rate', toSeries(camps.map((r: any) => ({ ym: r.ym, v: r.sent > 0 ? ((r.sent - (r.bounced || 0)) / r.sent) * 100 : null })), { zeroFill: false }));
     sput('unsub_rate', toSeries(camps.map((r: any) => ({ ym: r.ym, v: rate(r.unsub, r.sent) })), { zeroFill: false }));
     for (const key of ['contacts_new', 'campaigns_run', 'emails_sent', 'unique_opens']) {
-      if (sparkMetrics[key]) sparkMetrics[key][11] = null; // running month
+      if (sparkMetrics[key]) sparkMetrics[key][MONTHS.length - 1] = null; // running month
     }
     for (const key of Object.keys(sparkMetrics)) {
       const vals = sparkMetrics[key].filter((v) => v != null);
@@ -189,7 +189,7 @@ try {
     oput('quotes_accepted', toSeries(quotes.map((r: any) => ({ ym: r.ym, v: r.accepted }))));
     oput('avg_quote_value', toSeries(quotes.map((r: any) => ({ ym: r.ym, v: r.avg_q })), { zeroFill: false }));
     for (const key of ['revenue_invoiced', 'jobs_completed', 'jobs_scheduled', 'quotes_sent', 'quotes_accepted']) {
-      if (oliverMetrics[key]) oliverMetrics[key][11] = null; // running month
+      if (oliverMetrics[key]) oliverMetrics[key][MONTHS.length - 1] = null; // running month
     }
     for (const key of Object.keys(oliverMetrics)) {
       const vals = oliverMetrics[key].filter((v) => v != null);
