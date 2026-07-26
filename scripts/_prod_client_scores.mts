@@ -24,6 +24,8 @@ import { buildSparkDashboards } from '../../Portal-mybrand/src/analytics/sparkDa
 import { buildOliverDashboards } from '../../Portal-mybrand/src/analytics/oliverDashboards';
 import { buildIntelligenceMirror, ARION_MIRROR, SPARK_MIRROR, OLIVER_MIRROR } from '../../Portal-mybrand/src/analytics/intelligenceMirror';
 import { businessPulse, type DashboardScore } from '../../Portal-mybrand/src/analytics/scoring';
+// @ts-ignore — plain ESM JS: the three-tier industry benchmark ladder
+import { resolveBenchmarks } from '../lib/benchmarks.js';
 
 const TENANTS = [
   { name: 'Intelligent Analytics', id: '8C9527B9-8999-4B31-A306-F3D4CCC39FBD', siteId: '64C43F2F-B4FE-40C2-B023-0F06F7D275FA', domain: 'intelligentanalyticsdm.com' },
@@ -196,18 +198,19 @@ try {
       if (!vals.length || vals.every((v) => v === 0)) delete oliverMetrics[key];
     }
 
-    // ── score through the real engine ──────────────────────────────────────
+    // ── score through the real engine (with the industry benchmark ladder) ──
+    const { category, benchmarks } = await resolveBenchmarks(pool, t.id);
     const score = (label: string, trendDs: DashboardScore[], intelDs: DashboardScore[]) => {
       const tS = roll(trendDs), iS = roll(intelDs);
       const { meas, tot } = measuredOf(trendDs);
       return { label, trend: tS, intel: iS, platform: blend(tS, iS), meas, tot };
     };
-    const a = score('ARION', buildArionDashboards({ metrics: arionMetrics } as any), buildIntelligenceMirror({ metrics: arionMetrics } as any, ARION_MIRROR).dashboards);
-    const s = score('SPARK', buildSparkDashboards({ metrics: sparkMetrics } as any), buildIntelligenceMirror({ metrics: sparkMetrics } as any, SPARK_MIRROR).dashboards);
-    const o = score('OLIVER', buildOliverDashboards({ metrics: oliverMetrics } as any), buildIntelligenceMirror({ metrics: oliverMetrics } as any, OLIVER_MIRROR).dashboards);
+    const a = score('ARION', buildArionDashboards({ metrics: arionMetrics, benchmarks } as any), buildIntelligenceMirror({ metrics: arionMetrics } as any, ARION_MIRROR).dashboards);
+    const s = score('SPARK', buildSparkDashboards({ metrics: sparkMetrics, benchmarks } as any), buildIntelligenceMirror({ metrics: sparkMetrics } as any, SPARK_MIRROR).dashboards);
+    const o = score('OLIVER', buildOliverDashboards({ metrics: oliverMetrics, benchmarks } as any), buildIntelligenceMirror({ metrics: oliverMetrics } as any, OLIVER_MIRROR).dashboards);
     const pulse = businessPulse([a.platform, s.platform, o.platform]);
 
-    console.log(`\n══ ${t.name} (${t.domain}) ═══════════════════════════`);
+    console.log(`\n══ ${t.name} (${t.domain}) — ${category || 'default'} · ${Object.keys(benchmarks).length} industry benchmarks ══`);
     console.log(`  Business Pulse: ${pulse ?? '— (no measurable platform)'}`);
     for (const p of [a, s, o]) {
       if (p.platform == null) { console.log(`  ${p.label.padEnd(6)} — not connected (0 of ${p.tot} data points measurable)`); continue; }
