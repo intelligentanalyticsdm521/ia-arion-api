@@ -86,13 +86,12 @@ try {
       SELECT FORMAT(period_month,'yyyy-MM') ym, metric_key, value
       FROM arion.metric_monthly
       WHERE site_id=@site AND dimension IS NULL`, { site: t.siteId });
-    const kwRows = { tracked: [] as any[], top3: [] as any[], top10: [] as any[], top30: [] as any[] };
+    // Every stored overall metric feeds the engine directly — the metric_key
+    // vocabulary IS the catalog vocabulary (gsc_* / ga_* / gbp_* / kw_*).
+    const byKey = new Map<string, Array<{ ym: string; v: number }>>();
     for (const r of mm) {
-      const v = { ym: r.ym, v: Number(r.value) };
-      if (r.metric_key === 'kw_tracked') kwRows.tracked.push(v);
-      else if (r.metric_key === 'kw_top3') kwRows.top3.push(v);
-      else if (r.metric_key === 'kw_top10') kwRows.top10.push(v);
-      else if (r.metric_key === 'kw_top30') kwRows.top30.push(v);
+      if (!byKey.has(r.metric_key)) byKey.set(r.metric_key, []);
+      byKey.get(r.metric_key)!.push({ ym: r.ym, v: Number(r.value) });
     }
     // per-keyword dimension rows → latest-month summary (real substance line)
     const dimRows = await Q(`
@@ -114,13 +113,19 @@ try {
 
     const arionMetrics: Record<string, Array<number | null>> = {};
     const put = (k: string, s: Array<number | null>) => { if (hasData(s)) arionMetrics[k] = s; };
-    put('kw_tracked', toSeries(kwRows.tracked, { zeroFill: false }));
-    put('kw_top3', toSeries(kwRows.top3, { zeroFill: false }));
-    put('kw_top10', toSeries(kwRows.top10, { zeroFill: false }));
-    put('kw_top30', toSeries(kwRows.top30, { zeroFill: false }));
+    for (const [key, rows] of byKey) put(key, toSeries(rows, { zeroFill: false }));
     put('backlinks', toSeries(backlinks.map((r: any) => ({ ym: r.ym, v: r.links })), { zeroFill: false }));
     put('referring_domains', toSeries(backlinks.map((r: any) => ({ ym: r.ym, v: r.doms })), { zeroFill: false }));
     put('form_submissions', toSeries(forms.map((r: any) => ({ ym: r.ym, v: r.v }))));
+
+    // Running-month + unmeasured guards — mirror arionMetrics.js prod path
+    // (score the last COMPLETE month for sums; all-zero series = unmeasured).
+    const ARION_SUM_KEYS = new Set(['gsc_impressions', 'gsc_clicks', 'bing_impressions', 'bing_clicks', 'gbp_impressions', 'gbp_impr_maps', 'gbp_impr_search', 'gbp_calls', 'gbp_directions', 'gbp_website_clicks', 'gbp_posts', 'ga_sessions', 'ga_users', 'ga_new_users', 'ga_conversions', 'form_submissions', 'content_pageviews']);
+    for (const key of Object.keys(arionMetrics)) {
+      if (ARION_SUM_KEYS.has(key)) arionMetrics[key][11] = null;
+      const vals = arionMetrics[key].filter((v) => v != null);
+      if (!vals.length || vals.every((v) => v === 0)) delete arionMetrics[key];
+    }
 
     // ── SPARK: lumen contacts + campaigns ──────────────────────────────────
     const cNew = await Q(`
@@ -151,6 +156,13 @@ try {
     sput('bounce_rate', toSeries(camps.map((r: any) => ({ ym: r.ym, v: rate(r.bounced, r.sent) })), { zeroFill: false }));
     sput('delivery_rate', toSeries(camps.map((r: any) => ({ ym: r.ym, v: r.sent > 0 ? ((r.sent - (r.bounced || 0)) / r.sent) * 100 : null })), { zeroFill: false }));
     sput('unsub_rate', toSeries(camps.map((r: any) => ({ ym: r.ym, v: rate(r.unsub, r.sent) })), { zeroFill: false }));
+    for (const key of ['contacts_new', 'campaigns_run', 'emails_sent', 'unique_opens']) {
+      if (sparkMetrics[key]) sparkMetrics[key][11] = null; // running month
+    }
+    for (const key of Object.keys(sparkMetrics)) {
+      const vals = sparkMetrics[key].filter((v) => v != null);
+      if (!vals.length || vals.every((v) => v === 0)) delete sparkMetrics[key];
+    }
 
     // ── OLIVER: invoices / jobs / quotes ───────────────────────────────────
     const inv = await Q(`
@@ -176,6 +188,13 @@ try {
     oput('quotes_sent', toSeries(quotes.map((r: any) => ({ ym: r.ym, v: r.sent }))));
     oput('quotes_accepted', toSeries(quotes.map((r: any) => ({ ym: r.ym, v: r.accepted }))));
     oput('avg_quote_value', toSeries(quotes.map((r: any) => ({ ym: r.ym, v: r.avg_q })), { zeroFill: false }));
+    for (const key of ['revenue_invoiced', 'jobs_completed', 'jobs_scheduled', 'quotes_sent', 'quotes_accepted']) {
+      if (oliverMetrics[key]) oliverMetrics[key][11] = null; // running month
+    }
+    for (const key of Object.keys(oliverMetrics)) {
+      const vals = oliverMetrics[key].filter((v) => v != null);
+      if (!vals.length || vals.every((v) => v === 0)) delete oliverMetrics[key];
+    }
 
     // ── score through the real engine ──────────────────────────────────────
     const score = (label: string, trendDs: DashboardScore[], intelDs: DashboardScore[]) => {
