@@ -23,12 +23,15 @@ const pool = await new sql.ConnectionPool({
 try {
   const sites = (await pool.request().query(`
     SELECT site_id, tenant_id, domain, gbp_oauth_token_ref, gsc_oauth_token_ref,
-           gsc_site_url, ga4_property_id, gbp_location_name
+           gsc_site_url, ga4_property_id, gbp_location_name, se_ranking_project_id
     FROM arion.site WHERE domain IS NOT NULL`)).recordset;
 
+  const { aggregateBacklinksMonthly } = await import('../lib/insightsSnapshot.js');
   for (const site of sites) {
     console.log(`\n══ ${site.domain} ══`);
-    const out = await snapshotGoogleSources(pool, site, { log: (m) => console.log(`  · ${m}`) });
+    const bl = await aggregateBacklinksMonthly(pool, site);
+    if (bl) console.log(`  backlinks: ${bl} row(s) aggregated`);
+    const out = await snapshotGoogleSources(pool, site, { gbpKeywordMonths: 6, log: (m) => console.log(`  · ${m}`) });
     for (const [src, r] of Object.entries(out)) {
       console.log(`  ${src}: pulled ${r.pulled} row(s)${r.upserted != null ? `, upserted ${r.upserted}` : ''}${r.reason ? ` — ${r.reason}` : ''}`);
     }
