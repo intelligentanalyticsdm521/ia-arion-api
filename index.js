@@ -56,7 +56,11 @@ const corsOptions = {
     return callback(new Error('CORS blocked for origin: ' + origin));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Authorization', 'Content-Type', 'x-tenant-key', 'x-tenant-id', 'x-site-id', 'x-arion-ingest-key', 'x-portal-context', 'x-dev-tenant', 'x-dev-tier'],
+  // x-actas-mode: the Portal attaches it to EVERY request during a founder
+  // emergency act-as session (emergencyActAs.ts). Missing from this list it
+  // fails preflight and the browser blocks every ARION call for the whole
+  // 30-minute session (found 2026-07-26 walking Briarwood in dev).
+  allowedHeaders: ['Authorization', 'Content-Type', 'x-tenant-key', 'x-tenant-id', 'x-site-id', 'x-arion-ingest-key', 'x-portal-context', 'x-dev-tenant', 'x-dev-tier', 'x-actas-mode'],
   credentials: false
 };
 
