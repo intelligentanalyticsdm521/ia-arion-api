@@ -84,12 +84,28 @@ UPDATE arion.ia_insights_score_history SET report_key = 'audience_conversion'
   GROUP BY tenant_id, site_id, report_key, period_end
   HAVING COUNT(*) > 1
 )
+-- 2026-08-08 FIX: the `merged` CTE is filtered by HAVING COUNT(*) > 1, so it only
+-- contains groups that actually HAVE a merge partner. This UPDATE, however, targeted
+-- every row with those report keys — so a row whose pair never existed (only 'search'
+-- but no 'visibility', say) got a correlated subquery returning no rows -> NULL, and
+-- `score` is NOT NULL -> "Cannot insert the value NULL into column 'score'".
+--
+-- Prod survived by luck: every group there happened to be paired, so the migration
+-- succeeded on 2026-08-08. Dev had one unpaired row and it failed immediately. Any
+-- fresh environment would hit the same wall, so this is fixed in place rather than in
+-- a follow-up migration — a new migration cannot rescue an environment that dies on 045.
+--
+-- EXISTS restricts the update to genuinely merged groups; singletons keep their own
+-- score, which is the correct behaviour and what the surrounding comments intended.
 UPDATE h
 SET h.score = (SELECT ROUND(m.avg_score, 0) FROM merged m
                WHERE m.tenant_id = h.tenant_id AND m.site_id = h.site_id
                  AND m.report_key = h.report_key AND m.period_end = h.period_end)
 FROM arion.ia_insights_score_history h
-WHERE h.report_key IN ('search_visibility', 'audience_conversion');
+WHERE h.report_key IN ('search_visibility', 'audience_conversion')
+  AND EXISTS (SELECT 1 FROM merged m
+               WHERE m.tenant_id = h.tenant_id AND m.site_id = h.site_id
+                 AND m.report_key = h.report_key AND m.period_end = h.period_end);
 
 -- Now every duplicate carries the same averaged score; keep one of each.
 ;WITH ranked AS (
