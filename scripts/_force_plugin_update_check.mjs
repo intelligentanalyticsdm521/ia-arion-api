@@ -48,11 +48,31 @@ if (!APPLY) {
   await pool.close(); process.exit(0);
 }
 
-// The hook is registered by the plugin, so a bare `cron event run` is enough —
-// no need to schedule anything or touch the plugin's files.
+// The daily check is scheduled by the plugin's activate() hook. A plugin copied
+// into place over SFTP never activates, so the event was never scheduled — and
+// a site with no scheduled event never checks for an update at all, no matter
+// how healthy it looks. `wp cron event run` refuses an unscheduled hook, which
+// is what surfaced it on midwestagservices.com.
+//
+// So: schedule it if it is missing (that is the real repair — the site needs
+// the daily check regardless of what we are doing right now), then run it.
+const scheduled = ((await runWpCli(DOMAIN,
+  `cron event list --fields=hook --format=csv --hook=ia_check_plugin_update`)).stdout || '')
+  .includes('ia_check_plugin_update');
+
+if (!scheduled) {
+  console.log('\n  daily update check was NOT scheduled — scheduling it now');
+  await runWpCli(DOMAIN, `cron event schedule ia_check_plugin_update now daily`);
+}
+
 console.log('\n  firing ia_check_plugin_update ...');
 const run = await runWpCli(DOMAIN, `cron event run ia_check_plugin_update`);
 console.log(`  ${((run.stdout || '') + (run.stderr || '')).trim().slice(0, 400)}`);
+
+// Leave the daily schedule in place so the site keeps itself current from here.
+const after = ((await runWpCli(DOMAIN,
+  `cron event list --fields=hook,next_run_relative --format=csv --hook=ia_check_plugin_update`)).stdout || '').trim();
+console.log(`  next scheduled check: ${after.split('\n').pop() || 'NONE'}`);
 
 const v1 = await installed();
 console.log(`\n  site now has  : v${v1}`);
