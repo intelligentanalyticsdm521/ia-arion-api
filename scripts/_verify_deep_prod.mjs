@@ -29,7 +29,8 @@ const { deriveDeepReport } = await import(new URL('deepReport.js', base).href);
 const { DEEP_CONFIGS } = await import(new URL('deepConfigs.js', base).href);
 
 const ONLY = process.argv[2];
-const WATCH = ['content_library', 'page_reachability', 'media_library', 'component_upkeep'];
+const WATCH = process.env.WATCH ? process.env.WATCH.split(',')
+  : ['content_library', 'page_reachability', 'media_library', 'component_upkeep'];
 
 const pool = await prodPool('iadm_services');
 const sites = (await pool.request().query(

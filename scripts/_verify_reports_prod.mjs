@@ -14,7 +14,8 @@ import { getArionMetrics } from '../lib/arionMetrics.js';
 import { prodPool } from './_prodsql.mjs';
 
 const ONLY = process.argv[2];
-const WATCH = ['content_library', 'page_reachability', 'media_library', 'component_upkeep'];
+const WATCH = process.env.WATCH ? process.env.WATCH.split(',')
+  : ['content_library', 'page_reachability', 'media_library', 'component_upkeep'];
 
 const pool = await prodPool('iadm_services');
 const sites = (await pool.request().query(
