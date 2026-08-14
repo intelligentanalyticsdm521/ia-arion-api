@@ -2,3 +2,13 @@ node_modules/
 .env
 .env.*
 .DS_Store
+
+# Rescue dumps written by the repair scripts. These hold REAL client rows —
+# gbp-bleed-backup-2026-07-22 carries client names, tenant ids and GBP location
+# ids — and were untracked but not ignored, which is one `git add -A` away from
+# putting client data in the repo permanently. Ignored, not deleted: they are
+# the backup someone took before a fix.
+*-backup-*.json
+gbp-bleed-backup-*.json
+dev-stdout.log
+dev-stderr.log
