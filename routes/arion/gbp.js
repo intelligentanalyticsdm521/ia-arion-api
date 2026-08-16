@@ -149,7 +149,10 @@ router.post('/reviews/:reviewId/reply', async (req, res) => {
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('reviewId', sql.UniqueIdentifier, reviewId)
       .input('replyText', sql.NVarChar(sql.MAX), reply_text.trim())
-      .query('UPDATE arion.gbp_review SET reply_text = @replyText, reply_date = SYSDATETIMEOFFSET(), updated_at = SYSDATETIMEOFFSET() WHERE tenant_id = @tenantId AND review_id = @reviewId');
+      // 2026-08-16: arion.gbp_review has neither reply_date nor updated_at, so
+      // replying to a Google review 500'd every time. Real columns are
+      // reply_text / reply_status / review_date / synced_at.
+      .query("UPDATE arion.gbp_review SET reply_text = @replyText, reply_status = 'replied', synced_at = SYSDATETIMEOFFSET() WHERE tenant_id = @tenantId AND review_id = @reviewId");
 
     res.json({ data: { review_id: reviewId, replied: true }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
   } catch (err) {

@@ -152,14 +152,11 @@ router.post('/questionnaire', async (req, res) => {
     // exists). The legacy signup flow writes questionnaire_json there;
     // mirror that so downstream legacy code (welcomeEmail, aiCopy) finds
     // it in the same shape.
-    await pool.request()
-      .input('sid', sql.UniqueIdentifier, site.site_id)
-      .input('q', sql.NVarChar(sql.MAX), JSON.stringify(questionnaire || {}))
-      .query(`
-        UPDATE arion.site
-           SET questionnaire_json = @q, updated_at = GETUTCDATE()
-         WHERE site_id = @sid;
-      `).catch(() => { /* column may not exist on older schemas — soft-fail */ });
+    // 2026-08-16 — REMOVED a mirror that wrote questionnaire_json onto
+    // arion.site. That column does not exist there (it lives on
+    // arion.signup_session), so the statement threw on every run and was
+    // soft-failed with "column may not exist on older schemas". The real
+    // write follows immediately below, so nothing is lost.
 
     // Also push into arion.signup_session if there is one for this tenant
     // (founder-initiated flows may not have a session row).
