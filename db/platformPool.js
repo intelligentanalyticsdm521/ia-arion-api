@@ -83,10 +83,23 @@ export async function getPlatformPool() {
   if (!sqlServer) throw new Error("PLATFORM_SQL_SERVER (or SQL_SERVER) env var is required for arion-api");
 
   const connectTimeoutMs = Number(process.env.SQL_CONNECT_TIMEOUT_MS || "12000");
-  const credential = getCredential();
-  const token = await withTimeout(credential.getToken(SQL_SCOPE), connectTimeoutMs, "ManagedIdentity getToken");
 
-  poolTokenExpiresAt = token.expiresOnTimestamp || (Date.now() + 50 * 60 * 1000);
+  // Only reach for an Entra token when the connection will actually USE one.
+  // The config below already branches on useSqlAuth, but this fetch did not:
+  // with SQL_USER/SQL_PASSWORD set for local dev the token was discarded and
+  // yet still had to succeed, so every request died on
+  // "ChainedTokenCredential authentication failed" and surfaced as
+  // "dev auth failed". Same defect as oliver-api's platformPool.
+  let token = null;
+  if (!useSqlAuth) {
+    const credential = getCredential();
+    token = await withTimeout(credential.getToken(SQL_SCOPE), connectTimeoutMs, "ManagedIdentity getToken");
+    poolTokenExpiresAt = token.expiresOnTimestamp || (Date.now() + 50 * 60 * 1000);
+  } else {
+    // SQL auth does not expire the way a bearer token does; keep the pool for
+    // a day so the refresh path stays a single code path.
+    poolTokenExpiresAt = Date.now() + 24 * 60 * 60 * 1000;
+  }
 
   const { host: sqlHost, port: sqlPort } = parseServer(sqlServer);
   const config = {

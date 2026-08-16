@@ -1,0 +1,11 @@
+import { runSshCommand } from '../lib/hostingerSsh.js';
+const domain = 'rollinginitllc.com';
+const path = `/home/u142423944/domains/${domain}/public_html/wp-content/plugins/intelligent-analytics/intelligent-analytics.php`;
+const a = await runSshCommand(`grep -c threat_intel_ips '${path}' || echo 0`);
+const b = await runSshCommand(`grep -c "type <> 'CS'" '${path}' || echo 0`);
+const c = await runSshCommand(`grep -m1 'Version:' '${path}'`);
+const d = await runSshCommand(`stat -c '%y' '${path}'`);
+console.log('deployed file threat_intel_ips hits:', (a.stdout||'').trim());
+console.log("deployed file type<>CS hits:", (b.stdout||'').trim());
+console.log('deployed version line:', (c.stdout||'').trim());
+console.log('deployed file mtime:', (d.stdout||'').trim());
