@@ -15,6 +15,7 @@
 import express from "express";
 import sql from "mssql";
 import { getServicesPool } from "../db/servicesPool.js";
+import { getPlatformPool } from "../db/platformPool.js";
 import { calculatePool } from "../lib/argus/poolCalculator.js";
 import { getBalance } from "../lib/argus/callWrapper.js";
 
@@ -36,10 +37,16 @@ router.get("/balance", async (req, res) => {
 
     // Tier sniff — read tenant's products + tiers from core.tenants.
     // For now we read the single subscription_tier column (legacy). When
-    // multi-product tier breakdown ships, expand this to a per-product
-    // join. ARION/SPARK/OLIVER live on iadm_services for ARION's purposes;
-    // platform-side core.tenants is mirrored.
-    const tr = await pool.request()
+    // multi-product tier breakdown ships, expand this to a per-product join.
+    //
+    // MUST use the PLATFORM pool. The old comment here claimed "platform-side
+    // core.tenants is mirrored" into iadm_services — it is not. A core.tenants
+    // table does exist there, but it is a stale subset WITHOUT
+    // subscription_tier, so this query threw on every call and the balance
+    // badge fell through to its catch. Same defect class as the 2026-08-17
+    // cxBilling outage; see scripts/lint-crossdb-tenants.mjs in oliver-api.
+    const platformPool = await getPlatformPool();
+    const tr = await platformPool.request()
       .input("tid", sql.UniqueIdentifier, tenantId)
       .query(`SELECT TOP 1 subscription_tier FROM core.tenants WHERE tenant_id=@tid`);
     const tier = tr.recordset[0]?.subscription_tier || "lite";
