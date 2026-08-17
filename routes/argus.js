@@ -17,6 +17,7 @@ import sql from "mssql";
 import { getServicesPool } from "../db/servicesPool.js";
 import { calculatePool } from "../lib/argus/poolCalculator.js";
 import { getBalance } from "../lib/argus/callWrapper.js";
+import { argusTables } from "../lib/argus/tables.js";
 
 const router = express.Router();
 
@@ -81,6 +82,7 @@ router.get("/usage", async (req, res) => {
     const tenantId = req.tenant.tenantId;
     const days = Math.max(1, Math.min(365, Number(req.query.days || 30)));
     const pool = await getServicesPool();
+    const T = await argusTables(pool);
     const r = await pool.request()
       .input("tid", sql.UniqueIdentifier, tenantId)
       .input("days", sql.Int, days)
@@ -90,7 +92,7 @@ router.get("/usage", async (req, res) => {
                SUM(credits_charged) AS credits_spent,
                SUM(cost_basis_usd) AS cost_basis_total,
                SUM(CASE WHEN outlier_refunded=1 THEN 1 ELSE 0 END) AS refunded_count
-          FROM lumen.ai_call_audit
+          FROM ${T.AI_CALL_AUDIT}
          WHERE tenant_id = @tid
            AND created_at > DATEADD(day, -@days, SYSUTCDATETIME())
          GROUP BY action_type
@@ -118,14 +120,18 @@ router.post("/grant", async (req, res) => {
       return res.status(403).json({ error: { code: "TENANT_MISMATCH" } });
     }
     const pool = await getServicesPool();
+    const T = await argusTables(pool);
+    // Consolidated schema calls the grant-type column plan_key (values are
+    // the same vocabulary: founder_grant / pack_purchase_* / auto_topoff).
+    const typeCol = T.consolidated ? "plan_key" : "grant_type";
     const r = await pool.request()
       .input("tid",     sql.UniqueIdentifier, tenant_id)
       .input("credits", sql.Int,              Number(credits))
       .input("type",    sql.NVarChar(64),     grant_type || "founder_grant")
       .input("notes",   sql.NVarChar(500),    notes || null)
       .input("exp",     sql.DateTime2,        expires_at ? new Date(expires_at) : null)
-      .query(`INSERT INTO lumen.argus_credit_grant
-                (tenant_id, credits, grant_type, notes, expires_at)
+      .query(`INSERT INTO ${T.CREDIT_GRANT}
+                (tenant_id, credits, ${typeCol}, notes, expires_at)
               OUTPUT INSERTED.grant_id
               VALUES (@tid, @credits, @type, @notes, @exp)`);
     res.json({ data: { grant_id: r.recordset[0].grant_id } });
@@ -141,9 +147,10 @@ router.post("/grant", async (req, res) => {
 router.get("/pricing", async (_req, res) => {
   try {
     const pool = await getServicesPool();
+    const T = await argusTables(pool);
     const r = await pool.request().query(`
       SELECT action_type, credits_per_call, description, outlier_cap_usd, is_active, updated_at
-        FROM lumen.argus_action_pricing
+        FROM ${T.ACTION_PRICING}
        WHERE is_active = 1
        ORDER BY credits_per_call ASC
     `);
@@ -162,6 +169,7 @@ router.patch("/pricing/:action_type", async (req, res) => {
     const { action_type } = req.params;
     const { credits_per_call, outlier_cap_usd, description, is_active } = req.body || {};
     const pool = await getServicesPool();
+    const T = await argusTables(pool);
 
     const sets = [];
     const rq = pool.request().input("at", sql.NVarChar(64), action_type);
@@ -175,7 +183,7 @@ router.patch("/pricing/:action_type", async (req, res) => {
     rq.input("uid", sql.UniqueIdentifier, req.user?.userId || null);
     sets.push("updated_by=@uid");
 
-    await rq.query(`UPDATE lumen.argus_action_pricing SET ${sets.join(", ")} WHERE action_type=@at`);
+    await rq.query(`UPDATE ${T.ACTION_PRICING} SET ${sets.join(", ")} WHERE action_type=@at`);
     res.json({ data: { action_type, updated: true } });
   } catch (err) {
     console.error("[argus/pricing/patch]", err);
@@ -190,6 +198,7 @@ router.get("/margin", async (req, res) => {
     if (!isFounderTenant(req)) return res.status(403).json({ error: { code: "forbidden" } });
     const days = Math.max(1, Math.min(365, Number(req.query.days || 30)));
     const pool = await getServicesPool();
+    const T = await argusTables(pool);
     const r = await pool.request()
       .input("days", sql.Int, days)
       .query(`
@@ -211,7 +220,7 @@ router.get("/margin", async (req, res) => {
           1.0 - (SUM(a.cost_basis_usd)
             / NULLIF(SUM(CASE WHEN a.outlier_refunded = 1 THEN 0 ELSE CAST(a.credits_charged AS DECIMAL(18,4)) END) * 0.10, 0)) AS margin_ratio,
           SUM(CASE WHEN a.outlier_refunded = 1 THEN 1 ELSE 0 END) AS outlier_count
-        FROM lumen.ai_call_audit a
+        FROM ${T.AI_CALL_AUDIT} a
        WHERE a.created_at > DATEADD(day, -@days, SYSUTCDATETIME())
          AND a.credits_charged > 0
        GROUP BY a.action_type
@@ -232,23 +241,24 @@ router.get("/auto-topoff", async (req, res) => {
   try {
     const tenantId = req.tenant.tenantId;
     const pool = await getServicesPool();
+    const T = await argusTables(pool);
 
     let r = await pool.request()
       .input("tid", sql.UniqueIdentifier, tenantId)
       .query(`SELECT enabled, threshold_credits, refill_pack_size, max_per_month_usd,
                      month_spent_usd, month_period_start, last_charge_at, last_charge_amount_usd
-                FROM lumen.argus_autotopoff_config
+                FROM ${T.AUTOTOPOFF_CONFIG}
                WHERE tenant_id = @tid`);
 
     if (r.recordset.length === 0) {
       await pool.request()
         .input("tid", sql.UniqueIdentifier, tenantId)
-        .query(`INSERT INTO lumen.argus_autotopoff_config (tenant_id) VALUES (@tid)`);
+        .query(`INSERT INTO ${T.AUTOTOPOFF_CONFIG} (tenant_id) VALUES (@tid)`);
       r = await pool.request()
         .input("tid", sql.UniqueIdentifier, tenantId)
         .query(`SELECT enabled, threshold_credits, refill_pack_size, max_per_month_usd,
                        month_spent_usd, month_period_start, last_charge_at, last_charge_amount_usd
-                  FROM lumen.argus_autotopoff_config
+                  FROM ${T.AUTOTOPOFF_CONFIG}
                  WHERE tenant_id = @tid`);
     }
 
@@ -284,6 +294,7 @@ router.patch("/auto-topoff", async (req, res) => {
 
     const sets = [];
     const pool = await getServicesPool();
+    const T = await argusTables(pool);
     const rq = pool.request().input("tid", sql.UniqueIdentifier, tenantId);
 
     if (body.enabled !== undefined) {
@@ -327,10 +338,10 @@ router.patch("/auto-topoff", async (req, res) => {
     // UPDATE below has something to hit. Avoids a MERGE here for clarity.
     await pool.request()
       .input("tid", sql.UniqueIdentifier, tenantId)
-      .query(`IF NOT EXISTS (SELECT 1 FROM lumen.argus_autotopoff_config WHERE tenant_id=@tid)
-                INSERT INTO lumen.argus_autotopoff_config (tenant_id) VALUES (@tid)`);
+      .query(`IF NOT EXISTS (SELECT 1 FROM ${T.AUTOTOPOFF_CONFIG} WHERE tenant_id=@tid)
+                INSERT INTO ${T.AUTOTOPOFF_CONFIG} (tenant_id) VALUES (@tid)`);
 
-    await rq.query(`UPDATE lumen.argus_autotopoff_config
+    await rq.query(`UPDATE ${T.AUTOTOPOFF_CONFIG}
                        SET ${sets.join(", ")}
                      WHERE tenant_id = @tid`);
 
@@ -338,7 +349,7 @@ router.patch("/auto-topoff", async (req, res) => {
       .input("tid", sql.UniqueIdentifier, tenantId)
       .query(`SELECT enabled, threshold_credits, refill_pack_size, max_per_month_usd,
                      month_spent_usd, month_period_start, last_charge_at, last_charge_amount_usd
-                FROM lumen.argus_autotopoff_config
+                FROM ${T.AUTOTOPOFF_CONFIG}
                WHERE tenant_id = @tid`);
     const row = r.recordset[0];
 
