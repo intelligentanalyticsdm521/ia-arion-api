@@ -982,8 +982,16 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         brandName: answers.businessName,
         tenantId: session.tenant_id,
         wpAdminUrl,
-        wpAdminLogin: adminLogin,
-        wpAdminPassword: adminPassword,
+        // NEVER send iaadmin to the client. `iaadmin` is IA's own
+        // ADMINISTRATOR account (email IA_STAFF_ADMIN_EMAIL) and this email
+        // used to hand its login + plaintext password straight to the
+        // customer — giving every client full admin on their site, destroying
+        // per-user attribution (every edit logged as iaadmin), coupling
+        // client revocation to IA's own access, and putting a live admin
+        // password in an inbox. Clients get the `editor` account created in
+        // step 14 and set their own password from the WP reset email.
+        wpAdminLogin: null,
+        wpAdminPassword: null,
         setupToken,
         alreadyRegistered,
       });
