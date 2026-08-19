@@ -88,17 +88,21 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
   // form_type still wins when it sends one (the plugin knows its own forms
   // best); the config fills the gap for everything else; 'contact' remains the
   // last resort, which is what every submission used to be regardless.
-  if (!form_type && form_id) {
+  let formOutcomeCfg = null;
+  if (form_id) {
     try {
       const pool = await getServicesPool();
       const cfg = await pool.request()
         .input('tenantId', sql.UniqueIdentifier, tenantId)
         .input('siteId', sql.UniqueIdentifier, siteId)
         .input('formId', sql.NVarChar(120), String(form_id))
-        .query(`SELECT TOP 1 form_type FROM arion.site_form_config
+        .query(`SELECT TOP 1 form_type, apply_tags, add_to_list_id, marketing_optin
+                  FROM arion.site_form_config
                  WHERE tenant_id=@tenantId AND site_id=@siteId
                    AND form_id=@formId AND is_active=1`);
-      if (cfg.recordset[0]?.form_type) form_type = cfg.recordset[0].form_type;
+      formOutcomeCfg = cfg.recordset[0] || null;
+      // The caller's own type still wins — the plugin knows its own forms best.
+      if (!form_type && formOutcomeCfg?.form_type) form_type = formOutcomeCfg.form_type;
     } catch (e) {
       // Never fail a real submission because the config lookup broke — losing
       // a lead is far worse than mistyping one.
@@ -207,6 +211,76 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
               END`);
         } catch (actErr) {
           console.warn('[submit:form] activity write failed (non-fatal):', actErr.message);
+        }
+      }
+
+      // Do what this form is CONFIGURED to do with the person.
+      //
+      // upsertSparkContact already applies lifecycle:lead and source:web_form,
+      // which say how the contact arrived. It cannot know what the form MEANS —
+      // that a "join our newsletter" form should make somebody a newsletter
+      // subscriber. Without this, a newsletter sign-up produced a contact
+      // indistinguishable from a quote request and there was nothing to send
+      // the newsletter to.
+      //
+      // Behaviour matches LUMEN-API lib/formOutcomes.js, which does the same
+      // job for SPARK-hosted forms. Two services, one meaning: tags by NAME so
+      // the config survives a tag being merged, and best-effort throughout,
+      // because a tag that will not apply must never cost a captured lead.
+      if (contactUuid && formOutcomeCfg) {
+        try {
+          let cfgTags = [];
+          try {
+            const parsed = JSON.parse(formOutcomeCfg.apply_tags || '[]');
+            if (Array.isArray(parsed)) cfgTags = parsed.map(String).map(t => t.trim()).filter(Boolean);
+          } catch { /* malformed config must not cost the lead */ }
+
+          const tenantLower = String(tenantId).toLowerCase();
+          for (const tagName of cfgTags) {
+            await new sql.Request(transaction)
+              .input('tid', sql.NVarChar, tenantLower)
+              .input('name', sql.NVarChar, tagName)
+              .input('uuid', sql.UniqueIdentifier, contactUuid)
+              .query(`
+                MERGE lumen.tag AS t
+                USING (SELECT @tid AS tenant_id, @name AS name) AS s
+                  ON LOWER(t.tenant_id) = s.tenant_id AND t.name = s.name
+                WHEN NOT MATCHED THEN INSERT (tenant_id, name) VALUES (s.tenant_id, s.name);
+
+                INSERT INTO lumen.contact_tag (contact_id, tag_id)
+                SELECT c.id, t.id
+                  FROM lumen.contact c
+                  JOIN lumen.tag t ON LOWER(t.tenant_id) = @tid AND t.name = @name
+                 WHERE LOWER(c.tenant_id) = @tid AND c.legacy_oliver_uuid = @uuid
+                   AND NOT EXISTS (SELECT 1 FROM lumen.contact_tag ct
+                                    WHERE ct.contact_id = c.id AND ct.tag_id = t.id);`);
+          }
+
+          if (Number.isFinite(Number(formOutcomeCfg.add_to_list_id))) {
+            await new sql.Request(transaction)
+              .input('tid', sql.NVarChar, tenantLower)
+              .input('listId', sql.Int, Number(formOutcomeCfg.add_to_list_id))
+              .input('uuid', sql.UniqueIdentifier, contactUuid)
+              .query(`
+                INSERT INTO lumen.list_contact (list_id, contact_id)
+                SELECT @listId, c.id
+                  FROM lumen.contact c
+                  JOIN lumen.list l ON l.id = @listId AND LOWER(l.tenant_id) = @tid
+                 WHERE LOWER(c.tenant_id) = @tid AND c.legacy_oliver_uuid = @uuid
+                   AND NOT EXISTS (SELECT 1 FROM lumen.list_contact lc
+                                    WHERE lc.list_id = @listId AND lc.contact_id = c.id);`);
+          }
+
+          if (formOutcomeCfg.marketing_optin) {
+            await new sql.Request(transaction)
+              .input('tid', sql.NVarChar, tenantLower)
+              .input('uuid', sql.UniqueIdentifier, contactUuid)
+              .query(`UPDATE c SET c.marketing_optin = 1, c.updated_at = GETUTCDATE()
+                        FROM lumen.contact c
+                       WHERE LOWER(c.tenant_id) = @tid AND c.legacy_oliver_uuid = @uuid`);
+          }
+        } catch (outErr) {
+          console.warn('[submit:form] form outcomes skipped (non-fatal):', outErr.message);
         }
       }
 
