@@ -256,10 +256,13 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
                                     WHERE ct.contact_id = c.id AND ct.tag_id = t.id);`);
           }
 
-          if (Number.isFinite(Number(formOutcomeCfg.add_to_list_id))) {
+          // Number(null) is 0, so a config with no list would otherwise fire a
+          // pointless insert against list zero on every submission.
+          const cfgListId = formOutcomeCfg.add_to_list_id;
+          if (cfgListId !== null && cfgListId !== undefined && Number(cfgListId) > 0) {
             await new sql.Request(transaction)
               .input('tid', sql.NVarChar, tenantLower)
-              .input('listId', sql.Int, Number(formOutcomeCfg.add_to_list_id))
+              .input('listId', sql.Int, Number(cfgListId))
               .input('uuid', sql.UniqueIdentifier, contactUuid)
               .query(`
                 INSERT INTO lumen.list_contact (list_id, contact_id)
