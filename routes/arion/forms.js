@@ -55,6 +55,7 @@ router.get('/config', async (req, res) => {
       .input('siteId', sql.UniqueIdentifier, siteId)
       .query(`
         SELECT config_id, form_id, form_name, form_type, field_map, is_active,
+               apply_tags, add_to_list_id, marketing_optin,
                created_at, updated_at
         FROM arion.site_form_config
         WHERE tenant_id = @tenantId AND site_id = @siteId
@@ -74,7 +75,8 @@ router.get('/config', async (req, res) => {
 router.post('/config', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { siteId } = req.params;
-  const { form_id, form_name, form_type, field_map, is_active } = req.body;
+  const { form_id, form_name, form_type, field_map, is_active,
+          apply_tags, add_to_list_id, marketing_optin } = req.body;
   if (!form_id) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'form_id is required', status: 400 } });
   }
@@ -90,6 +92,13 @@ router.post('/config', async (req, res) => {
       .input('formType', sql.NVarChar(30), form_type || 'contact')
       .input('fieldMap', sql.NVarChar(sql.MAX), field_map ? JSON.stringify(field_map) : null)
       .input('isActive', sql.Bit, is_active !== false ? 1 : 0)
+      // What should HAPPEN to whoever fills this form in. Tags are stored by
+      // NAME so the config survives a tag being merged or recreated, and reads
+      // as what it means rather than as an id nobody can interpret.
+      .input('applyTags', sql.NVarChar(1000),
+        Array.isArray(apply_tags) ? JSON.stringify(apply_tags.map(String).map(t => t.trim()).filter(Boolean)) : null)
+      .input('addToListId', sql.Int, Number.isFinite(Number(add_to_list_id)) ? Number(add_to_list_id) : null)
+      .input('marketingOptin', sql.Bit, marketing_optin ? 1 : 0)
       .query(`
         MERGE arion.site_form_config AS target
         USING (SELECT @tenantId AS tenant_id, @siteId AS site_id, @formId AS form_id) AS source
@@ -98,12 +107,16 @@ router.post('/config', async (req, res) => {
            AND target.form_id = source.form_id
         WHEN MATCHED THEN
           UPDATE SET form_name = @formName, form_type = @formType, field_map = @fieldMap,
-                     is_active = @isActive, updated_at = SYSDATETIMEOFFSET()
+                     is_active = @isActive, apply_tags = @applyTags,
+                     add_to_list_id = @addToListId, marketing_optin = @marketingOptin,
+                     updated_at = SYSDATETIMEOFFSET()
         WHEN NOT MATCHED THEN
           INSERT (config_id, tenant_id, site_id, form_id, form_name, form_type,
-                  field_map, is_active, created_at, updated_at)
+                  field_map, is_active, apply_tags, add_to_list_id, marketing_optin,
+                  created_at, updated_at)
           VALUES (@configId, @tenantId, @siteId, @formId, @formName, @formType,
-                  @fieldMap, @isActive, SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET());
+                  @fieldMap, @isActive, @applyTags, @addToListId, @marketingOptin,
+                  SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET());
       `);
     res.json({
       data: { config_id: configId, form_id, form_type: form_type || 'contact' },
