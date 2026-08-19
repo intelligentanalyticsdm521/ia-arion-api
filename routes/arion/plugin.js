@@ -131,6 +131,70 @@ async function wpGet(host, path, query = {}) {
   }
 }
 
+/**
+ * GET /arion/plugin/posts/:postId
+ *
+ * One post, WITH its rendered body.
+ *
+ * The list endpoint above deliberately returns only a 300-character excerpt:
+ * pulling full HTML for fifty posts to draw a picker is wasteful, and most of
+ * it is thrown away. But importing a newsletter needs the actual article, and
+ * until now nothing could reach it — the Newsletter Studio's import recorded a
+ * title and a link and had no way to mail what the post said.
+ *
+ * Answers { post_id, title, content_html, excerpt, post_url, published_at }.
+ */
+router.get('/posts/:postId', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const postId = parseInt(req.params.postId, 10);
+  if (!Number.isFinite(postId)) return res.status(400).json({ error: 'bad_post_id' });
+  try {
+    const pool = await getServicesPool();
+    const site = await pickPrimarySite(pool, tenantId, req.query.site_id || null);
+    if (!site) {
+      return res.status(404).json({
+        error: 'no_arion_site',
+        message: 'No ARION-managed WordPress site found for this tenant.',
+      });
+    }
+    const host = resolveSiteHost(site);
+    if (!host) {
+      return res.status(404).json({
+        error: 'no_site_host',
+        message: 'Site row has no domain or wp_admin_url configured.',
+      });
+    }
+
+    const r = await wpGet(host, `/posts/${postId}`, {});
+    if (!r.ok) {
+      return res.status(r.status === 404 ? 404 : 502).json({
+        error: r.status === 404 ? 'post_not_found' : 'wp_fetch_failed',
+        plugin_status: r.status === 404 ? undefined : 'error',
+        details: r.errorText,
+      });
+    }
+    const p = r.data || {};
+    return res.json({
+      ok: true,
+      site_id: site.site_id,
+      post: {
+        post_id: p.id,
+        title: (p.title?.rendered || '').replace(/<[^>]+>/g, '').trim(),
+        // The body, as WordPress renders it. Kept verbatim — the caller decides
+        // how to make it email-safe, because that transformation depends on
+        // where it is going and doing it here would lose the original.
+        content_html: p.content?.rendered || '',
+        excerpt: (p.excerpt?.rendered || '').replace(/<[^>]+>/g, '').trim(),
+        post_url: p.link,
+        published_at: p.date_gmt ? p.date_gmt + 'Z' : p.date,
+      },
+    });
+  } catch (err) {
+    console.error('[arion/plugin/posts/:postId]', err);
+    res.status(500).json({ error: 'internal_error', message: err.message });
+  }
+});
+
 router.get('/posts', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   // 2026-06-13: per-tenant taxonomy override. Default is `both` taxonomies
