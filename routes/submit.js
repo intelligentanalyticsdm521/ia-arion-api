@@ -60,7 +60,12 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.site.site_id;
   let {
-    form_id, form_type = 'contact', submission_key,
+    // No default here any more. Defaulting to 'contact' before consulting
+    // arion.site_form_config meant the configured type could never win — every
+    // submission arrived already typed, so a newsletter sign-up and a "get a
+    // quote" form were indistinguishable downstream. The fallback moved below,
+    // after the lookup.
+    form_id, form_type, submission_key,
     email, first_name, last_name, phone, message,
     raw_fields, fields,            // accept plugin's `fields` as raw_fields alias
     utm_source, utm_medium, utm_campaign
@@ -76,6 +81,32 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
     phone      = phone      || extracted.phone      || null;
     message    = message    || extracted.message    || null;
   }
+  // What KIND of form is this?
+  //
+  // arion.site_form_config exists to answer exactly that — form_id to
+  // form_type, per site — and nothing has ever read it. The caller's own
+  // form_type still wins when it sends one (the plugin knows its own forms
+  // best); the config fills the gap for everything else; 'contact' remains the
+  // last resort, which is what every submission used to be regardless.
+  if (!form_type && form_id) {
+    try {
+      const pool = await getServicesPool();
+      const cfg = await pool.request()
+        .input('tenantId', sql.UniqueIdentifier, tenantId)
+        .input('siteId', sql.UniqueIdentifier, siteId)
+        .input('formId', sql.NVarChar(120), String(form_id))
+        .query(`SELECT TOP 1 form_type FROM arion.site_form_config
+                 WHERE tenant_id=@tenantId AND site_id=@siteId
+                   AND form_id=@formId AND is_active=1`);
+      if (cfg.recordset[0]?.form_type) form_type = cfg.recordset[0].form_type;
+    } catch (e) {
+      // Never fail a real submission because the config lookup broke — losing
+      // a lead is far worse than mistyping one.
+      console.warn('[forms/submit] form config lookup failed:', e.message);
+    }
+  }
+  if (!form_type) form_type = 'contact';
+
   // Store the full submission either way so we don't lose data the
   // pattern matcher didn't recognize.
   if (!raw_fields && fields) raw_fields = fields;
