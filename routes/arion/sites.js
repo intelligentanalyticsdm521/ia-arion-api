@@ -11,7 +11,7 @@ import { createJob, transitionState, getLatestJobForSite, PHASE_PROGRESS } from 
 import { dispatchJob } from '../../lib/workerClient.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
 import { highestBaseTier } from '../../lib/tierCheck.js';
-import { syncSiteTiersFromPurchase } from '../../lib/purchaseTierSync.js';
+import { syncSiteTiersFromPurchase, syncSiteTiersFromTenantSubscription } from '../../lib/purchaseTierSync.js';
 import formsRouter from './forms.js';
 import bookingsRouter from './bookings.js';
 import gbpRouter from './gbp.js';
@@ -418,6 +418,12 @@ router.post('/', async (req, res) => {
       await transaction.rollback();
       throw txErr;
     }
+
+    // Phase B1 (2026-08-22): after the commit, raise arion_tier /
+    // seo_addon_tier from the tenant's Stripe subscription line items when
+    // the arion.tenant row carries one (raise-only, best-effort — never
+    // throws, never rolls back the site).
+    await syncSiteTiersFromTenantSubscription(pool, { tenantId, siteId, source: 'create_site' });
 
     res.status(202).json({
       data: { site_id: siteId, domain, status: 'provisioning', site_token: rawToken },

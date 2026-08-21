@@ -35,6 +35,7 @@ import { getServicesPool } from '../../db/servicesPool.js';
 import { updatePhase, markFailed } from '../../lib/provisioningPhase.js';
 import { firePlatformEvent } from '../../lib/platformEvents.js';
 import { plugin as pluginApi } from '../../lib/pluginClient.js';
+import { BASE_TIER_LADDER, syncSiteTiersFromPurchase } from '../../lib/purchaseTierSync.js';
 
 const router = Router();
 
@@ -90,26 +91,86 @@ function send404SiteNotFound(res) {
  * Helpers
  * ────────────────────────────────────────────────────────────────────── */
 
-async function loadOrCreateSiteRow(pool, tenantId, domain, domainPath) {
+/**
+ * arion.tenant.plan → arion.site.arion_tier. Only a base-ladder word
+ * (lite/standard/pro/business/enterprise) is ever stamped; legacy SEO-ladder
+ * values ('starter', 'growth' — the pre-2026-08-21 webhook default) and
+ * anything unknown return null so nothing false is written.
+ */
+export function arionTierFromTenantPlan(plan) {
+  const p = String(plan ?? '').trim().toLowerCase();
+  return BASE_TIER_LADDER.includes(p) ? p : null;
+}
+
+/**
+ * Exported for tests (fake pool + injected fetchSubscription).
+ *
+ * Phase B1 (2026-08-22): the placeholder INSERT used to write no arion_tier,
+ * so every runner-created site took the column default ('lite' — the column
+ * is NOT NULL DEFAULT 'lite', migration 001) and middleware/requireArionTier.js
+ * then resolved a positive Lite and LOCKED Standard+ surfaces for a paying
+ * Pro/Business tenant. Now: stamp the tenant's plan when it is a base-ladder
+ * word, and raise from the Stripe subscription line items right after the
+ * insert (best-effort — a Stripe/DB hiccup never fails the runner). When the
+ * plan is unmappable the column default still applies (NULL cannot be
+ * written); the purchase sync and migration 053 are the raise path.
+ */
+export async function loadOrCreateSiteRow(pool, tenantId, domain, domainPath, { fetchSubscription } = {}) {
   // Reuse the first site for the tenant if present (1-site cap on lower
-  // tiers; multi-site authority tenants would re-run the wizard per site).
+  // tiers; multi-site Business tenants would re-run the wizard per site).
   const existing = await pool.request()
     .input('tid', sql.UniqueIdentifier, tenantId)
     .query(`SELECT TOP 1 site_id, domain, status_phase FROM arion.site WHERE tenant_id = @tid ORDER BY created_at`);
   if (existing.recordset.length) return existing.recordset[0];
+
+  // Base tier + subscription from the tenant row (written by the Stripe
+  // webhook at checkout). Founder-initiated flows may have no arion.tenant.
+  let tenantPlan = null;
+  let stripeSubscriptionId = null;
+  try {
+    const t = await pool.request()
+      .input('tid', sql.UniqueIdentifier, tenantId)
+      .query(`SELECT TOP 1 [plan], stripe_subscription_id FROM arion.tenant WHERE tenant_id = @tid`);
+    tenantPlan = t.recordset?.[0]?.plan ?? null;
+    stripeSubscriptionId = t.recordset?.[0]?.stripe_subscription_id || null;
+  } catch (e) {
+    console.warn('[runner loadOrCreateSiteRow] arion.tenant lookup failed; site gets the column default:', e?.message);
+  }
+  const arionTier = arionTierFromTenantPlan(tenantPlan);
 
   // Insert a placeholder row so subsequent steps can use the site_id.
   const r = await pool.request()
     .input('tid', sql.UniqueIdentifier, tenantId)
     .input('domain', sql.NVarChar(253), domain || '')
     .input('domainMode', sql.NVarChar(20), domainPath || 'byo')
-    .query(`
+    .input('arionTier', sql.NVarChar(20), arionTier)
+    .query(arionTier ? `
+      DECLARE @sid UNIQUEIDENTIFIER = NEWID();
+      INSERT INTO arion.site (site_id, tenant_id, domain, domain_mode, arion_tier, status_phase, provisioning_state, created_at)
+      VALUES (@sid, @tid, @domain, @domainMode, @arionTier, 'questionnaire_saved', 'queued', SYSDATETIMEOFFSET());
+      SELECT site_id, domain, status_phase FROM arion.site WHERE site_id = @sid;
+    ` : `
       DECLARE @sid UNIQUEIDENTIFIER = NEWID();
       INSERT INTO arion.site (site_id, tenant_id, domain, domain_mode, status_phase, provisioning_state, created_at)
       VALUES (@sid, @tid, @domain, @domainMode, 'questionnaire_saved', 'queued', SYSDATETIMEOFFSET());
       SELECT site_id, domain, status_phase FROM arion.site WHERE site_id = @sid;
     `);
-  return r.recordset[0];
+  const site = r.recordset[0];
+
+  // Raise arion_tier / seo_addon_tier from what the tenant actually bought.
+  // syncSiteTiersFromPurchase never throws; the outer try is belt-and-braces
+  // so nothing here can fail the questionnaire step.
+  if (site?.site_id && stripeSubscriptionId) {
+    try {
+      await syncSiteTiersFromPurchase(pool, {
+        tenantId, siteId: site.site_id, subscriptionId: stripeSubscriptionId, source: 'runner',
+        ...(fetchSubscription ? { fetchSubscription } : {}),
+      });
+    } catch (e) {
+      console.error('[runner loadOrCreateSiteRow] purchase tier sync failed (non-fatal):', e?.message);
+    }
+  }
+  return site;
 }
 
 async function setStatusPhase(pool, siteId, phase, tenantId) {

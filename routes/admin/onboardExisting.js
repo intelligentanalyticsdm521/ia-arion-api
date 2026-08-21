@@ -28,6 +28,7 @@ import { sendOnboardingWelcomeEmail, generateSetupToken } from '../../lib/welcom
 import { upsertTenantInvitation } from '../../lib/tenantInvitations.js';
 import { installPluginsForTier } from '../../lib/pluginStack.js';
 import { stripHostingerOnboardingPlugins, checkWpInstallExists } from '../../lib/hostingerSsh.js';
+import { syncSiteTiersFromTenantSubscription } from '../../lib/purchaseTierSync.js';
 
 const ARION_API_BASE = (process.env.ARION_API_BASE_URL
   || 'https://app-arion-api-prod-e6fuc9gzd8f3hqfe.centralus-01.azurewebsites.net').replace(/\/+$/, '');
@@ -244,6 +245,14 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
              'ready', SYSUTCDATETIME(), SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET())
         `);
       push('site', 'created', `Created arion.site row (${siteId})`);
+
+      // Phase B1 (2026-08-22): raise arion_tier / seo_addon_tier from the
+      // tenant's Stripe subscription line items, if it has one. Most
+      // admin-onboarded tenants have no arion.tenant row / subscription —
+      // the sync then returns immediately. Best-effort, never throws.
+      const tierSync = await syncSiteTiersFromTenantSubscription(pool, { tenantId, siteId, source: 'onboard_existing' });
+      push('tier_sync', tierSync.ok ? (tierSync.updated ? 'updated' : 'skipped') : 'failed',
+        tierSync.skipped || tierSync.error || `arion_tier=${tierSync.arionTier || '-'} seo_addon_tier=${tierSync.seoAddonTier || '-'}`);
     }
 
     // 6. Issue provisioning code (90-day TTL — gives founder plenty of time
