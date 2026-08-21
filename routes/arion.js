@@ -39,6 +39,7 @@ import { runPageSpeedTest } from '../lib/pagespeed.js';
 import { plugin as pluginApi, pluginGet, pluginPost, pluginFetchAll } from '../lib/pluginClient.js';
 import { meetsMinTier } from '../lib/tierCheck.js';
 import { requireSeoAddon } from '../middleware/requireSeoAddon.js';
+import { AI_PROMPT_TIER_LIMITS, AI_PROMPT_ENGINES_BY_TIER, AIRT_ENGINE_BASE_NAMES, AIRT_BASE_NAME_TO_KEY, aiPromptAddDecision } from '../lib/aiPromptPolicy.js';
 import { getKeywordPositions, getProjectCompetitors, getAuditSummary, getProjectKeywords, getSiteOverview, getPositionsHistory, startSiteAudit, addCompetitor as seRankingAddCompetitor, rawRequest as seRankingRaw } from '../lib/seranking.js';
 import { getKeywordData as seRankingKeywordData } from '../lib/serankingData.js';
 import { parsePositions, computeAggregateStats, resolveRange, buildEngineMetaMap, computeDecayingKeywords } from '../lib/serankingParse.js';
@@ -942,8 +943,12 @@ router.get('/seo', async (req, res) => {
       } catch (e) { console.warn('[arion/seo] se_ranking_summary query failed:', e.message); }
     }
 
-    // Enrich breakdowns with real SE Ranking data (Phase 3.5 parser).
-    if (site.se_ranking_project_id) {
+    // Enrich breakdowns with real SE Ranking data (Phase 3.5 parser) — ONLY
+    // for a site with an active paid SEO add-on (Brandon 2026-08-21 §3b: no SE
+    // Ranking call without one). A lapsed add-on keeps its project id; before
+    // this guard every visit to the landing page still burned SE Ranking
+    // calls. Without the add-on the response is the upsell payload only.
+    if (site.se_ranking_project_id && site.seo_addon_tier) {
       const projectId = site.se_ranking_project_id;
       const range = resolveRange('30d');
       const positionsRaw = await seRankingRaw('GET', `/sites/${encodeURIComponent(projectId)}/positions?date_from=${range.current.start}&date_to=${range.current.end}&with_landing_pages=1`);
@@ -2029,46 +2034,18 @@ router.get('/seo/keywords', async (req, res) => {
 // AI Search prompt management (Growth + Authority tiers)
 // ---------------------------------------------------------------------------
 
-// AI prompt cap is 5 TOTAL per tier (revised 2026-06-17, Brandon).
-// A single prompt at Authority can target multiple engines; the cap is the
-// number of distinct prompts, not prompt × engine slots.
-const AI_PROMPT_TIER_LIMITS = {
-  starter: 0,
-  essentials: 0,
-  growth: 5,
-  authority: 5,
-};
-
-// Engines per SEO add-on tier (Brandon 2026-08-21): Growth = Google AI
-// Overviews + Google AI Mode; Authority adds ChatGPT + Gemini. Perplexity is
-// consulting-only. MUST mirror lib/seoOnboarding.js TIER_CONFIG.ai_engines.
-const AI_PROMPT_ENGINES_BY_TIER = {
-  starter: [],
-  essentials: [],
-  growth: ['ai_overview', 'ai_mode'],
-  authority: ['ai_overview', 'ai_mode', 'chatgpt', 'gemini'], // each prompt picks a subset
-};
-
-// SE Ranking AIRT base_name canonical strings (used in the API enum).
-const AIRT_ENGINE_BASE_NAMES = {
-  ai_mode: 'google_ai_mode',
-  chatgpt: 'chatgpt',
-  gemini: 'gemini',
-  perplexity: 'perplexity',
-  ai_overview: 'google_ai_overview',
-};
-
-const AIRT_BASE_NAME_TO_KEY = {
-  google_ai_mode: 'ai_mode',
-  chatgpt: 'chatgpt',
-  gemini: 'gemini',
-  perplexity: 'perplexity',
-  google_ai_overview: 'ai_overview',
-};
+// AI prompt cap is 5 PER ENGINE (Brandon 2026-08-21 — supersedes the
+// 2026-06-17 "5 TOTAL" rule): SE Ranking counts prompt × engine slots, so
+// Growth = 5 × 2 engines (Google AI Overviews + AI Mode) = 10 slots and
+// Authority = the same 5 × 4 engines (+ ChatGPT + Gemini) = 20 slots.
+// Perplexity is consulting-only. Limits, the per-tier engine lists (derived
+// from lib/seoOnboarding.js TIER_CONFIG.ai_engines, so they cannot drift) and
+// the add decision live in lib/aiPromptPolicy.js; the Portal's SeoAIPrompts
+// page renders the same per-engine counters.
 
 // GET /arion/seo/ai-prompts?siteId=...
 // Returns prompts grouped by enabled LLM engine, plus tier metadata.
-// Aggregates across every enabled AI engine on the project.
+// `cap` is the prompt cap PER ENGINE; `total_prompts` sums every engine.
 router.get('/seo/ai-prompts', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { siteId } = req.query;
@@ -2081,7 +2058,7 @@ router.get('/seo/ai-prompts', async (req, res) => {
     const allowedEngines = AI_PROMPT_ENGINES_BY_TIER[tier] || [];
 
     if (!site?.se_ranking_project_id) {
-      return res.json({ data: [], engines: [], brand: null, project_id: null, tier, cap, allowed_engines: allowedEngines, total_prompts: 0 });
+      return res.json({ data: [], engines: [], brand: null, project_id: null, tier, cap, cap_scope: 'per_engine', allowed_engines: allowedEngines, total_prompts: 0 });
     }
 
     const { getAIBrand, listAIEngines, getAllAIPrompts } = await import('../lib/seranking.js');
@@ -2100,6 +2077,7 @@ router.get('/seo/ai-prompts', async (req, res) => {
       project_id: site.se_ranking_project_id,
       tier,
       cap,
+      cap_scope: 'per_engine',
       allowed_engines: allowedEngines,
       total_prompts: totalPrompts,
     });
@@ -2148,7 +2126,7 @@ router.post('/seo/ai-prompts/setup', async (req, res) => {
       }
     }
 
-    res.json({ brand, brand_set: !!brandResult, enabled, skipped, tier, cap: AI_PROMPT_TIER_LIMITS[tier] || 0 });
+    res.json({ brand, brand_set: !!brandResult, enabled, skipped, tier, cap: AI_PROMPT_TIER_LIMITS[tier] || 0, cap_scope: 'per_engine' });
   } catch (err) {
     console.error('[arion/seo/ai-prompts/setup]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
@@ -2159,7 +2137,8 @@ router.post('/seo/ai-prompts/setup', async (req, res) => {
 // Body: { siteId, prompt, engine }
 // Adds a single prompt under one engine. `engine` is one of our internal
 // keys: ai_mode | chatgpt | gemini | perplexity | ai_overview.
-// Enforces tier cap (5 total per project across all engines).
+// Enforces the tier cap PER ENGINE (5 on the selected engine; prompts on the
+// other engines are not counted) — lib/aiPromptPolicy.js.
 router.post('/seo/ai-prompts', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { siteId, prompt, engine } = req.body || {};
@@ -2173,16 +2152,14 @@ router.post('/seo/ai-prompts', async (req, res) => {
       return res.status(400).json({ error: { code: 'NO_PROJECT', message: 'Site has no SE Ranking project', status: 400 } });
     }
     const tier = String(site.seo_addon_tier || '').toLowerCase();
-    const cap = AI_PROMPT_TIER_LIMITS[tier] || 0;
-    if (cap === 0) {
-      return res.status(403).json({ error: { code: 'TIER_NOT_AVAILABLE', message: `AI prompts require Growth or Authority tier. Current: ${tier || 'none'}.`, status: 403 } });
-    }
-    const allowedEngines = AI_PROMPT_ENGINES_BY_TIER[tier];
-    if (!allowedEngines.includes(engine)) {
-      return res.status(400).json({ error: { code: 'INVALID_ENGINE', message: `Engine ${engine} not available at tier ${tier}. Allowed: ${allowedEngines.join(', ')}.`, status: 400 } });
+    // Tier + engine checks first — no SE Ranking call is spent on a request
+    // the tier cannot satisfy (TIER_NOT_AVAILABLE 403 / INVALID_ENGINE 400).
+    const pre = aiPromptAddDecision({ tier, engine });
+    if (!pre.ok) {
+      return res.status(pre.status).json({ error: { code: pre.code, message: pre.message, status: pre.status } });
     }
 
-    const { listAIEngines, getAllAIPrompts, addAIPrompt } = await import('../lib/seranking.js');
+    const { listAIEngines, getAIPrompts, addAIPrompt } = await import('../lib/seranking.js');
 
     // Resolve engine → llm_id (engine must be enabled first via /setup).
     const engines = await listAIEngines(site.se_ranking_project_id, tenantId);
@@ -2191,25 +2168,27 @@ router.post('/seo/ai-prompts', async (req, res) => {
     if (!targetEngine) {
       return res.status(409).json({ error: { code: 'ENGINE_NOT_ENABLED', message: `Engine ${baseName} not yet enabled on this project. POST /seo/ai-prompts/setup first.`, status: 409 } });
     }
+    const llmId = targetEngine.llm_id ?? targetEngine.id;
 
-    // Tier cap is TOTAL across all engines (per locked tier matrix
-    // revised 2026-06-17).
-    const byEngine = await getAllAIPrompts(site.se_ranking_project_id, tenantId);
-    const totalExisting = byEngine.reduce((acc, e) => acc + (Array.isArray(e.prompts) ? e.prompts.length : 0), 0);
-    if (totalExisting >= cap) {
-      return res.status(400).json({ error: { code: 'CAP_EXCEEDED', message: `AI prompt cap reached (${cap}). Remove a prompt first.`, status: 400, cap, existing: totalExisting } });
+    // Cap is PER ENGINE (Brandon 2026-08-21): only the prompts already on the
+    // selected engine count, so an Authority site with 5 on ChatGPT can still
+    // add 5 on Gemini.
+    const existingOnEngine = await getAIPrompts(site.se_ranking_project_id, llmId, {}, tenantId);
+    const decision = aiPromptAddDecision({ tier, engine, existing: Array.isArray(existingOnEngine) ? existingOnEngine.length : 0 });
+    if (!decision.ok) {
+      return res.status(decision.status).json({ error: { code: decision.code, message: decision.message, status: decision.status, cap: decision.cap, existing: decision.existing, engine } });
     }
 
     const result = await addAIPrompt(
       site.se_ranking_project_id,
-      targetEngine.llm_id ?? targetEngine.id,
+      llmId,
       [String(prompt).trim()],
       { tenantId }
     );
     if (!result) {
       return res.status(502).json({ error: { code: 'UPSTREAM_ERROR', message: 'SE Ranking rejected the prompt.', status: 502 } });
     }
-    res.json({ data: result, engine, llm_id: targetEngine.llm_id ?? targetEngine.id });
+    res.json({ data: result, engine, llm_id: llmId });
   } catch (err) {
     console.error('[arion/seo/ai-prompts POST]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });

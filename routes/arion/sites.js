@@ -11,6 +11,7 @@ import { createJob, transitionState, getLatestJobForSite, PHASE_PROGRESS } from 
 import { dispatchJob } from '../../lib/workerClient.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
 import { highestBaseTier } from '../../lib/tierCheck.js';
+import { syncSiteTiersFromPurchase } from '../../lib/purchaseTierSync.js';
 import formsRouter from './forms.js';
 import bookingsRouter from './bookings.js';
 import gbpRouter from './gbp.js';
@@ -74,15 +75,15 @@ router.post('/provision', async (req, res) => {
     // Resolve the BASE ARION tier (lite/standard/pro/business/enterprise) —
     // NOT seo_addon_tier. Two sources, both written at signup:
     //   arion.tenant.plan      — the plan key from Stripe checkout metadata
-    //   arion.site.arion_tier  — per site; founder-provisioned sites carry the
-    //                            real tier, self-serve rows inherit the column
-    //                            default ('lite') because the webhook never
-    //                            sets it.
+    //   arion.site.arion_tier  — per site; written by the Stripe webhook and
+    //                            by this route via lib/purchaseTierSync.js.
+    //                            Rows from before 2026-08-21 still carry the
+    //                            column default ('lite').
     // Take the HIGHEST of the two so a self-serve Business tenant is not
-    // capped by the 'lite' default on its first site row.
+    // capped by the 'lite' default on an older first site row.
     const tenantRow = await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
-      .query(`SELECT TOP 1 [plan], primary_email FROM arion.tenant WHERE tenant_id = @tenantId`);
+      .query(`SELECT TOP 1 [plan], primary_email, stripe_subscription_id FROM arion.tenant WHERE tenant_id = @tenantId`);
     const tenantEmail = tenantRow.recordset[0]?.primary_email || '';
     const siteTierRows = await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
@@ -163,12 +164,14 @@ router.post('/provision', async (req, res) => {
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('domain', sql.NVarChar(253), domain.domain)
       .input('domainMode', sql.NVarChar(20), domain.mode)
-      // `tier` keeps its legacy value shape ('starter' when unresolved —
-      // lib/integrationKickoff.js + lib/manifestBuilder.js read it). The new
-      // row also carries the resolved BASE tier in arion_tier so later
-      // add-site calls + middleware/requireArionTier.js resolve it per site
-      // instead of inheriting the column default.
-      .input('tier', sql.NVarChar(40), tenantTier || 'starter')
+      // arion_tier = the resolved BASE tier so later add-site calls +
+      // middleware/requireArionTier.js resolve it per site. `tier` is the
+      // SEO-ladder column (lib/integrationKickoff.js + lib/manifestBuilder.js
+      // read it as starter/…/authority): it stays NULL here and is filled,
+      // together with seo_addon_tier, by the purchase sync below when the
+      // subscription carries an 'ARION SEO - <Tier>' line item. A base word
+      // must never land in it.
+      .input('tier', sql.NVarChar(40), null)
       .input('arionTier', sql.NVarChar(20), tenantTier || 'lite')
       .input('hostingerWebsiteId', sql.NVarChar(80), String(websiteId || ''))
       .input('wpAdminUrl', sql.NVarChar(500), wpAdminUrl)
@@ -181,6 +184,14 @@ router.post('/provision', async (req, res) => {
           (@siteId, @tenantId, @domain, @domainMode, @tier, @arionTier, @hostingerWebsiteId,
            @wpAdminUrl, @primaryColor, 'queued', SYSDATETIMEOFFSET())
       `);
+
+    // SEO add-on + base tier from the tenant's Stripe subscription line items
+    // (raise-only, best-effort — a Stripe failure never blocks the build; the
+    // next invoice.paid / subscription.updated re-syncs).
+    const stripeSubscriptionId = tenantRow.recordset[0]?.stripe_subscription_id || null;
+    if (stripeSubscriptionId) {
+      await syncSiteTiersFromPurchase(pool, { tenantId, siteId, subscriptionId: stripeSubscriptionId, source: 'add_site' });
+    }
 
     // Build prompt + provisioning code
     const { prompt } = buildAiPrompt(answers);

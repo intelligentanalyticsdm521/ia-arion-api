@@ -12,10 +12,11 @@
 // req.path is RELATIVE to /seo ('/rankings', '/project/create', '/').
 //
 // Deliberately NOT gated (pass straight through):
-//   GET /seo          — the SEO landing / upsell card. It only touches SE
-//                       Ranking when se_ranking_project_id is set and it is
-//                       the surface that SELLS the add-on (routes/arion.js
-//                       GET /seo).
+//   GET /seo          — the SEO landing / upsell card — the surface that SELLS
+//                       the add-on. It touches SE Ranking only when BOTH
+//                       se_ranking_project_id AND seo_addon_tier are set
+//                       (guarded in-route, routes/arion.js GET /seo); without
+//                       the add-on it returns the upsell payload only.
 //   /seo/project/*    — provisioning (create / reconfigure / link). These run
 //                       when the add-on is purchased and already answer
 //                       400 NO_TIER without seo_addon_tier.

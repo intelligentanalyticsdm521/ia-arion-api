@@ -9,8 +9,12 @@
  *   checkout.session.completed     → payment succeeded; create tenant + site,
  *                                    enqueue provisioning job
  *   customer.subscription.deleted  → mark tenant cancelled
- *   customer.subscription.updated  → if status flips inactive, mark site paused
+ *   customer.subscription.updated  → if status flips inactive, mark site paused;
+ *                                    while active, re-sync the site tier columns
  *   invoice.payment_failed         → flag account as past_due
+ *   invoice.paid                   → raise arion.site arion_tier / seo_addon_tier
+ *                                    from the subscription's line items
+ *                                    (lib/purchaseTierSync.js)
  *
  * The handler is intentionally idempotent — duplicate events should be
  * harmless. We use the Stripe event ID as a dedupe key on the platform_event
@@ -32,6 +36,7 @@ import { getPlan } from '../../lib/pricing.js';
 import { getPlatformPool } from '../../db/platformPool.js';
 import { resolveTenantForBuyer, enableServiceForTenant } from '../../lib/coreTenants.js';
 import { seedDefaultTasksForTenant } from '../../lib/walkthroughClient.js';
+import { syncSiteTiersFromPurchase, syncTenantBySubscription, seoAddonTierFromMetadata, baseTierFromMetadata } from '../../lib/purchaseTierSync.js';
 
 const router = Router();
 
@@ -80,6 +85,9 @@ router.post('/', express.raw({ type: 'application/json', limit: '1mb' }), async 
         break;
       case 'invoice.payment_failed':
         await handlePaymentFailed(pool, event.data.object);
+        break;
+      case 'invoice.paid':
+        await handleInvoicePaid(pool, event.data.object);
         break;
       default:
         // Acknowledge but ignore — Stripe sends many event types we don't act on.
@@ -161,6 +169,9 @@ async function handleCheckoutCompleted(pool, session) {
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .query(`SELECT TOP 1 site_id FROM arion.site WHERE tenant_id = @tenantId ORDER BY created_at DESC`);
     siteId = siteRow.recordset[0]?.site_id;
+    // Replayed event: the rows exist, but the tier sync may have failed the
+    // first time (Stripe fetch). Re-run it — raise-only, so idempotent.
+    await syncSiteTiersFromPurchase(pool, { tenantId, siteId: siteId || null, metadata: meta, subscriptionId: session.subscription || null, source: 'checkout.completed(replay)' });
   } else {
     // STRUCTURAL ORPHAN FIX (2026-06-20, multi-agent diagnosis):
     // Previously this branch did `tenantId = crypto.randomUUID()` blind and
@@ -212,18 +223,36 @@ async function handleCheckoutCompleted(pool, session) {
           (@tenantId, @email, @plan, @billingCycle, @stripeCustomerId, @stripeSubscriptionId, 'pending_onboarding', SYSDATETIMEOFFSET())
       `);
 
+    // Tier columns (2026-08-21): arion_tier = the BASE plan (lite/standard/
+    // pro/business); seo_addon_tier + the legacy `tier` column = the SEO
+    // add-on ladder, NULL when none was bought. Metadata is read here; the
+    // subscription's line items ('ARION - <Tier>' / 'ARION SEO - <Tier>') are
+    // applied by the sync right after the insert. Before this the BASE key
+    // landed in `tier` and arion_tier kept its 'lite' default on every
+    // self-serve row, so requireArionTier resolved every buyer as Lite and
+    // requireSeoAddon 403'd paying SEO customers.
+    const seoTierFromMeta = seoAddonTierFromMetadata(meta);
+    const baseTierFromMeta = baseTierFromMetadata(meta);
     await pool.request()
       .input('siteId', sql.UniqueIdentifier, siteId)
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('domain', sql.NVarChar(253), meta.domain_name || '')
       .input('domainMode', sql.NVarChar(20), meta.domain_mode || 'byod')
-      .input('tier', sql.NVarChar(40), meta.plan || 'starter')
+      .input('tier', sql.NVarChar(40), seoTierFromMeta)
+      .input('seoAddonTier', sql.NVarChar(20), seoTierFromMeta)
+      .input('arionTier', sql.NVarChar(20), baseTierFromMeta || 'lite')
       .query(`
         INSERT INTO arion.site
-          (site_id, tenant_id, domain, domain_mode, tier, provisioning_state, created_at)
+          (site_id, tenant_id, domain, domain_mode, tier, seo_addon_tier, arion_tier, provisioning_state, created_at)
         VALUES
-          (@siteId, @tenantId, @domain, @domainMode, @tier, 'awaiting_questionnaire', SYSDATETIMEOFFSET())
+          (@siteId, @tenantId, @domain, @domainMode, @tier, @seoAddonTier, @arionTier, 'awaiting_questionnaire', SYSDATETIMEOFFSET())
       `);
+
+    // Line-item derivation — the only tier source for carts built by
+    // oliver-api /signup/checkout-cart (no per-product metadata). Best-effort:
+    // it never throws, so a Stripe hiccup cannot make Stripe retry the event
+    // and duplicate the un-guarded insert above.
+    await syncSiteTiersFromPurchase(pool, { tenantId, siteId, metadata: meta, subscriptionId: session.subscription || null, source: 'checkout.completed' });
 
     // Enable the ARION service so the buyer can actually USE ARION after login.
     // requireArionAccess 403s every arion-api call unless core.tenant_services
@@ -339,7 +368,15 @@ async function handleSubscriptionDeleted(pool, sub) {
 }
 
 async function handleSubscriptionUpdated(pool, sub) {
-  // Only act on inactive transitions; active-to-active no-ops are ignored.
+  // Active subscription changed — an in-app upgrade (oliver-api /billing/
+  // change swaps the line items) or a renewal: re-derive the site tier
+  // columns from the current line items. Raise-only + best-effort; returns
+  // without a Stripe call when no arion.tenant owns the subscription.
+  if (['active', 'trialing'].includes(sub.status)) {
+    await syncTenantBySubscription(pool, { subscriptionId: sub.id, source: 'subscription.updated' });
+    return;
+  }
+  // Inactive transitions below; other statuses are ignored.
   if (['canceled', 'unpaid', 'incomplete_expired', 'past_due'].includes(sub.status)) {
     const r = await pool.request()
       .input('subId', sql.NVarChar(200), sub.id)
@@ -415,6 +452,16 @@ async function mirrorCancellationToLumen(tenantId, email) {
   } catch (err) {
     console.warn(`[#255-B] mirrorCancellationToLumen soft-failure:`, err?.message || err);
   }
+}
+
+// invoice.paid — first invoice or renewal: make sure the site tier columns
+// reflect the subscription's current line items. Covers a checkout.completed
+// whose Stripe fetch failed and in-app SEO add-on purchases. No-op (one DB
+// lookup, no Stripe call) for subscriptions that own no arion.tenant.
+async function handleInvoicePaid(pool, invoice) {
+  const subId = typeof invoice.subscription === 'object' ? invoice.subscription?.id : invoice.subscription;
+  if (!subId) return;
+  await syncTenantBySubscription(pool, { subscriptionId: subId, source: 'invoice.paid' });
 }
 
 async function handlePaymentFailed(pool, invoice) {
