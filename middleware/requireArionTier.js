@@ -50,8 +50,10 @@ const PATH_MIN_TIER = [
   { re: /\/(gbp|business-profile|google-business)\b/i, tier: 'pro' },
   { re: /\/intelligence\b/i, tier: 'pro' },
 
-  // BUSINESS — Market Monitor
-  { re: /\/(market-monitor|marketmonitor)\b/i, tier: 'business' },
+  // BUSINESS — nothing base-gated today. Market Monitor left the Business
+  // base tier on 2026-08-21 (it runs on SE Ranking page-change monitoring, so
+  // it is an SEO add-on surface, Authority only — gated on seo_addon_tier in
+  // routes/arion.js /seo/market-monitor*, not here).
 ];
 
 async function resolveArionTier(req) {

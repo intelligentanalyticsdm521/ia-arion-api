@@ -10,6 +10,7 @@ import { createWebsite } from '../../lib/hostinger.js';
 import { createJob, transitionState, getLatestJobForSite, PHASE_PROGRESS } from '../../lib/provisioningJobs.js';
 import { dispatchJob } from '../../lib/workerClient.js';
 import { createProvisionCode } from '../../lib/provisionCodes.js';
+import { highestBaseTier } from '../../lib/tierCheck.js';
 import formsRouter from './forms.js';
 import bookingsRouter from './bookings.js';
 import gbpRouter from './gbp.js';
@@ -23,12 +24,19 @@ import { completeWalkthroughTaskByKind } from '../../lib/walkthroughClient.js';
 
 const router = Router();
 
-// Site limits per tier — used for "add another site" gating
-const TIER_SITE_LIMITS = {
-  starter: 1,
-  essentials: 1,
-  growth: 1,
-  authority: 3,
+// Site limits per BASE ARION tier (lite/standard/pro/business/enterprise) —
+// used for "add another site" gating. Re-keyed 2026-08-21 (Brandon): the
+// old keys were the SEO add-on ladder (starter/…/authority), which is a
+// separate purchase and says nothing about how many websites a plan
+// includes. Business includes 3 sites (+$29.99/mo per additional site — no
+// self-serve purchase path exists yet, so 3 is the hard cap until it does);
+// Enterprise is uncapped (null). Unresolved tier → never denied (see gate).
+export const TIER_SITE_LIMITS = {
+  lite: 1,
+  standard: 1,
+  pro: 1,
+  business: 3,
+  enterprise: null,
 };
 
 // Mount sub-routers for site-scoped resources
@@ -63,25 +71,46 @@ router.post('/provision', async (req, res) => {
   try {
     const pool = await getServicesPool();
 
-    // Resolve tenant tier + email from arion.tenant (created at signup time).
-    // If the tenant existed before the signup flow shipped, fall back to starter.
+    // Resolve the BASE ARION tier (lite/standard/pro/business/enterprise) —
+    // NOT seo_addon_tier. Two sources, both written at signup:
+    //   arion.tenant.plan      — the plan key from Stripe checkout metadata
+    //   arion.site.arion_tier  — per site; founder-provisioned sites carry the
+    //                            real tier, self-serve rows inherit the column
+    //                            default ('lite') because the webhook never
+    //                            sets it.
+    // Take the HIGHEST of the two so a self-serve Business tenant is not
+    // capped by the 'lite' default on its first site row.
     const tenantRow = await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .query(`SELECT TOP 1 [plan], primary_email FROM arion.tenant WHERE tenant_id = @tenantId`);
-    const tenantTier = String(tenantRow.recordset[0]?.plan || 'starter').toLowerCase();
     const tenantEmail = tenantRow.recordset[0]?.primary_email || '';
+    const siteTierRows = await pool.request()
+      .input('tenantId', sql.UniqueIdentifier, tenantId)
+      .query(`SELECT arion_tier FROM arion.site WHERE tenant_id = @tenantId AND arion_tier IS NOT NULL`);
+    const tenantTier = highestBaseTier([
+      tenantRow.recordset[0]?.plan,
+      ...siteTierRows.recordset.map((r) => r.arion_tier),
+    ]);
 
-    // Site-limit gate
+    // Site-limit gate — keyed to the BASE tier (Brandon 2026-08-21):
+    // Lite/Standard/Pro = 1 site, Business = 3 included, Enterprise = no cap.
+    // An UNRESOLVED tier (no tenant row, no site rows, unknown value) is never
+    // denied — allow + log, per the standing fail-open rule.
     const siteCountRes = await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .query(`SELECT COUNT(*) AS site_count FROM arion.site WHERE tenant_id = @tenantId`);
     const siteCount = siteCountRes.recordset[0]?.site_count || 0;
-    const limit = TIER_SITE_LIMITS[tenantTier] ?? 1;
-    if (siteCount >= limit) {
+    const limit = tenantTier ? TIER_SITE_LIMITS[tenantTier] : null;
+    if (!tenantTier) {
+      console.error(`[arion/sites/provision] base tier unresolved for tenant ${tenantId}; allowing (site_count=${siteCount})`);
+    } else if (limit != null && siteCount >= limit) {
+      const tierLabel = tenantTier.charAt(0).toUpperCase() + tenantTier.slice(1);
       return res.status(403).json({
         error: {
           code: 'SITE_LIMIT_REACHED',
-          message: `Your ${tenantTier} plan supports up to ${limit} site(s). Upgrade to Authority for additional sites.`,
+          message: tenantTier === 'business'
+            ? `Your Business plan includes ${limit} sites. Additional sites are $29.99/mo each — contact us to add one.`
+            : `Your ${tierLabel} plan includes ${limit} site. Upgrade to Business for 3 sites (+$29.99/mo per additional site).`,
           status: 403,
           details: { current: siteCount, limit, tier: tenantTier },
         },
@@ -134,16 +163,22 @@ router.post('/provision', async (req, res) => {
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('domain', sql.NVarChar(253), domain.domain)
       .input('domainMode', sql.NVarChar(20), domain.mode)
-      .input('tier', sql.NVarChar(40), tenantTier)
+      // `tier` keeps its legacy value shape ('starter' when unresolved —
+      // lib/integrationKickoff.js + lib/manifestBuilder.js read it). The new
+      // row also carries the resolved BASE tier in arion_tier so later
+      // add-site calls + middleware/requireArionTier.js resolve it per site
+      // instead of inheriting the column default.
+      .input('tier', sql.NVarChar(40), tenantTier || 'starter')
+      .input('arionTier', sql.NVarChar(20), tenantTier || 'lite')
       .input('hostingerWebsiteId', sql.NVarChar(80), String(websiteId || ''))
       .input('wpAdminUrl', sql.NVarChar(500), wpAdminUrl)
       .input('primaryColor', sql.NVarChar(20), answers.primaryColor || null)
       .query(`
         INSERT INTO arion.site
-          (site_id, tenant_id, domain, domain_mode, tier, hostinger_website_id,
+          (site_id, tenant_id, domain, domain_mode, tier, arion_tier, hostinger_website_id,
            wp_admin_url, branding_primary_color, provisioning_state, created_at)
         VALUES
-          (@siteId, @tenantId, @domain, @domainMode, @tier, @hostingerWebsiteId,
+          (@siteId, @tenantId, @domain, @domainMode, @tier, @arionTier, @hostingerWebsiteId,
            @wpAdminUrl, @primaryColor, 'queued', SYSDATETIMEOFFSET())
       `);
 

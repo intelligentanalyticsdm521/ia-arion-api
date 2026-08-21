@@ -35,8 +35,14 @@ async function getSiteForTenant(pool, tenantId, siteId) {
 
 // ─── helper: gather all the single-source data the calculators need ─────
 async function buildIntelContext({ site, tenantId }) {
-  const seRankingProjectId = site?.se_ranking_project_id || null;
-  const seRankingAuditId = site?.se_ranking_audit_id || null;
+  // SE Ranking cost gate (Brandon 2026-08-21): no SE Ranking call for a site
+  // without an active paid SEO add-on. A site can still carry a project id
+  // from a cancelled add-on; without seo_addon_tier the calculators must see
+  // SE Ranking as not connected (they then report the "Add the IA SEO
+  // package" data gap instead of spending API calls).
+  const hasSeoAddon = !!site?.seo_addon_tier;
+  const seRankingProjectId = hasSeoAddon ? (site?.se_ranking_project_id || null) : null;
+  const seRankingAuditId = hasSeoAddon ? (site?.se_ranking_audit_id || null) : null;
   const tier = (site?.seo_addon_tier || '').toLowerCase() || 'starter';
 
   // GSC dates — only fetched when the site has a GSC oauth refresh token

@@ -38,6 +38,7 @@ import { getDomainInfo, getDnsRecords, createDnsRecords, deleteDnsRecords, getSs
 import { runPageSpeedTest } from '../lib/pagespeed.js';
 import { plugin as pluginApi, pluginGet, pluginPost, pluginFetchAll } from '../lib/pluginClient.js';
 import { meetsMinTier } from '../lib/tierCheck.js';
+import { requireSeoAddon } from '../middleware/requireSeoAddon.js';
 import { getKeywordPositions, getProjectCompetitors, getAuditSummary, getProjectKeywords, getSiteOverview, getPositionsHistory, startSiteAudit, addCompetitor as seRankingAddCompetitor, rawRequest as seRankingRaw } from '../lib/seranking.js';
 import { getKeywordData as seRankingKeywordData } from '../lib/serankingData.js';
 import { parsePositions, computeAggregateStats, resolveRange, buildEngineMetaMap, computeDecayingKeywords } from '../lib/serankingParse.js';
@@ -66,6 +67,14 @@ router.use('/bing', requireArionTenantAdmin);
 router.use('/seo/project/reconfigure', requireArionTenantAdmin);
 router.use('/sites/:siteId/gbp', requireArionTenantAdmin);
 router.use('/sites/:siteId/plugin', requireArionTenantAdmin);
+
+// SE Ranking cost gate (Brandon 2026-08-21): no SE Ranking API call for a site
+// without an active paid SEO add-on. Every /seo/* surface that reaches SE
+// Ranking (keywords, rankings, overview, audit, competitors, AI prompts / AI
+// search, decay, diagnostic, Market Monitor) is gated on
+// arion.site.seo_addon_tier here. GET /seo (the upsell card) and /seo/project/*
+// (provisioning) pass through — see middleware/requireSeoAddon.js.
+router.use('/seo', requireSeoAddon());
 
 // Sub-routers for site-scoped data (blueprint routes)
 router.use('/sites/:siteId/forms', formsRouter);
@@ -2030,11 +2039,14 @@ const AI_PROMPT_TIER_LIMITS = {
   authority: 5,
 };
 
+// Engines per SEO add-on tier (Brandon 2026-08-21): Growth = Google AI
+// Overviews + Google AI Mode; Authority adds ChatGPT + Gemini. Perplexity is
+// consulting-only. MUST mirror lib/seoOnboarding.js TIER_CONFIG.ai_engines.
 const AI_PROMPT_ENGINES_BY_TIER = {
   starter: [],
   essentials: [],
-  growth: ['ai_mode'],                       // Google AI Mode only
-  authority: ['ai_mode', 'chatgpt', 'gemini'], // All three; each prompt picks subset
+  growth: ['ai_overview', 'ai_mode'],
+  authority: ['ai_overview', 'ai_mode', 'chatgpt', 'gemini'], // each prompt picks a subset
 };
 
 // SE Ranking AIRT base_name canonical strings (used in the API enum).
@@ -2112,7 +2124,7 @@ router.post('/seo/ai-prompts/setup', async (req, res) => {
     const tier = String(site.seo_addon_tier || '').toLowerCase();
     const allowedEngines = AI_PROMPT_ENGINES_BY_TIER[tier] || [];
     if (allowedEngines.length === 0) {
-      return res.status(403).json({ error: { code: 'TIER_NOT_AVAILABLE', message: `AI Search is available at Growth (Google AI Mode) and Authority (+ChatGPT + Gemini). Current tier: ${tier || 'none'}.`, status: 403 } });
+      return res.status(403).json({ error: { code: 'TIER_NOT_AVAILABLE', message: `AI Search is available at Growth (Google AI Overviews + AI Mode) and Authority (+ ChatGPT + Gemini). Current tier: ${tier || 'none'}.`, status: 403 } });
     }
 
     const { setAIBrand, listAIEngines, enableAIEngine } = await import('../lib/seranking.js');
@@ -4036,12 +4048,19 @@ router.get('/seo/ai-search', async (req, res) => {
   const rangeCode = (req.query.range || '30d').toString().toLowerCase();
   if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
 
+  // Engine → minimum SEO add-on tier (Brandon 2026-08-21): Growth = Google AI
+  // Overviews + AI Mode; Authority adds ChatGPT + Gemini; Perplexity is
+  // consulting-only. Mirrors AI_PROMPT_ENGINES_BY_TIER. SE Ranking reports
+  // base_name as `google_ai_mode` / `google_ai_overview`, so normalise through
+  // AIRT_BASE_NAME_TO_KEY first — the bare `ai_mode` compare never matched the
+  // live value and Google AI Mode fell through to the Authority default.
   const AI_ENGINE_META = (baseName) => {
-    const n = String(baseName || '').toLowerCase();
-    if (n === 'chatgpt') return { label: 'ChatGPT', tierRequired: 'growth' };
-    if (n === 'gemini') return { label: 'Gemini', tierRequired: 'growth' };
+    const raw = String(baseName || '').toLowerCase();
+    const n = AIRT_BASE_NAME_TO_KEY[raw] || raw;
+    if (n === 'chatgpt') return { label: 'ChatGPT', tierRequired: 'authority' };
+    if (n === 'gemini') return { label: 'Gemini', tierRequired: 'authority' };
     if (n === 'ai_mode' || n === 'aimode') return { label: 'Google AI Mode', tierRequired: 'growth' };
-    if (n === 'ai_overview' || n === 'aioverview') return { label: 'Google AI Overview', tierRequired: 'authority' };
+    if (n === 'ai_overview' || n === 'aioverview') return { label: 'Google AI Overview', tierRequired: 'growth' };
     if (n === 'perplexity') return { label: 'Perplexity', tierRequired: 'consulting' };
     return { label: baseName || 'AI Engine', tierRequired: 'authority' };
   };
@@ -4091,7 +4110,7 @@ router.get('/seo/ai-search', async (req, res) => {
     await Promise.all(llms.map(async (llm) => {
       const baseName = String(llm.base_name || '').toLowerCase();
       const meta = AI_ENGINE_META(baseName);
-      // tier unlock: growth unlocks chatgpt/gemini/ai_mode; authority adds ai_overview
+      // tier unlock: growth = Google AI Overviews + AI Mode; authority adds ChatGPT + Gemini
       const minRank = meta.tierRequired === 'growth' ? 2 : meta.tierRequired === 'authority' ? 3 : 99;
       const unlocked = tierRank >= minRank;
 
