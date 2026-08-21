@@ -19,9 +19,11 @@
 --                     the value.
 --
 -- This migration backfills, it never changes shape:
---   (a) tier        := seo_addon_tier where tier is NULL and seo_addon_tier is
---                      a ladder word (so the legacy readers see the SEO rung
---                      the customer actually bought, not 'starter').
+--   (a) tier        := seo_addon_tier where tier is NULL — or carries a BASE
+--                      word (one prod site had tier='business', a leak from the
+--                      old webhook) — and seo_addon_tier is a ladder word (so
+--                      the legacy readers see the SEO rung the customer
+--                      actually bought, not 'starter').
 --   (b) arion_tier  := LOWER(arion.tenant.plan) where the tenant's plan is a
 --                      base-ladder word HIGHER than the site's current value.
 --                      Raise-only (same rule as lib/purchaseTierSync.js):
@@ -39,7 +41,7 @@
 UPDATE arion.site
    SET tier = seo_addon_tier,
        updated_at = SYSDATETIMEOFFSET()
- WHERE tier IS NULL
+ WHERE (tier IS NULL OR LOWER(tier) IN ('lite', 'standard', 'pro', 'business', 'enterprise'))
    AND LOWER(seo_addon_tier) IN ('starter', 'essentials', 'growth', 'authority');
 GO
 
