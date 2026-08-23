@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { errorLogObserver } from './middleware/errorLogObserver.js';
 import cors from 'cors';
 import express from 'express';
 
@@ -79,6 +80,9 @@ app.use((req, res, next) => (req.method === 'OPTIONS' ? res.sendStatus(204) : ne
 app.use('/onboarding/webhook', onboardingWebhookRouter);
 
 app.use(express.json({ limit: '2mb' }));
+
+// Sept-A F7: passive >=400 observer -> core.error_log.
+app.use(errorLogObserver('arion'));
 
 const startedAt = new Date().toISOString();
 app.get('/__meta', (req, res) => {
