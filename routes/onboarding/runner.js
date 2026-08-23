@@ -35,6 +35,7 @@ import { getServicesPool } from '../../db/servicesPool.js';
 import { updatePhase, markFailed } from '../../lib/provisioningPhase.js';
 import { firePlatformEvent } from '../../lib/platformEvents.js';
 import { plugin as pluginApi } from '../../lib/pluginClient.js';
+import { mergedInternalIps } from '../../lib/internalTraffic.js';
 import { BASE_TIER_LADDER, syncSiteTiersFromPurchase } from '../../lib/purchaseTierSync.js';
 
 const router = Router();
@@ -575,7 +576,9 @@ router.post('/push-ga4-measurement-id', async (req, res) => {
       return res.status(409).json({ error: { code: 'no_ga4_measurement_id', message: 'arion.site.ga4_measurement_id is not set — provision GA4 first', status: 409 } });
     }
 
-    const pushRes = await pluginApi.ga4MeasurementIdSet(site, { measurement_id });
+    // Sept-A F4: carry the merged internal-traffic exclusion list on every
+    // GA4 config push so a fresh site starts filtered from day one.
+    const pushRes = await pluginApi.ga4MeasurementIdSet(site, { measurement_id, internal_ip_list: mergedInternalIps(site) });
     const pushed_at = new Date().toISOString();
     await firePlatformEvent(pool, {
       tenantId: tid,

@@ -16,7 +16,6 @@ import formsRouter from './forms.js';
 import bookingsRouter from './bookings.js';
 import gbpRouter from './gbp.js';
 import integrationsRouter from './integrations.js';
-import domainsRouter from './domains.js';
 // Onboarding V3 Phase 3 (Batch 14+) — close the "Set up a custom domain"
 // walkthrough task when a BYOD site's nameservers have propagated to
 // Hostinger (the moment ARION will actually start the build). Cross-product
@@ -45,7 +44,6 @@ router.use('/:siteId/forms', formsRouter);
 router.use('/:siteId/bookings', bookingsRouter);
 router.use('/:siteId/gbp', gbpRouter);
 router.use('/:siteId', integrationsRouter);
-router.use('/:siteId/domain', domainsRouter);
 
 // ---------------------------------------------------------------------------
 // POST /arion/sites/provision

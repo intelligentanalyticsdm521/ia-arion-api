@@ -37,6 +37,7 @@ import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing, li
 import { getDomainInfo, getDnsRecords, createDnsRecords, deleteDnsRecords, getSslStatus, getWpSiteInfo, getWpPages, getWpPosts, getWpPlugins } from '../lib/hostinger.js';
 import { runPageSpeedTest } from '../lib/pagespeed.js';
 import { plugin as pluginApi, pluginGet, pluginPost, pluginFetchAll } from '../lib/pluginClient.js';
+import { effectiveInternalIps, mergedInternalIps, siteInternalIps, platformInternalIps, isValidIpOrCidr, callerIp, normalizeIp } from '../lib/internalTraffic.js';
 import { meetsMinTier } from '../lib/tierCheck.js';
 import { requireSeoAddon } from '../middleware/requireSeoAddon.js';
 import { AI_PROMPT_TIER_LIMITS, AI_PROMPT_ENGINES_BY_TIER, AIRT_ENGINE_BASE_NAMES, AIRT_BASE_NAME_TO_KEY, aiPromptAddDecision } from '../lib/aiPromptPolicy.js';
@@ -47,7 +48,6 @@ import formsRouter from './arion/forms.js';
 import bookingsRouter from './arion/bookings.js';
 import gbpRouter from './arion/gbp.js';
 import integrationsRouter from './arion/integrations.js';
-import domainsRouter from './arion/domains.js';
 import pluginRouter from './arion/plugin.js';
 import blocksRouter from './arion/blocks.js';
 import intelligenceRouter from './arion/intelligence.js';
@@ -82,7 +82,6 @@ router.use('/sites/:siteId/forms', formsRouter);
 router.use('/sites/:siteId/bookings', bookingsRouter);
 router.use('/sites/:siteId/gbp', gbpRouter);
 router.use('/sites/:siteId', integrationsRouter);
-router.use('/sites/:siteId/domain', domainsRouter);
 // ARION IL Website Builder — block-emitter generation + draft persistence.
 // See lib/websiteBuilder/ + db/migrations/024_ai_website_builder.sql.
 router.use('/sites/:siteId/blocks', blocksRouter);
@@ -387,7 +386,9 @@ router.post('/sites/:siteId/plugin/ga4/set', async (req, res) => {
       });
     }
 
-    const pushRes = await pluginApi.ga4MeasurementIdSet(site, { measurement_id });
+    // Sept-A F4: every GA4 config push carries the merged internal-traffic
+    // exclusion list so a fresh site starts filtered from day one.
+    const pushRes = await pluginApi.ga4MeasurementIdSet(site, { measurement_id, internal_ip_list: mergedInternalIps(site) });
     const pushed_at = new Date().toISOString();
     await firePlatformEvent(pool, {
       tenantId,
@@ -406,6 +407,102 @@ router.post('/sites/:siteId/plugin/ga4/set', async (req, res) => {
     return res.json({ data: { ok: true, measurement_id, pushed_at, plugin_status: pushRes.pluginStatus || 'connected' } });
   } catch (err) {
     console.error('[arion/sites/:siteId/plugin/ga4/set]', err);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// ─── Sept-A F4: internal-traffic exclusion list ────────────────────────────
+// The client-facing half of GA internal-traffic blocking. Tenants manage
+// their own entries from the ARION settings card ("Exclude my current
+// network" — the server reads the caller's IP, nobody copy-pastes anything);
+// IA's platform-wide entries come from env IA_INTERNAL_IPS and are visible
+// but not removable here. Any change re-pushes the merged list to the
+// plugin over the existing ga4-config channel.
+
+async function pushInternalIpsToPlugin(site) {
+  if (!site?.ga4_measurement_id) return { pushed: false, reason: 'no_ga4_measurement_id' };
+  try {
+    const r = await pluginApi.ga4MeasurementIdSet(site, {
+      measurement_id: site.ga4_measurement_id,
+      internal_ip_list: mergedInternalIps(site),
+    });
+    return { pushed: !!r?.ok, reason: r?.ok ? null : (r?.errorText || 'plugin_call_failed') };
+  } catch (e) {
+    return { pushed: false, reason: e.message };
+  }
+}
+
+// GET /arion/sites/:siteId/internal-ips
+router.get('/sites/:siteId/internal-ips', async (req, res) => {
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, req.tenant.tenantId, req.params.siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    return res.json({
+      data: {
+        entries: effectiveInternalIps(site),
+        caller_ip: callerIp(req),
+        ga4_connected: !!site.ga4_measurement_id,
+      },
+    });
+  } catch (err) {
+    console.error('[arion/internal-ips GET]', err);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// POST /arion/sites/:siteId/internal-ips — body { ip? }. No body ⇒ "exclude
+// my current network": the server records the CALLER's address.
+router.post('/sites/:siteId/internal-ips', async (req, res) => {
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, req.tenant.tenantId, req.params.siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const ip = normalizeIp((req.body?.ip || '').toString().trim() || callerIp(req));
+    if (!isValidIpOrCidr(ip)) {
+      return res.status(400).json({ error: { code: 'invalid_ip', message: `"${ip}" is not a valid IP or IPv4 CIDR`, status: 400 } });
+    }
+    const own = siteInternalIps(site);
+    if (!own.includes(ip) && !platformInternalIps().includes(ip)) {
+      own.push(ip);
+      if (own.length > 100) return res.status(400).json({ error: { code: 'too_many_entries', message: 'Exclusion list is capped at 100 entries per site', status: 400 } });
+      await pool.request()
+        .input('siteId', sql.UniqueIdentifier, req.params.siteId)
+        .input('json', sql.NVarChar(sql.MAX), JSON.stringify(own))
+        .query(`UPDATE arion.site SET internal_ip_json = @json WHERE site_id = @siteId`);
+      site.internal_ip_json = JSON.stringify(own);
+    }
+    const push = await pushInternalIpsToPlugin(site);
+    return res.json({ data: { added: ip, entries: effectiveInternalIps(site), push } });
+  } catch (err) {
+    console.error('[arion/internal-ips POST]', err);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// DELETE /arion/sites/:siteId/internal-ips?ip=… — tenant entries only;
+// IA platform entries are not removable from the tenant surface.
+router.delete('/sites/:siteId/internal-ips', async (req, res) => {
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, req.tenant.tenantId, req.params.siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+
+    const ip = normalizeIp((req.query.ip || req.body?.ip || '').toString().trim());
+    if (platformInternalIps().includes(ip)) {
+      return res.status(403).json({ error: { code: 'platform_entry', message: 'This entry is managed by Intelligent Analytics and cannot be removed here', status: 403 } });
+    }
+    const own = siteInternalIps(site).filter((x) => x !== ip);
+    await pool.request()
+      .input('siteId', sql.UniqueIdentifier, req.params.siteId)
+      .input('json', sql.NVarChar(sql.MAX), JSON.stringify(own))
+      .query(`UPDATE arion.site SET internal_ip_json = @json WHERE site_id = @siteId`);
+    site.internal_ip_json = JSON.stringify(own);
+    const push = await pushInternalIpsToPlugin(site);
+    return res.json({ data: { removed: ip, entries: effectiveInternalIps(site), push } });
+  } catch (err) {
+    console.error('[arion/internal-ips DELETE]', err);
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
