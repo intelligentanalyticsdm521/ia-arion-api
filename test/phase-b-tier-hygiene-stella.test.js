@@ -91,13 +91,14 @@ test('STELLA copy: Standard names everything live today with no "rolling out"; P
   assert.ok(c.pro.features.includes('Everything in Standard'));
   assert.ok(c.pro.features.some((f) => /SQL editor \(rolling out\)/.test(f)));
   assert.ok(c.pro.features.some((f) => /Custom Reporting.*\(rolling out\)/.test(f)));
+  assert.ok(c.pro.features.some((f) => /Database Manager.*\(rolling out\)/.test(f)), 'Database Manager is Pro+ (Brandon 2026-08-23)');
   for (const f of c.pro.features.filter((x) => !/^Everything in/.test(x))) {
     assert.match(f, /\(rolling out\)$/, `Pro bullet must be marked rolling out: ${f}`);
   }
 
   assert.ok(c.business.features.includes('Everything in Pro'));
   assert.ok(c.business.features.some((f) => /Multi-entity.*\(rolling out\)/.test(f)));
-  assert.ok(c.business.features.some((f) => /Database Manager.*\(rolling out\)/.test(f)));
+  assert.ok(!c.business.features.some((f) => /Database Manager/.test(f)), 'Database Manager is Pro+ (Brandon 2026-08-23), not a Business bullet');
   for (const f of c.business.features.filter((x) => !/^Everything in/.test(x))) {
     assert.match(f, /\(rolling out\)$/, `Business bullet must be marked rolling out: ${f}`);
   }
@@ -346,7 +347,7 @@ test('migration 053: iadm_services, UPDATE-only, idempotent backfill of tier ←
 
   // (a) legacy SEO-ladder mirror, only where NULL, only ladder words
   assert.match(batches[0], /UPDATE arion\.site\s+SET tier = seo_addon_tier/);
-  assert.match(batches[0], /WHERE tier IS NULL/);
+  assert.match(batches[0], /WHERE \(tier IS NULL OR LOWER\(tier\) IN \('lite', 'standard', 'pro', 'business', 'enterprise'\)\)/); // also repairs a leaked base word (6de4928)
   assert.match(batches[0], /LOWER\(seo_addon_tier\) IN \('starter', 'essentials', 'growth', 'authority'\)/);
 
   // (b) base tier from the tenant plan, raise-only (the column is NOT NULL DEFAULT 'lite')
