@@ -565,7 +565,12 @@ router.post('/push-ga4-measurement-id', async (req, res) => {
       .input('sid', sql.UniqueIdentifier, site_id)
       .input('tid', sql.UniqueIdentifier, tid)
       .query(`SELECT TOP 1 site_id, tenant_id, domain, site_token_raw,
-                     wp_admin_url, wp_app_password_ref, ga4_measurement_id
+                     wp_admin_url, wp_app_password_ref, ga4_measurement_id,
+                     -- internal_ip_json MUST ride along: mergedInternalIps()
+                     -- reads it, and the plugin REPLACES its stored list on
+                     -- every push — omitting it here silently wiped every
+                     -- tenant-added exclusion (adversarial-review finding).
+                     internal_ip_json
               FROM arion.site
               WHERE site_id = @sid AND tenant_id = @tid`);
     const site = siteRes.recordset[0];
