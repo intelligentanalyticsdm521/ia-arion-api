@@ -6688,13 +6688,55 @@ router.put('/sites/:siteId/content-seo/:postId', async (req, res) => {
     if (rank_math_title !== undefined) meta.rank_math_title = rank_math_title;
     if (rank_math_description !== undefined) meta.rank_math_description = rank_math_description;
     if (rank_math_focus_keyword !== undefined) meta.rank_math_focus_keyword = rank_math_focus_keyword;
-    const wpRes = await fetch(`https://${domain}/wp-json/wp/v2/posts/${encodeURIComponent(postId)}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json',
-        Authorization: 'Basic ' + Buffer.from(appPwRef).toString('base64') },
-      body: JSON.stringify({ meta }),
-    });
-    if (!wpRes.ok) throw new Error('WP REST API returned ' + wpRes.status);
-    res.json({ data: { post_id: postId, updated: true }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+    // 2026-08-24 — the collection was hard-coded to /wp/v2/posts/, but the
+    // sibling GET (/content-seo, :6615) returns PAGES AND POSTS in one payload
+    // with no type discriminator, so saving SEO meta on any page 404'd. WP
+    // keeps pages and posts in separate REST collections; try the caller's
+    // declared type first, then fall back to the other one rather than making
+    // the Portal know which it is holding.
+    //
+    // Also: the old code checked only `wpRes.ok` and never read the body. WP
+    // returns 200 with the meta silently absent when a key is not registered
+    // with show_in_rest — so a save could "succeed" and persist nothing. We now
+    // read the response and confirm the values actually came back.
+    const declared = String(req.query.type || '').toLowerCase();
+    const order = declared === 'page' ? ['pages', 'posts']
+                : declared === 'post' ? ['posts', 'pages']
+                : ['posts', 'pages'];
+
+    const auth = 'Basic ' + Buffer.from(appPwRef).toString('base64');
+    let wpRes = null; let body = null; let usedCollection = null;
+    for (const collection of order) {
+      wpRes = await fetch(`https://${domain}/wp-json/wp/v2/${collection}/${encodeURIComponent(postId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({ meta }),
+      });
+      if (wpRes.status === 404) continue;   // wrong collection — try the other
+      usedCollection = collection;
+      break;
+    }
+    if (!usedCollection) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: `No page or post ${postId} on this site`, status: 404 } });
+    }
+    body = await wpRes.json().catch(() => null);
+    if (!wpRes.ok) {
+      throw new Error(`WP REST API returned ${wpRes.status}${body?.message ? ': ' + body.message : ''}`);
+    }
+    // Confirm the write actually landed. Unregistered meta keys are dropped
+    // silently by WP, which would otherwise read to the client as a save.
+    const returned = body?.meta || {};
+    const notPersisted = Object.keys(meta).filter((k) => returned[k] !== meta[k]);
+    if (notPersisted.length) {
+      return res.status(502).json({
+        error: {
+          code: 'META_NOT_PERSISTED', status: 502,
+          message: `WordPress accepted the request but did not store: ${notPersisted.join(', ')}. `
+                 + 'This usually means Rank Math is inactive on the site, so its meta keys are not registered with the REST API.',
+        },
+      });
+    }
+    res.json({ data: { post_id: postId, type: usedCollection === 'pages' ? 'page' : 'post', updated: true }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
   } catch (err) {
     console.error('[content-seo:put]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
