@@ -650,6 +650,22 @@ router.get('/overview', async (req, res) => {
         appleBusinessConnectClaimedAt: site?.apple_claimed_at || null,
         seRankingProject: seoConnected
       },
+      // 2026-09-01 — the Command Center "Get started" card decides the
+      // "Configure your service area" step is done by testing
+      // ov.serviceArea.city || ov.serviceArea.state. This response has never
+      // carried a serviceArea key at all, so that test was permanently
+      // undefined and the step could NEVER be completed — a nag with no
+      // possible exit, on tenants that configured it long ago
+      // (intelligentanalyticsdm.com and rollinginitllc.com both have a
+      // populated arion.site.service_area_json). The row is already loaded by
+      // the SELECT * above; the value was only ever missing from the payload.
+      serviceArea: (() => {
+        try {
+          const raw = site?.service_area_json;
+          if (!raw) return null;
+          return typeof raw === "string" ? JSON.parse(raw) : raw;
+        } catch { return null; }
+      })(),
       overview: {
         users: null,
         sessions: null,
