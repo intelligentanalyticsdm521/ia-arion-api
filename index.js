@@ -33,6 +33,7 @@ import onboardingRunnerRouter from './routes/onboarding/runner.js';
 import onboardingGoogleOauthRouter from './routes/onboarding/google-oauth.js';
 import onboardingBingOauthRouter from './routes/onboarding/bing-oauth.js';
 import adminOnboardExistingRouter from './routes/admin/onboardExisting.js';
+import adminSiteRequestsRouter from './routes/admin/siteRequests.js';
 import provisioningRouter from './routes/provisioning.js';
 import pluginRouter from './routes/plugin.js';
 import argusRouter from './routes/argus.js';
@@ -160,6 +161,8 @@ app.use(
 // Founder admin — onboard a client whose site was built outside the system
 // (e.g. via Hostinger Kodee manually). Auth via Bearer FOUNDER_ADMIN_TOKEN.
 app.use('/admin', adminOnboardExistingRouter);
+// Founder queue for ARION change requests (Foundation §3A3) — same token gate.
+app.use('/admin', adminSiteRequestsRouter);
 // Provisioning endpoints (no JWT auth — authenticated via single-use provisioning code in body
 // or the PROVISIONER_SHARED_SECRET header for worker callbacks).
 // Called by the IA Plugin's bootstrap class on a freshly-provisioned client site.

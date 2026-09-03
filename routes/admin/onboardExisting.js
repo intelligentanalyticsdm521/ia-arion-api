@@ -68,7 +68,8 @@ async function loadServiceIds(platformPool) {
 
 const router = Router();
 
-function requireFounderAuth(req, res, next) {
+// Exported: routes/admin/siteRequests.js reuses this same gate.
+export function requireFounderAuth(req, res, next) {
   const expected = process.env.FOUNDER_ADMIN_TOKEN || '';
   if (!expected) {
     return res.status(500).json({ error: { code: 'NOT_CONFIGURED', message: 'FOUNDER_ADMIN_TOKEN env var is not set on arion-api' } });

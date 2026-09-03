@@ -54,6 +54,7 @@ import intelligenceRouter from './arion/intelligence.js';
 import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } from '../lib/websiteBuilder/costGuard.js';
 import { signOAuthState } from '../lib/oauthState.js';
 import { attachAgencyContext, isAgencyCaller } from '../lib/agency.js';
+import { createSiteRequest, listSiteRequests, notifyFounderOfSiteRequest } from '../lib/siteRequests.js';
 
 const router = Router();
 
@@ -268,20 +269,44 @@ router.get('/sites', async (req, res) => {
 });
 
 // --- POST /arion/sites/:siteId/requests ---
+// Foundation §3A3 — writes arion.site_request (migration 055) and tells the
+// founder inbox. Before this the handler minted a UUID and returned it without
+// writing anything, so every client change request was discarded.
 router.post('/sites/:siteId/requests', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { siteId } = req.params;
-  const { requestType, notes } = req.body;
+  const { requestType, notes } = req.body || {};
   if (!requestType) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'requestType is required', status: 400 } });
   try {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    const requestId = crypto.randomUUID();
-    // Note: arion.site_request table would need to exist; for now return the ID
-    res.json({ request: { siteRequestId: requestId } });
+    const request = await createSiteRequest(pool, {
+      tenantId, siteId, requestType, notes,
+      requestedByEmail: getEmailFromClaims(req.auth || {}),
+    });
+    // Fire-and-forget: the request is saved whether or not the email goes.
+    notifyFounderOfSiteRequest({ request, site, tenant: req.tenant })
+      .catch((e) => console.error('[arion/sites/requests] founder notify:', e.message));
+    res.json({ request });
   } catch (err) {
     console.error('[arion/sites/requests]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
+// --- GET /arion/sites/:siteId/requests --- the tenant's own history, newest first.
+router.get('/sites/:siteId/requests', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { siteId } = req.params;
+  try {
+    const pool = await getServicesPool();
+    const site = await getSiteForTenant(pool, tenantId, siteId);
+    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
+    const requests = await listSiteRequests(pool, { tenantId, siteId });
+    res.json({ requests });
+  } catch (err) {
+    console.error('[arion/sites/requests GET]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
