@@ -53,6 +53,7 @@ import blocksRouter from './arion/blocks.js';
 import intelligenceRouter from './arion/intelligence.js';
 import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } from '../lib/websiteBuilder/costGuard.js';
 import { signOAuthState } from '../lib/oauthState.js';
+import { attachAgencyContext, isAgencyCaller } from '../lib/agency.js';
 
 const router = Router();
 
@@ -524,16 +525,19 @@ router.delete('/sites/:siteId/internal-ips', async (req, res) => {
 // many sites, but the spend pool is tenant-wide. We accept siteId in the URL
 // so the founder can navigate from any site's settings page; we just verify
 // the site belongs to the tenant before writing.
-const AI_CAP_FOUNDER_TENANT_ID = (process.env.FOUNDER_TENANT_ID || '8C9527B9-8999-4B31-A306-F3D4CCC39FBD').trim().toUpperCase();
+// 2026-09-01 — the AI spend cap is set by the AGENCY that manages the site's
+// tenant, not by a hardcoded Intelligent Analytics GUID. isAgencyCaller reads
+// req.agencyTenantId (attachAgencyContext, mounted on the two routes below) and
+// degrades to the historical constant if that middleware did not run.
+// Byte-identical today: IA is the only agency.
 function isAiCapFounder(req) {
-  // Either the actor is in the founder tenant OR requireArionAccess flagged
-  // them as a founder acting on a client tenant via x-tenant-key.
+  // Either the actor's own tenant IS an agency, OR requireArionAccess flagged
+  // them as a provider acting on a client tenant via x-tenant-key.
   if (req.isFounderActingOnClient) return true;
-  const t = String(req?.tenant?.tenantId || '').toUpperCase();
-  return t === AI_CAP_FOUNDER_TENANT_ID;
+  return isAgencyCaller(req);
 }
 
-router.get('/sites/:siteId/ai-cap', async (req, res) => {
+router.get('/sites/:siteId/ai-cap', attachAgencyContext(), async (req, res) => {
   const tenantId = req.tenant?.tenantId;
   const { siteId } = req.params;
   if (!tenantId || !siteId) {
@@ -588,7 +592,7 @@ router.get('/sites/:siteId/ai-cap', async (req, res) => {
   }
 });
 
-router.patch('/sites/:siteId/ai-cap', async (req, res) => {
+router.patch('/sites/:siteId/ai-cap', attachAgencyContext(), async (req, res) => {
   const tenantId = req.tenant?.tenantId;
   const userId   = req.platformUser?.userId || null;
   const { siteId } = req.params;
@@ -747,6 +751,22 @@ router.get('/overview', async (req, res) => {
         appleBusinessConnectClaimedAt: site?.apple_claimed_at || null,
         seRankingProject: seoConnected
       },
+      // 2026-09-01 — the Command Center "Get started" card decides the
+      // "Configure your service area" step is done by testing
+      // ov.serviceArea.city || ov.serviceArea.state. This response has never
+      // carried a serviceArea key at all, so that test was permanently
+      // undefined and the step could NEVER be completed — a nag with no
+      // possible exit, on tenants that configured it long ago
+      // (intelligentanalyticsdm.com and rollinginitllc.com both have a
+      // populated arion.site.service_area_json). The row is already loaded by
+      // the SELECT * above; the value was only ever missing from the payload.
+      serviceArea: (() => {
+        try {
+          const raw = site?.service_area_json;
+          if (!raw) return null;
+          return typeof raw === "string" ? JSON.parse(raw) : raw;
+        } catch { return null; }
+      })(),
       overview: {
         users: null,
         sessions: null,
