@@ -75,10 +75,56 @@ router.post('/verify', async (req, res) => {
               SET redeemed_at = SYSDATETIMEOFFSET(), redeemed_user_ip = @ip
               WHERE token_id = @tokenId AND redeemed_at IS NULL`);
 
+    // 2026-08-24 SECURITY — tell the plugin whether the `iaadmin` ADMINISTRATOR
+    // fallback is permitted for this caller.
+    //
+    // The plugin resolves the WP user by email and, when there is no match,
+    // has been falling back to `iaadmin` and wp_set_auth_cookie()-ing the
+    // caller in as an ADMINISTRATOR (intelligent-analytics.php:81-84, :97).
+    // Since a88c4c0 (2026-08-17) clients are deliberately provisioned as WP
+    // `editor` so they cannot install plugins, change themes or manage users —
+    // and this fallback handed exactly those powers to anyone on an
+    // ARION-owning tenant whose Portal email has no WP account, which is the
+    // normal state for any teammate added in the Portal after provisioning.
+    // The fallback existed so IA staff could always get in; it should never
+    // have applied to clients.
+    //
+    // Resolved here rather than stamped at mint time so no schema change is
+    // needed: the founder-tenant membership lookup is the same one
+    // middleware/enforceViewAsReadOnly.js:126-145 uses.
+    let allowAdminFallback = false;
+    try {
+      const founderTenantId = (process.env.FOUNDER_TENANT_ID
+        || '8C9527B9-8999-4B31-A306-F3D4CCC39FBD').trim().toUpperCase();
+      const { getPlatformPool } = await import('../db/platformPool.js');
+      const pp = await getPlatformPool();
+      const staff = await pp.request()
+        .input('email', sql.NVarChar(320), lt.portal_user_email)
+        .input('founderTenantId', sql.UniqueIdentifier, founderTenantId)
+        .query(`
+          SELECT TOP 1 1 AS hit
+          FROM core.tenant_users tu
+          JOIN core.users u ON u.user_id = tu.user_id
+          WHERE tu.tenant_id = @founderTenantId
+            AND (tu.status IS NULL OR tu.status = 'active')
+            AND LOWER(u.email) = LOWER(@email)
+        `);
+      allowAdminFallback = staff.recordset.length > 0;
+    } catch (staffErr) {
+      // FAIL CLOSED. If we cannot prove the caller is IA staff, they do not get
+      // the administrator fallback. A failed lookup must never widen access.
+      console.warn('[arion/sso/verify] IA-staff check failed, denying admin fallback:', staffErr.message);
+      allowAdminFallback = false;
+    }
+
     res.json({
       ok: true,
       user: { email: lt.portal_user_email },
       site: { site_id: site.site_id, domain: site.domain },
+      // Plugin v1.2.6+ honours this. Older plugin builds ignore it and keep the
+      // old behaviour, so the plugin rollout is what actually closes the hole —
+      // this half just makes the correct answer available.
+      allow_admin_fallback: allowAdminFallback,
     });
   } catch (err) {
     console.error('[arion/sso/verify]', err);
