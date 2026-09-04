@@ -94,8 +94,9 @@ router.post('/verify', async (req, res) => {
     // middleware/enforceViewAsReadOnly.js:126-145 uses.
     let allowAdminFallback = false;
     try {
-      const founderTenantId = (process.env.FOUNDER_TENANT_ID
-        || '8C9527B9-8999-4B31-A306-F3D4CCC39FBD').trim().toUpperCase();
+      // SEAMS PACK 4B — one module holds the GUID (lib/agency.js).
+      const { founderTenantId: resolveFounderTenantId } = await import('../lib/agency.js');
+      const founderTenantId = resolveFounderTenantId();
       const { getPlatformPool } = await import('../db/platformPool.js');
       const pp = await getPlatformPool();
       const staff = await pp.request()

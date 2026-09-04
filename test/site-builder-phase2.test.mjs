@@ -337,24 +337,35 @@ test('no section we emit carries a script tag, so an edit cannot inject or drop 
  * 3. Booking links
  * ======================================================================== */
 
-test('the booking address is built from the tenant slug and the booking host', () => {
-  assert.equal(bookingUrlFor('fernbrook'), `https://fernbrook.${brandInternals.BOOKING_HOSTNAME_SUFFIX}/`);
-  assert.equal(bookingUrlFor('Fernbrook-Garden'), `https://fernbrook-garden.${brandInternals.BOOKING_HOSTNAME_SUFFIX}/`);
+test('the booking address puts the BUSINESS IN THE PATH, not in a subdomain', () => {
+  // SEAMS PACK 4B. This emitted `https://<slug>.book.ia-dm.com/` until
+  // 2026-09-06, and that hostname has never resolved for a real client: there
+  // is no *.book.ia-dm.com binding in DNS, and the Static Web App
+  // custom-domain cap is why APP-1 chose the path model. Every "Book online"
+  // button ARION had ever published pointed at a host that does not exist.
+  // oliver-api's buildBookingUrl and lib/appQr.appUrlFor already emit this
+  // shape; this was the last emitter that did not.
+  assert.equal(bookingUrlFor('fernbrook'), `https://${brandInternals.BOOKING_HOSTNAME_SUFFIX}/fernbrook/`);
+  assert.equal(bookingUrlFor('Fernbrook-Garden'), `https://${brandInternals.BOOKING_HOSTNAME_SUFFIX}/fernbrook-garden/`);
+  // MUTATION: the subdomain form must not come back.
+  assert.ok(!bookingUrlFor('fernbrook').startsWith('https://fernbrook.'),
+    'a subdomain link is a link that has never resolved');
 });
 
-test('a slug that is not a safe hostname label produces NO booking link', () => {
-  // A slug becomes a host label. Anything that could point the button at
-  // another host has to come back empty, not "mostly right".
+test('a slug that is not a safe path segment produces NO booking link', () => {
+  // The slug is a path segment now rather than a host label, but this string
+  // still goes straight into a published page. Anything that could point the
+  // button somewhere else has to come back empty, not "mostly right".
   for (const bad of ['', 'a', 'has.dot', 'has/slash', '-leading', 'trailing-', 'has space', 'x'.repeat(70)]) {
     assert.equal(bookingUrlFor(bad), '', `"${bad}" must not become a booking link`);
   }
 });
 
 test('a new hero and CTA point at the booking page when the business has one', () => {
-  const withBooking = { ...BRAND, booking_href: 'https://fernbrook.book.ia-dm.com/' };
-  assert.equal(starterBlock('hero', withBooking).cta_href, 'https://fernbrook.book.ia-dm.com/');
+  const withBooking = { ...BRAND, booking_href: 'https://book.ia-dm.com/fernbrook/' };
+  assert.equal(starterBlock('hero', withBooking).cta_href, 'https://book.ia-dm.com/fernbrook/');
   assert.equal(starterBlock('hero', withBooking).cta_text, 'Book online');
-  assert.equal(starterBlock('cta', withBooking).primary_cta_href, 'https://fernbrook.book.ia-dm.com/');
+  assert.equal(starterBlock('cta', withBooking).primary_cta_href, 'https://book.ia-dm.com/fernbrook/');
 });
 
 test('a business with no booking page still gets the contact anchor, not a dead link', () => {
@@ -363,15 +374,15 @@ test('a business with no booking page still gets the contact anchor, not a dead 
 });
 
 test('a booking link survives an edit to the words around it', () => {
-  const withBooking = { ...BRAND, booking_href: 'https://fernbrook.book.ia-dm.com/' };
+  const withBooking = { ...BRAND, booking_href: 'https://book.ia-dm.com/fernbrook/' };
   const built = buildStarterSection('cta', withBooking);
   assert.equal(built.ok, true);
 
   const [entry] = reduceToSectionList([built.node]);
-  assert.equal(entry.fields.primary_cta_href, 'https://fernbrook.book.ia-dm.com/');
+  assert.equal(entry.fields.primary_cta_href, 'https://book.ia-dm.com/fernbrook/');
 
   const saved = applyFields(built.node, 'cta', { ...entry.fields, headline: 'Book your survey' });
-  assert.equal(extractFields(saved, 'cta').primary_cta_href, 'https://fernbrook.book.ia-dm.com/');
+  assert.equal(extractFields(saved, 'cta').primary_cta_href, 'https://book.ia-dm.com/fernbrook/');
   assert.equal(extractFields(saved, 'cta').headline, 'Book your survey');
 });
 

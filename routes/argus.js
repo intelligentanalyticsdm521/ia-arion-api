@@ -19,13 +19,16 @@ import { getPlatformPool } from "../db/platformPool.js";
 import { calculatePool } from "../lib/argus/poolCalculator.js";
 import { getBalance } from "../lib/argus/callWrapper.js";
 import { argusTables } from "../lib/argus/tables.js";
+import { isFounderTenantId } from "../lib/agency.js";
 
 const router = express.Router();
 
-const FOUNDER_TENANT_ID = "8C9527B9-8999-4B31-A306-F3D4CCC39FBD";
+// SEAMS PACK 4B — one module holds the GUID (lib/agency.js). This is a TENANT
+// question ("is this request's data the agency's own"), which is the one shape
+// where comparing to the founder tenant id is right; see LUMEN
+// tierCheck.isFounderTenantReq for the identity question it is NOT.
 function isFounderTenant(req) {
-  const t = String(req?.tenant?.tenantId || "").toUpperCase();
-  return t === FOUNDER_TENANT_ID.toUpperCase();
+  return isFounderTenantId(req?.tenant?.tenantId);
 }
 
 // ─── GET /argus/balance ────────────────────────────────────────────────

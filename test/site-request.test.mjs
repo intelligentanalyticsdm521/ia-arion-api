@@ -252,30 +252,69 @@ test("an unset FOUNDER_ADMIN_TOKEN never matches — no empty-string bypass", ()
   }
 });
 
-test("the role path asks the platform DB the SAME founder question as onboard-client.js", async () => {
-  const pool = fakePool({ rows: [{ user_id: "u1", email: "brandon@example.com", full_name: "Brandon", role_key: "founder" }] });
-  const found = await findFounderRole(pool, { oid: "sub-1", email: "brandon@example.com" });
-  const q = pool.calls[0];
-  assert.match(q.sql, /JOIN core\.user_platform_roles upr ON upr\.user_id = u\.user_id AND upr\.is_active = 1/);
-  assert.match(q.sql, /JOIN core\.platform_roles pr ON pr\.platform_role_id = upr\.platform_role_id AND pr\.is_active = 1/);
-  assert.match(q.sql, /pr\.role_key IN \('founder', 'super_admin'\) OR pr\.name = 'SUPER_ADMIN'/);
-  assert.equal(q.inputs.sub, "sub-1");
-  assert.equal(q.inputs.email, "brandon@example.com");
-  assert.equal(found.role_key, "founder");
+// SEAMS PACK 4B — the founder answer comes over HTTP now, so the suite stubs
+// the transport rather than a pool. `brandon@` is the founder, everyone else
+// is not; nothing leaves the machine.
+const founderClient = await import("../lib/founderClient.js");
+const _origFetch = globalThis.fetch;
+process.env.PLATFORM_API_URL = process.env.PLATFORM_API_URL || "http://127.0.0.1:9";
+process.env.PLATFORM_INTERNAL_TOKEN = process.env.PLATFORM_INTERNAL_TOKEN || "test-token";
+globalThis.fetch = async (url, init) => {
+  if (!String(url).endsWith("/internal/founder")) return _origFetch(url, init);
+  const body = JSON.parse(init.body);
+  const isFounder = String(body.email || "").startsWith("brandon@");
+  return {
+    ok: true, status: 200,
+    json: async () => ({
+      is_founder: isFounder, is_founder_team: isFounder,
+      agency_grant: null, role_key: isFounder ? "founder" : null,
+    }),
+  };
+};
 
-  const none = await findFounderRole(fakePool({ rows: [] }), { oid: "sub-2", email: "client@example.com" });
+test("the role path asks the ONE founder answer, and holds no SQL of its own", async () => {
+  // SEAMS PACK 4B. This used to run arion's own copy of the founder-role SQL
+  // — one of six implementations across four repos — while its own header
+  // said it was "the same question platform-api's isFounderCaller asks". It
+  // is now literally that question, over POST /internal/founder, so the two
+  // cannot drift. The predicate itself (which role keys count, which columns
+  // are matched, including arion's extra `pr.name = 'SUPER_ADMIN'` spelling)
+  // is pinned in platform-api test/founder-one-answer.test.js.
+  const src = read("middleware/requireFounder.js");
+  assert.ok(!/core\.user_platform_roles/.test(src), "the inline role SQL is gone");
+  assert.ok(!/from "mssql"/.test(src), "and the database dependency with it");
+  assert.match(src, /resolveFounderFacts/);
+
+  const founder = await findFounderRole({ email: "brandon@example.com", oid: "sub-1" });
+  assert.equal(founder && founder.roleKey, "founder");
+
+  const none = await findFounderRole({ email: "client@example.com", oid: "sub-2" });
   assert.equal(none, null, "a client with no platform role is not a founder");
-
-  const anon = fakePool();
-  assert.equal(await findFounderRole(anon, {}), null);
-  assert.equal(anon.calls.length, 0, "no identity → no query");
 });
 
-test("a signed-in non-founder is refused with 403, and a lookup failure closes the gate", () => {
+test("MUTATION: a lookup we could not RUN is 500, never the 403 for 'you may not'", async () => {
   const src = read("middleware/requireFounder.js");
   assert.match(src, /code: "FORBIDDEN", message: "Founder access required", status: 403/);
-  assert.match(src, /console\.error\("\[requireFounder\] role lookup failed/);
-  assert.match(src, /code: "INTERNAL_ERROR"[\s\S]{0,120}status: 500/, "a DB failure must not open the queue to everyone");
+  assert.match(src, /code: "INTERNAL_ERROR"[\s\S]{0,200}status: 500/, "a DB failure must not open the queue to everyone");
+
+  const statuses = [];
+  const res = { status(c) { statuses.push(c); return { json() {} }; } };
+  let nexted = false;
+
+  // A real refusal.
+  await founderRoleGate({ auth: {} }, res, () => { nexted = true; }, async () => null);
+  assert.equal(statuses.at(-1), 403);
+  assert.equal(nexted, false);
+
+  // No answer at all.
+  await founderRoleGate({ auth: {} }, res, () => { nexted = true; }, async () => {
+    const e = new Error("platform-api is down");
+    e.name = "FounderUnavailable";
+    e.reason = "founder_unreachable";
+    throw e;
+  });
+  assert.equal(statuses.at(-1), 500, "an outage told the founder we had checked and refused them");
+  assert.equal(nexted, false, "and it must still not open the queue");
 });
 
 // ── the resolved email ──────────────────────────────────────────────────
@@ -376,14 +415,17 @@ test("PATCH emails the client only when the status actually MOVED to done/declin
 });
 
 test("the role gate lets a founder through and refuses everyone else — 403, and 500 if it cannot tell", async () => {
-  const founderRow = [{ user_id: "u1", email: "brandon@example.com", full_name: "Brandon", role_key: "founder" }];
+  // SEAMS PACK 4B — the injected fourth argument is the RESOLVER now, not a
+  // pool factory: the founder question is answered once, in platform-api, and
+  // this repo asks it over POST /internal/founder. The three branches are the
+  // same three, and the third is the one that matters most.
   const mkRes = () => { const r = { code: null, body: null }; r.status = (c) => { r.code = c; return r; }; r.json = (b) => { r.body = b; return r; }; return r; };
 
   // founder → through
   let req = { auth: { oid: "s1", email: "brandon@example.com" } };
   let res = mkRes();
   let passed = false;
-  await founderRoleGate(req, res, () => { passed = true; }, async () => fakePool({ rows: founderRow }));
+  await founderRoleGate(req, res, () => { passed = true; }, async () => ({ roleKey: "founder" }));
   assert.equal(passed, true);
   assert.equal(req.founderAuth.via, "platform_role");
   assert.equal(req.founderAuth.roleKey, "founder");
@@ -392,16 +434,16 @@ test("the role gate lets a founder through and refuses everyone else — 403, an
   req = { auth: { oid: "s2", email: "client@example.com" } };
   res = mkRes();
   passed = false;
-  await founderRoleGate(req, res, () => { passed = true; }, async () => fakePool({ rows: [] }));
+  await founderRoleGate(req, res, () => { passed = true; }, async () => null);
   assert.equal(passed, false, "a client must never reach the cross-business queue");
   assert.equal(res.code, 403);
   assert.equal(res.body.error.code, "FORBIDDEN");
 
-  // platform DB unreachable → 500, still closed
+  // no answer at all → 500, still closed
   req = { auth: { oid: "s3", email: "brandon@example.com" } };
   res = mkRes();
   passed = false;
-  await founderRoleGate(req, res, () => { passed = true; }, async () => { throw new Error("platform pool down"); });
+  await founderRoleGate(req, res, () => { passed = true; }, async () => { throw new Error("platform-api down"); });
   assert.equal(passed, false, "an absence-based guard would have failed OPEN here");
   assert.equal(res.code, 500);
 });
