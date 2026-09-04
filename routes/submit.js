@@ -9,6 +9,7 @@ import { triggerOnboardingPageSpeed, getSiteForTenant } from './arion.js';
 import { plugin as pluginApiFull } from '../lib/pluginClient.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
 import { upsertSparkContact } from '../lib/sparkContactSync.js';
+import { resolveBookingHref } from '../lib/websiteBuilder/brandContext.js';
 
 const router = Router();
 
@@ -729,6 +730,12 @@ router.post('/public/provision-codes/redeem', async (req, res) => {
       .input('siteId', sql.UniqueIdentifier, site_id)
       .query('SELECT arion_tier, seo_addon_tier FROM arion.site WHERE site_id = @siteId');
 
+    // Ops B6 — where the site's "Book now" button should point, if the
+    // business has an online booking page. Always present in the response,
+    // '' included, because an empty value takes a stale button back off.
+    // Never fatal: `resolveBookingHref` already fails closed.
+    const bookingUrl = await resolveBookingHref(pool, tenant_id);
+
     res.json({
       data: {
         provisioned: true,
@@ -738,6 +745,7 @@ router.post('/public/provision-codes/redeem', async (req, res) => {
         tier: seoResult.recordset[0]?.arion_tier || null,
         seo_addon: seoResult.recordset[0]?.seo_addon_tier || null,
         domain: siteRow.domain || null,
+        booking_url: bookingUrl,
       },
       meta: { timestamp: new Date().toISOString() },
     });

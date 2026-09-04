@@ -219,11 +219,41 @@ async function plugin(path, { method = 'GET', body } = {}) {
 }
 
 /**
+ * Empty a page's Undo ring.
+ *
+ * `--reseed` claims to rebuild the fixture pages, and it did rebuild their
+ * CONTENT — but the snapshot ring is post meta and survived, so a "freshly
+ * seeded" page arrived with a dozen versions of somebody's click-through
+ * still in it. Two things went wrong because of that: the 1A verifier's
+ * "Undo with nothing left says so rather than pretending" popped a stale
+ * snapshot and failed, and popping it PUT AN OLD PAGE BACK — the fixture was
+ * then wrong for everything that ran afterwards.
+ *
+ * Undo is the only way to drain the ring, and it rewrites the page as it
+ * goes; that is fine here because the fixture write lands immediately after.
+ * `/pages/elementor` (the seeder's write path) pushes no snapshot of its own,
+ * so a seeded page ends with exactly nothing to undo, which is what "fresh"
+ * has to mean.
+ */
+async function drainUndoRing(pageId) {
+  for (let i = 0; i < 30; i++) {
+    const out = await plugin(`/pages/${pageId}/undo`, { method: 'POST', body: {} });
+    if (!out || out.restored === false) return i;
+  }
+  console.warn(`[seed] page #${pageId} still had snapshots after 30 undos — carrying on`);
+  return 30;
+}
+
+/**
  * Write one fixture page. Re-running replaces the same page (matched by
  * title), so the seed is idempotent and never leaves duplicates behind.
  */
 async function upsertPage(existing, { title, status, sections }) {
   const found = existing.find((p) => p.title === title);
+  if (found) {
+    const drained = await drainUndoRing(found.page_id);
+    if (drained > 0) console.log(`[seed] cleared ${drained} old version${drained === 1 ? '' : 's'} of "${title}"`);
+  }
   const body = { page_id: found ? found.page_id : null, title, status, elementor_data: sections };
   const out = await plugin('/pages/elementor', { method: 'POST', body });
   const pageId = out?.page_id;

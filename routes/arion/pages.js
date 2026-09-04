@@ -52,6 +52,7 @@ import { renderSectionListHtml } from '../../lib/websiteBuilder/sectionPreview.j
 import { buildStarterSection } from '../../lib/websiteBuilder/starterSections.js';
 import {
   fetchPages, fetchPageSections, writePageSections, undoPage, createPage, sideloadMedia,
+  listMedia, setMediaAlt, pushBookingConfig,
 } from '../../lib/websiteBuilder/pageClient.js';
 import { pluginPost } from '../../lib/pluginClient.js';
 import {
@@ -139,6 +140,51 @@ function siteAllowsPro(site) {
 function readPageId(raw) {
   const n = Number(raw);
   return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/* ==========================================================================
+ * Forms: the wires an edit must never cut.
+ *
+ * A form section carries three things that are ROUTING, not copy:
+ *   form_css_class  — the plugin's interceptor types every submission from it
+ *                     (class-ia-form-interceptor.php:127)
+ *   email_to        — whose inbox the enquiry lands in
+ *   the visitor id  — read from the __ia_vid COOKIE at submit time, server
+ *                     side, so it is not in the markup at all and no edit can
+ *                     drop it (intelligent-analytics.php, form interceptor)
+ *
+ * The first two survive because `applyFields` only writes the settings a
+ * binding names and the editor always sends back what it read. The third
+ * needs nothing. What DOES need code is the fail-loud rule: a form with no
+ * recipient must not reach a website, because it would collect enquiries
+ * nobody ever sees.
+ * ======================================================================== */
+
+/**
+ * Fill a form section's recipient from the business's own email when the
+ * section does not carry one, and refuse the save when neither has one.
+ *
+ * Deliberately NOT an overwrite: a site whose form already points somewhere
+ * (an office inbox, a shared alias) keeps pointing there. This only fills a
+ * blank, which is the case that ships a form nobody reads.
+ *
+ * @returns {{ ok: true, fields: object } | { ok: false, message: string }}
+ */
+function withFormRecipient(kind, fields, brand) {
+  if (kind !== 'contact' || !fields || typeof fields !== 'object') return { ok: true, fields };
+  const current = String(fields.email_to || '').trim();
+  if (current) return { ok: true, fields };
+
+  const fallback = String(brand?.email || '').trim();
+  if (!fallback) {
+    return {
+      ok: false,
+      message: 'We do not have an email address for your business yet, so this form '
+        + 'would have nowhere to send enquiries. Add one under Settings → Your business, '
+        + 'then publish again. Nothing was saved.',
+    };
+  }
+  return { ok: true, fields: { ...fields, email_to: fallback } };
 }
 
 /* ==========================================================================
@@ -316,7 +362,7 @@ function publicSection(entry) {
  * style and setting it picked up since we wrote it survives. A section we did
  * not author is passed straight back, byte for byte (SCOPE §3.3).
  * ======================================================================== */
-function buildNodes(incoming) {
+function buildNodes(incoming, brand = null) {
   const errors = [];
   const nodes = [];
 
@@ -339,14 +385,23 @@ function buildNodes(incoming) {
       return;
     }
 
-    const check = validateFields(kind, entry.fields);
+    // The form's recipient, before anything else is checked — a form that
+    // cannot be addressed is not a validation nicety, it is a lead going in
+    // the bin (SCOPE §2.5, the 1A fail-loud rule).
+    const addressed = withFormRecipient(kind, entry.fields, brand);
+    if (!addressed.ok) {
+      errors.push({ field: `sections[${i}].email_to`, message: addressed.message });
+      return;
+    }
+
+    const check = validateFields(kind, addressed.fields);
     if (!check.ok) {
       for (const e of check.errors) {
         errors.push({ field: `sections[${i}].${e.field}`, message: e.message });
       }
       return;
     }
-    nodes.push({ handle: parsed.handle, node: applyFields(node, kind, entry.fields) });
+    nodes.push({ handle: parsed.handle, node: applyFields(node, kind, addressed.fields) });
   });
 
   return { nodes, errors };
@@ -384,7 +439,8 @@ router.put('/pages/:pageId/sections', async (req, res) => {
     const site = await loadSite(pool, tenantId, siteId);
     if (!site) return notFound(res, 'That website is not on your account.');
 
-    const { nodes, errors } = buildNodes(incoming);
+    const brand = await loadBrandContext(pool, { tenantId, siteId });
+    const { nodes, errors } = buildNodes(incoming, brand);
     if (errors.length > 0) {
       return res.status(422).json({
         error: {
@@ -605,6 +661,103 @@ router.post('/media', async (req, res) => {
 });
 
 /* ==========================================================================
+ * GET /media — the website's own picture library, a page at a time.
+ *
+ * Query: page, perPage (1-60), search.
+ *
+ * "Where do I get a picture from?" is the single most common reason a client
+ * opens wp-admin (2026-08-24 audit §6). The picker in the edit sheet reads
+ * this, so the answer is "the ones already on your website" before it is
+ * "upload another one".
+ * ======================================================================== */
+router.get('/media', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const perPage = Math.min(60, Math.max(1, Number(req.query.perPage) || 24));
+  const search = String(req.query.search || '').trim().slice(0, 120);
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const result = await listMedia(site, { page, perPage, search });
+    if (!result.ok) return pluginFailure(res, result, 'reading your pictures');
+
+    const items = Array.isArray(result.data?.items) ? result.data.items : [];
+    return res.json({
+      data: {
+        items: items.map(publicMediaItem),
+        page: Number(result.data?.page) || page,
+        perPage: Number(result.data?.per_page) || perPage,
+        total: Number(result.data?.total) || 0,
+        totalPages: Number(result.data?.total_pages) || 0,
+        search,
+      },
+      meta: { site_id: siteId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:media-list');
+  }
+});
+
+/** One picture, in the words the picker uses. */
+function publicMediaItem(row) {
+  return {
+    attachmentId: Number(row?.attachment_id) || null,
+    url: String(row?.url || ''),
+    thumbnailUrl: String(row?.thumbnail_url || row?.url || ''),
+    alt: String(row?.alt || ''),
+    title: String(row?.title || ''),
+    filename: String(row?.filename || ''),
+    mime: String(row?.mime || ''),
+    width: row?.width == null ? null : Number(row.width),
+    height: row?.height == null ? null : Number(row.height),
+    bytes: row?.bytes == null ? null : Number(row.bytes),
+    uploadedAt: row?.uploaded_at || null,
+    // How many rendered sizes WordPress made. With a real attachment id on
+    // the widget, Elementor turns these into srcset/sizes by itself — which
+    // is why the picker hands the id back and the schema stores it.
+    sizeCount: Array.isArray(row?.sizes) ? row.sizes.length : 0,
+  };
+}
+
+/* ==========================================================================
+ * POST /media/:attachmentId/alt — describe a picture, once, for every page
+ * it appears on. Alt lives on the attachment, not on the widget.
+ * ======================================================================== */
+router.post('/media/:attachmentId/alt', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const attachmentId = readPageId(req.params.attachmentId);
+  const alt = String(req.body?.alt ?? '').trim();
+
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!attachmentId) return bad(res, 'BAD_MEDIA_ID', 'That picture reference is not valid.');
+  if (!alt) return bad(res, 'ALT_REQUIRED', 'Type a short description of the picture first.');
+  if (alt.length > 300) return bad(res, 'ALT_TOO_LONG', 'Keep the description under 300 characters.');
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const result = await setMediaAlt(site, attachmentId, alt);
+    if (!result.ok) return pluginFailure(res, result, 'saving that description');
+
+    return res.json({
+      data: { attachmentId, alt: String(result.data?.alt ?? alt) },
+      meta: { site_id: siteId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:media-alt');
+  }
+});
+
+/* ==========================================================================
  * POST /sections — build ONE new section, ready to drop into the editor.
  *
  * Writes nothing anywhere. The Portal never invents Elementor JSON, so when a
@@ -700,11 +853,25 @@ router.get('/section-library', async (req, res) => {
     }));
 
     const gate = aiTierGate(site);
+    const bookingHref = String(brand.booking_href || '');
+
+    // Keep the site-wide "Book now" button in step with the booking page's
+    // real state, without a timer and without a second Portal surface. Fire
+    // and forget, throttled, and it can never affect this response — the
+    // editor must not fail because a config push did.
+    syncBookingButton(site, bookingHref);
+
     return res.json({
       data: {
         sections: catalog,
         elementorProAvailable: allowPro,
         ai: { available: gate.allowed, reason: gate.message },
+        // What the editor needs to offer sensible defaults without inventing
+        // anything: where "Link to your booking page" goes, and the inbox a
+        // form's read-only recipient shows.
+        bookingHref,
+        businessEmail: String(brand.email || ''),
+        businessName: String(brand.business_name || ''),
       },
       meta: { site_id: siteId, tier: site.arion_tier || null },
     });
@@ -712,6 +879,43 @@ router.get('/section-library', async (req, res) => {
     return boom(res, err, 'arion/pages:section-library');
   }
 });
+
+/* --------------------------------------------------------------------------
+ * Booking button sync (Ops B6).
+ *
+ * ARION knows whether the tenant owns OLIVER and has an active booking page;
+ * the plugin only knows what it was last told. Pushing on every editor open
+ * would be one extra HTTP per page, so it is throttled to once per site per
+ * ten minutes AND skipped when nothing has changed since the last push.
+ *
+ * In-process memory on purpose: the worst a restart costs is one extra push.
+ * ------------------------------------------------------------------------ */
+const BOOKING_PUSH_TTL_MS = 10 * 60 * 1000;
+const bookingPushed = new Map(); // siteId -> { href, at }
+
+function syncBookingButton(site, bookingHref) {
+  const siteId = String(site?.site_id || '');
+  if (!siteId) return;
+  const last = bookingPushed.get(siteId);
+  const now = Date.now();
+  if (last && last.href === bookingHref && (now - last.at) < BOOKING_PUSH_TTL_MS) return;
+  bookingPushed.set(siteId, { href: bookingHref, at: now });
+
+  Promise.resolve()
+    .then(() => pushBookingConfig(site, { bookingUrl: bookingHref }))
+    .then((r) => {
+      if (!r.ok) {
+        // Older plugin builds have no /booking-config; that is a 404, not a
+        // fault, and it must not be retried every ten minutes forever with a
+        // scary log line.
+        const known = r.error === 'not_found';
+        if (!known) {
+          console.warn(`[arion/pages:booking-sync] ${site.domain}: ${r.error || r.status}`);
+        }
+      }
+    })
+    .catch((err) => console.warn('[arion/pages:booking-sync]', err?.message));
+}
 
 /* ==========================================================================
  * "Ask ARGUS to change it" — Phase 1B.
@@ -1118,6 +1322,7 @@ router.get('/ai-pricing', async (req, res) => {
 export default router;
 export const __test__ = {
   buildNodes, siteAllowsPro, readPageId, ALLOWED_MEDIA_TYPES, MAX_SECTIONS_PER_PAGE,
-  TOP_LEVEL_EL_TYPES, aiFailure,
+  TOP_LEVEL_EL_TYPES, aiFailure, withFormRecipient, publicMediaItem,
+  syncBookingButton, bookingPushed, BOOKING_PUSH_TTL_MS,
 };
 
