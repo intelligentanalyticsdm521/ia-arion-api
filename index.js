@@ -161,7 +161,9 @@ app.use(
 // Founder admin — onboard a client whose site was built outside the system
 // (e.g. via Hostinger Kodee manually). Auth via Bearer FOUNDER_ADMIN_TOKEN.
 app.use('/admin', adminOnboardExistingRouter);
-// Founder queue for ARION change requests (Foundation §3A3) — same token gate.
+// Founder queue for ARION change requests (Foundation §3A3). Gated by
+// requireFounder: the same static token OR a founder-role Portal sign-in, so
+// the Portal admin page can reach it without shipping the secret to a browser.
 app.use('/admin', adminSiteRequestsRouter);
 // Provisioning endpoints (no JWT auth — authenticated via single-use provisioning code in body
 // or the PROVISIONER_SHARED_SECRET header for worker callbacks).
