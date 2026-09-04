@@ -1,5 +1,6 @@
 import sql from "mssql";
 import { getPlatformPool } from "../db/platformPool.js";
+import { founderTenantId as resolveFounderTenantId } from "../lib/agency.js";
 import { getEmailFromClaims, getExternalSubject } from "../lib/claims.js";
 
 async function getIdentityProviderId(platformPool, providerKey) {
@@ -67,7 +68,8 @@ export async function requireArionAccess(req, res, next) {
     // OR membership in the founder tenant (iadm). The founder can operate on
     // any client tenant by setting x-tenant-key. Audit columns still stamp
     // the founder's identity.
-    const founderTenantId = (process.env.FOUNDER_TENANT_ID || "8C9527B9-8999-4B31-A306-F3D4CCC39FBD").trim().toUpperCase();
+    // SEAMS PACK 4B — one module holds the GUID (lib/agency.js).
+    const founderTenantId = resolveFounderTenantId();
     // P1-2 (Agency Foundation) — DUAL-READ window. Accept EITHER the legacy
     // FOUNDER_TENANT_ID arm OR the generalized `tenant_kind='platform_owner'`
     // arm. IA is BOTH today (byte-identical); the platform_owner arm only adds

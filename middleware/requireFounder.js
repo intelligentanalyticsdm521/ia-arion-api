@@ -11,20 +11,22 @@
 //   2. a normal Portal sign-in whose user holds an ACTIVE founder /
 //      super_admin platform role in iadm_platform.
 //
-// (2) is the same question platform-api's isFounderCaller asks
-// (core.user_platform_roles + core.platform_roles) and the same one
-// scripts/onboard-client.js asks before refusing to link a founder to a client
-// tenant — one answer to "is this person the founder", not a third one.
+// (2) WAS "the same question platform-api's isFounderCaller asks", written out
+// again here in this repo's own SQL. SEAMS PACK 4B: it is now literally that
+// question, asked over POST /internal/founder, so the two cannot drift. The
+// SQL that used to live in findFounderRole is deleted; the predicate — which
+// role keys count, which columns are matched — lives once, in platform-api
+// lib/founder.js, including arion's extra `pr.name = 'SUPER_ADMIN'` spelling,
+// which was carried across deliberately so consolidating does not quietly lock
+// somebody out who passes today.
 // Per reference_role_access_model the gate is FOUNDER, not "super user in the
 // UI sense"; the Portal mirrors it with RequireFounderRoute so a client never
 // sees the page, and this middleware is what actually stops them.
 //
 // Deliberately NOT tenant-scoped: the queue spans every business, so there is
 // no x-tenant-key to resolve and requireArionAccess does not apply.
-import sql from "mssql";
 import { requireAuth } from "./requireAuth.js";
-import { getPlatformPool } from "../db/platformPool.js";
-import { getEmailFromClaims, getExternalSubject } from "../lib/claims.js";
+import { resolveFounderFacts, FounderUnavailable } from "../lib/founderClient.js";
 
 /** Bearer matches the static founder token. False when the token is unset. */
 export function matchesFounderAdminToken(req) {
@@ -36,30 +38,19 @@ export function matchesFounderAdminToken(req) {
 
 /**
  * Does the signed-in caller hold an active founder / super-admin platform
- * role? Returns the matching row or null. Same shape as
- * scripts/onboard-client.js's founderCheck — keep them in step.
+ * role? Returns `{ roleKey }` or null.
+ *
+ * SEAMS PACK 4B — one call to the ONE answer. `is_founder` is the platform
+ * ROLE, which is what this gate has always meant and what
+ * reference_role_access_model says the founder is.
+ *
+ * Throws FounderUnavailable when there is no answer — never null. A gate that
+ * reads "could not check" as "not a founder" answers 403, which tells a
+ * founder we checked and refused them; the caller below turns it into 500.
  */
-export async function findFounderRole(pool, claims) {
-  const externalSubject = getExternalSubject(claims || {});
-  const email = getEmailFromClaims(claims || {});
-  if (!externalSubject && !email) return null;
-  const r = await pool.request()
-    .input("sub", sql.NVarChar(400), externalSubject)
-    .input("email", sql.NVarChar(320), email)
-    .query(`
-      SELECT TOP 1 u.user_id, u.email, u.full_name, pr.role_key
-        FROM core.users u
-        JOIN core.user_platform_roles upr
-          ON upr.user_id = u.user_id AND upr.is_active = 1
-        JOIN core.platform_roles pr
-          ON pr.platform_role_id = upr.platform_role_id AND pr.is_active = 1
-       WHERE (
-               (@sub IS NOT NULL AND u.external_subject = @sub)
-            OR (@email IS NOT NULL AND LOWER(u.email) = LOWER(@email))
-             )
-         AND (pr.role_key IN ('founder', 'super_admin') OR pr.name = 'SUPER_ADMIN')
-    `);
-  return r.recordset[0] || null;
+export async function findFounderRole(claims) {
+  const facts = await resolveFounderFacts(claims);
+  return facts.is_founder ? { roleKey: facts.role_key || "founder" } : null;
 }
 
 /**
@@ -74,19 +65,23 @@ export async function findFounderRole(pool, claims) {
  * database — every dev fixture user carries the founder role, so dev traffic
  * cannot exercise the refusal on its own.
  */
-export async function founderRoleGate(req, res, next, poolFactory = getPlatformPool) {
+export async function founderRoleGate(req, res, next, resolve = findFounderRole) {
   try {
-    const pool = await poolFactory();
-    const founder = await findFounderRole(pool, req.auth);
+    const founder = await resolve(req.auth);
     if (!founder) {
       return res.status(403).json({
         error: { code: "FORBIDDEN", message: "Founder access required", status: 403 },
       });
     }
-    req.founderAuth = { via: "platform_role", userId: founder.user_id, email: founder.email, roleKey: founder.role_key };
+    req.founderAuth = { via: "platform_role", roleKey: founder.roleKey };
     return next();
   } catch (err) {
-    console.error("[requireFounder] role lookup failed:", err.message);
+    // A lookup we could not RUN is 500, never the 403 above: "we checked and
+    // you may not" is a different statement from "we could not check", and a
+    // founder can act on only one of them.
+    const why = err instanceof FounderUnavailable || err?.name === "FounderUnavailable"
+      ? err.reason : err.message;
+    console.error("[requireFounder] founder lookup unavailable:", why);
     return res.status(500).json({
       error: { code: "INTERNAL_ERROR", message: "Could not verify founder access", status: 500 },
     });

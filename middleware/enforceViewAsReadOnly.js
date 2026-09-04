@@ -27,8 +27,7 @@
 // CONSTRAINT (per scope): MUST NOT break normal traffic. If x-view-as-mode
 // is absent, this is a no-op pass-through.
 
-import sql from "mssql";
-import { getPlatformPool } from "../db/platformPool.js";
+import { resolveFounderFacts, FounderUnavailable } from "../lib/founderClient.js";
 
 const READ_ONLY_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
@@ -70,99 +69,38 @@ function getClaims(req) {
   return decodeJwtClaimsUnverified(token);
 }
 
-const FOUNDER_CACHE_TTL_MS = 60_000;
-const founderCache = new Map();
-
-function cacheKey(claims) {
-  const sub = (claims.oid || claims.sub || "").toString().trim();
-  const email = (claims.email || claims.preferred_username || claims.upn || "")
-    .toString()
-    .trim()
-    .toLowerCase();
-  return sub || email || "anon";
-}
-
-function cacheGet(claims) {
-  const k = cacheKey(claims);
-  const hit = founderCache.get(k);
-  if (!hit) return undefined;
-  if (hit.expires < Date.now()) {
-    founderCache.delete(k);
-    return undefined;
-  }
-  return hit.isFounder;
-}
-
-function cacheSet(claims, isFounder) {
-  founderCache.set(cacheKey(claims), {
-    isFounder,
-    expires: Date.now() + FOUNDER_CACHE_TTL_MS,
-  });
-}
-
-async function resolveIsFounder(req, getPool) {
-  const claims = getClaims(req);
+/**
+ * Is this caller IA staff?
+ *
+ * SEAMS PACK 4B — one call to the ONE answer, and the 60-second cache moved
+ * into lib/founderClient.js with the question it caches. `is_founder_team` is
+ * active membership of the founder tenant: exactly the row the deleted SQL
+ * selected, and exactly the population view-as has always admitted.
+ *
+ * FAILS CLOSED, and says which kind of closed: a real "no" is 403, no answer
+ * at all is 503 + retryable (it was 500).
+ */
+async function resolveIsFounder(req) {
+  const claims = req.auth || null;
   if (!claims) return { ok: false, status: 401, reason: "unauthenticated" };
-
-  const cached = cacheGet(claims);
-  if (typeof cached === "boolean") return { ok: true, isFounder: cached };
-
-  const email = (
-    claims.email ||
-    claims.preferred_username ||
-    claims.upn ||
-    (Array.isArray(claims.emails) ? claims.emails[0] : null) ||
-    ""
-  )
-    .toString()
-    .trim()
-    .toLowerCase();
-  const externalSubject = (claims.oid || claims.sub || "").toString().trim();
-
-  if (!email && !externalSubject) {
-    return { ok: false, status: 403, reason: "unidentifiable_caller" };
-  }
-
-  const founderTenantId = (
-    process.env.FOUNDER_TENANT_ID || "8C9527B9-8999-4B31-A306-F3D4CCC39FBD"
-  )
-    .trim()
-    .toUpperCase();
-
   try {
-    const p = await getPool();
-    const r = await p
-      .request()
-      .input("email", sql.NVarChar(320), email || null)
-      .input("external_subject", sql.NVarChar(400), externalSubject || null)
-      .input("founder_tenant_id", sql.UniqueIdentifier, founderTenantId)
-      .query(`
-        SELECT TOP 1 1 AS hit
-        FROM core.tenant_users tu
-        JOIN core.users u ON u.user_id = tu.user_id
-        WHERE tu.tenant_id = @founder_tenant_id
-          AND (tu.status IS NULL OR tu.status = 'active')
-          AND (
-            (@external_subject IS NOT NULL AND u.external_subject = @external_subject)
-            OR (@email IS NOT NULL AND LOWER(u.email) = @email)
-          );
-      `);
-
-    const isFounder = !!r.recordset[0];
-    cacheSet(claims, isFounder);
-    return { ok: true, isFounder };
+    const facts = await resolveFounderFacts(claims);
+    return { ok: true, isFounder: !!facts.is_founder_team };
   } catch (err) {
-    console.error("[enforceViewAsReadOnly] founder lookup failed:", err.message);
-    return { ok: false, status: 500, reason: "founder_lookup_failed", details: err.message };
+    if (err instanceof FounderUnavailable || err?.name === "FounderUnavailable") {
+      console.error("[enforceViewAsReadOnly] founder lookup unavailable:", err.message);
+      return { ok: false, status: 503, reason: "founder_lookup_unavailable", details: err.reason };
+    }
+    throw err;
   }
 }
 
-export function enforceViewAsReadOnly({ getPool = getPlatformPool } = {}) {
+export function enforceViewAsReadOnly() {
   return async function viewAsReadOnlyMiddleware(req, res, next) {
     const mode = String(req.headers["x-view-as-mode"] || "").toLowerCase().trim();
     if (mode !== "read_only") return next();
 
-    const r = await resolveIsFounder(req, getPool);
+    const r = await resolveIsFounder(req);
     if (!r.ok) {
       return res.status(r.status || 500).json({
         error: "view_as_forbidden",
