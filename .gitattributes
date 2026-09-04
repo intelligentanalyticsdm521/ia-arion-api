@@ -1,0 +1,4 @@
+# scripts/_tools.mjs is a declared byte-identical copy shared by five backends and its
+# sha256 is pinned by this repo's test suite. core.autocrlf=true on this machine would
+# otherwise hand a fresh checkout CRLF and break that pin. LF, everywhere, always.
+scripts/_tools.mjs text eol=lf
