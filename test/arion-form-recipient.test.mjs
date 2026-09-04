@@ -63,6 +63,25 @@ test('the generated contact form notifies the business email', () => {
   assert.notEqual(form.settings.email_to, '');
 });
 
+test('the form uses the RESOLVED recipient, not brand.email directly', () => {
+  // The business has no address on file, but its own contact copy shows one.
+  // A mutation that reads brand.email straight into email_to passes every
+  // other test in this file and still ships an empty recipient here.
+  const section = blockToElementorSection({
+    kind: 'contact',
+    brand: { business_name: 'Cedar Ridge Plant Services' },
+    block: {
+      ...CONTACT_BLOCK,
+      contact_methods: [
+        ...CONTACT_BLOCK.contact_methods,
+        { kind: 'email', label: 'Email', value: 'quotes@cedarridge.test', href: 'mailto:quotes@cedarridge.test' },
+      ],
+    },
+    seedId: 's',
+  });
+  assert.equal(findWidgets(section, 'form')[0].settings.email_to, 'quotes@cedarridge.test');
+});
+
 test('a form with no resolvable recipient is refused, not shipped empty', () => {
   assert.throws(
     () => blockToElementorSection({
