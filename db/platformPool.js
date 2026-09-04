@@ -161,6 +161,40 @@ export async function getSharedProfile(tenantId) {
   }
 }
 
+/**
+ * Foundation B — the ONE business profile (core.business_profile), the record
+ * the owner fills in on Settings -> Your business and every product reads.
+ *
+ * Read through the SAME platform pool getSharedProfile already uses, not over
+ * HTTP: this process holds a pool to iadm_platform, so an HTTP hop to
+ * platform-api would add a network dependency, a token to configure and a new
+ * way for site provisioning to fail, in exchange for nothing. platform-api's
+ * GET /internal/business-profile/:tenantId exists for the callers that have NO
+ * pool (arion-func timers, future agents).
+ *
+ * Returns null when the table is absent, empty or unreachable — a business
+ * that has never opened the page must behave exactly as it does today.
+ */
+export async function getBusinessProfile(tenantId) {
+  if (!tenantId) return null;
+  try {
+    const pool = await getPlatformPool();
+    const r = await pool.request()
+      .input("tid", sql.UniqueIdentifier, tenantId)
+      .query(`
+        SELECT TOP 1 industry, description, tagline, target_audience, brand_voice,
+               services_json, services_summary, service_area_json, version, updated_at
+        FROM core.business_profile WHERE tenant_id=@tid`);
+    return r.recordset[0] || null;
+  } catch (e) {
+    // Non-fatal by design. Before this table existed the answer was "nothing",
+    // and "nothing" is still a correct answer — never a thrown error inside a
+    // site build.
+    console.warn("[arion platformPool] getBusinessProfile unavailable:", e.message);
+    return null;
+  }
+}
+
 // API field → core.tenants column + max length. Only the CANONICAL org fields
 // ARION onboarding can supply; ARION-specific website answers (industry,
 // services, pages, voice…) stay ARION-local and are NOT written here.
