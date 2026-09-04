@@ -63,36 +63,42 @@ export async function findFounderRole(pool, claims) {
 }
 
 /**
- * Gate: static founder token OR a founder-role Portal sign-in.
+ * The half that runs AFTER requireAuth has proved who the caller is.
  *
  * A caller who is signed in but not a founder gets 403 (they exist, they are
  * simply not allowed) — never a 401, which would send the Portal off to
- * re-authenticate in a loop.
+ * re-authenticate in a loop. A lookup failure is a 500, never a quiet pass:
+ * an unreachable platform DB must not open the queue to everyone.
+ *
+ * Exported with an injectable pool so the refusal can be tested without a
+ * database — every dev fixture user carries the founder role, so dev traffic
+ * cannot exercise the refusal on its own.
  */
+export async function founderRoleGate(req, res, next, poolFactory = getPlatformPool) {
+  try {
+    const pool = await poolFactory();
+    const founder = await findFounderRole(pool, req.auth);
+    if (!founder) {
+      return res.status(403).json({
+        error: { code: "FORBIDDEN", message: "Founder access required", status: 403 },
+      });
+    }
+    req.founderAuth = { via: "platform_role", userId: founder.user_id, email: founder.email, roleKey: founder.role_key };
+    return next();
+  } catch (err) {
+    console.error("[requireFounder] role lookup failed:", err.message);
+    return res.status(500).json({
+      error: { code: "INTERNAL_ERROR", message: "Could not verify founder access", status: 500 },
+    });
+  }
+}
+
+/** Gate: static founder token OR a founder-role Portal sign-in. */
 export function requireFounder(req, res, next) {
   if (matchesFounderAdminToken(req)) {
     req.founderAuth = { via: "admin_token" };
     return next();
   }
   // requireAuth answers 401 itself when the token is missing or invalid.
-  return requireAuth(req, res, async () => {
-    try {
-      const pool = await getPlatformPool();
-      const founder = await findFounderRole(pool, req.auth);
-      if (!founder) {
-        return res.status(403).json({
-          error: { code: "FORBIDDEN", message: "Founder access required", status: 403 },
-        });
-      }
-      req.founderAuth = { via: "platform_role", userId: founder.user_id, email: founder.email, roleKey: founder.role_key };
-      return next();
-    } catch (err) {
-      // A lookup failure is a 500, never a quiet pass — an unreachable
-      // platform DB must not open the queue to everyone.
-      console.error("[requireFounder] role lookup failed:", err.message);
-      return res.status(500).json({
-        error: { code: "INTERNAL_ERROR", message: "Could not verify founder access", status: 500 },
-      });
-    }
-  });
+  return requireAuth(req, res, () => founderRoleGate(req, res, next));
 }

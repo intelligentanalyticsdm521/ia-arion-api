@@ -26,7 +26,7 @@ import {
   RESOLVED_TEMPLATE_KEY,
   toApi,
 } from "../lib/siteRequests.js";
-import { requireFounder, matchesFounderAdminToken, findFounderRole } from "../middleware/requireFounder.js";
+import { requireFounder, founderRoleGate, matchesFounderAdminToken, findFounderRole } from "../middleware/requireFounder.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel) => readFileSync(path.join(ROOT, rel), "utf8");
@@ -373,4 +373,35 @@ test("PATCH emails the client only when the status actually MOVED to done/declin
   assert.match(src, /sendSiteRequestResolvedEmail\(\{ request, \.\.\.inputs \}\)/);
   assert.match(src, /\.catch\(\(e\) => console\.error\("\[admin\/site-requests\] resolved email:/, "email failure never fails the PATCH");
   assert.match(src, /clientEmailQueued: movedToResolved/, "the founder UI can say whether the client was told");
+});
+
+test("the role gate lets a founder through and refuses everyone else — 403, and 500 if it cannot tell", async () => {
+  const founderRow = [{ user_id: "u1", email: "brandon@example.com", full_name: "Brandon", role_key: "founder" }];
+  const mkRes = () => { const r = { code: null, body: null }; r.status = (c) => { r.code = c; return r; }; r.json = (b) => { r.body = b; return r; }; return r; };
+
+  // founder → through
+  let req = { auth: { oid: "s1", email: "brandon@example.com" } };
+  let res = mkRes();
+  let passed = false;
+  await founderRoleGate(req, res, () => { passed = true; }, async () => fakePool({ rows: founderRow }));
+  assert.equal(passed, true);
+  assert.equal(req.founderAuth.via, "platform_role");
+  assert.equal(req.founderAuth.roleKey, "founder");
+
+  // signed in, no platform role → 403, handler never runs
+  req = { auth: { oid: "s2", email: "client@example.com" } };
+  res = mkRes();
+  passed = false;
+  await founderRoleGate(req, res, () => { passed = true; }, async () => fakePool({ rows: [] }));
+  assert.equal(passed, false, "a client must never reach the cross-business queue");
+  assert.equal(res.code, 403);
+  assert.equal(res.body.error.code, "FORBIDDEN");
+
+  // platform DB unreachable → 500, still closed
+  req = { auth: { oid: "s3", email: "brandon@example.com" } };
+  res = mkRes();
+  passed = false;
+  await founderRoleGate(req, res, () => { passed = true; }, async () => { throw new Error("platform pool down"); });
+  assert.equal(passed, false, "an absence-based guard would have failed OPEN here");
+  assert.equal(res.code, 500);
 });
