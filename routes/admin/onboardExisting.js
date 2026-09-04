@@ -29,6 +29,7 @@ import { upsertTenantInvitation } from '../../lib/tenantInvitations.js';
 import { installPluginsForTier } from '../../lib/pluginStack.js';
 import { stripHostingerOnboardingPlugins, checkWpInstallExists } from '../../lib/hostingerSsh.js';
 import { syncSiteTiersFromTenantSubscription } from '../../lib/purchaseTierSync.js';
+import { repairDerivedSlug } from '../../lib/reservedSlugs.js';
 
 const ARION_API_BASE = (process.env.ARION_API_BASE_URL
   || 'https://app-arion-api-prod-e6fuc9gzd8f3hqfe.centralus-01.azurewebsites.net').replace(/\/+$/, '');
@@ -497,11 +498,26 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
  * Loops -2/-3/etc on collision until a free slug is found.
  */
 async function generateUniqueSlug(pool, name) {
-  let base = String(name || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 56);
+  // D-38 — the first path segment on customer.ia-dm.com / crew.ia-dm.com /
+  // book.ia-dm.com names the BUSINESS, and some segments are not businesses
+  // (`p`, `unsubscribe`, `present`, `confirm`, `cancel`, the static asset
+  // directories). A business minted with one of those as its slug is
+  // unreachable: its customers land on a public token route instead. Nothing
+  // checked that here, and arion mints tenants from two paths.
+  //
+  // This slug is DERIVED from a business name, never typed by a caller, so it
+  // is REPAIRED rather than refused — failing an onboarding over a word the
+  // client has never heard of is the worse outcome, and the suffix is the same
+  // shape the collision loop below already produces. The list is shared,
+  // byte-for-byte, with oliver-api and the three apps.
+  let base = repairDerivedSlug(
+    String(name || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 56),
+    crypto.randomUUID().slice(0, 6),
+  );
   if (base.length < 3) base = 'tenant-' + crypto.randomUUID().slice(0, 6);
   let candidate = base;
   let n = 2;

@@ -1,0 +1,29 @@
+{
+  "_note": "D-38. The first path segment on a shared app host names the BUSINESS (customer.ia-dm.com/<slug>/, crew.ia-dm.com/<slug>/, book.ia-dm.com/<slug>/). These segments are NOT businesses, so no business may be created or renamed with one of them as its slug. DECLARED BYTE-IDENTICAL COPY: oliver-api/lib/reserved-slugs.json, oliver-customer-portal/src/lib/reserved-slugs.json, oliver-employee-portal/src/lib/reserved-slugs.json, oliver-ops/src/lib/reserved-slugs.json. Each repo's suite pins this file's sha256 to RESERVED_SLUGS_SHA256 and fails if it drifts. Change it in one repo and every suite goes red until all four match.",
+  "_shape": "A slug must ALSO match ^[a-z0-9][a-z0-9-]{0,62}$, which is what keeps sw.js, manifest.webmanifest, favicon.ico, robots.txt and every other dotted file at the origin root out — they can never be slugs, so they are not listed here.",
+  "_scope": "The union of what the three apps reserve. In-app route names that only ever appear AFTER the slug (jobs, invoices, account, api, login) are deliberately absent: reserving them would take names away from businesses for no gain, because path mode applies only on a shared host. See appBase.ts in each app.",
+  "segments": [
+    ".well-known",
+    "assets",
+    "cancel",
+    "confirm",
+    "css",
+    "images",
+    "p",
+    "present",
+    "static",
+    "unsubscribe"
+  ],
+  "_why": {
+    ".well-known": "static, served by the host itself",
+    "assets": "static asset directory (all three apps)",
+    "cancel": "booking app: public token route, no business context",
+    "confirm": "booking app: public token route, no business context",
+    "css": "static asset directory (all three apps)",
+    "images": "static asset directory (all three apps)",
+    "p": "customer + crew apps: public token route (proposals), no business context",
+    "present": "crew app: public token route, no business context",
+    "static": "static asset directory (all three apps)",
+    "unsubscribe": "customer app: public token route; the token carries the tenant, so demanding a slug would break every unsubscribe link already in the world"
+  }
+}
