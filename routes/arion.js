@@ -52,6 +52,7 @@ import gbpRouter from './arion/gbp.js';
 import integrationsRouter from './arion/integrations.js';
 import pluginRouter from './arion/plugin.js';
 import blocksRouter from './arion/blocks.js';
+import sitePagesRouter from './arion/pages.js';
 import intelligenceRouter from './arion/intelligence.js';
 import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } from '../lib/websiteBuilder/costGuard.js';
 import { signOAuthState } from '../lib/oauthState.js';
@@ -89,6 +90,12 @@ router.use('/sites/:siteId', integrationsRouter);
 // ARION IL Website Builder — block-emitter generation + draft persistence.
 // See lib/websiteBuilder/ + db/migrations/024_ai_website_builder.sql.
 router.use('/sites/:siteId/blocks', blocksRouter);
+
+// ARION site builder — the Portal's Pages list and section-list editor.
+// Reads and writes the live WordPress page through the IA plugin's site-token
+// routes (W-2). Every ARION tier can use it (W-4); only the AI actions inside
+// it will cost credits, and those are Phase 1B.
+router.use('/sites/:siteId', sitePagesRouter);
 
 // ARION Intelligence — 6 single-source reports + cached aggregator.
 // See lib/intelligence/ + db/migrations/031_intelligence_cache.sql.
