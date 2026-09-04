@@ -31,6 +31,8 @@ import {
   resolveGbpLocationName,
 } from '../lib/gbpApi.js';
 import { draftReviewReply } from '../lib/gbpAiReply.js';
+import { maybeTagGbpWebsite } from '../lib/gbpUtm.js';
+import { tenantOwnsService } from '../lib/coreTenants.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
 import { getTrafficData as bingGetTrafficData, getPageTrafficData as bingGetPageTrafficData, getSitemaps as bingGetSitemaps, submitUrl as bingSubmitUrl, getUrlSubmissionQuota as bingGetUrlSubmissionQuota, getCrawlStats as bingGetCrawlStats, getUrlInfo as bingGetUrlInfo, verifyKey as bingVerifyKey, getRankAndTrafficStats as bingGetRankAndTrafficStats, getKeywordStats as bingGetKeywordStats, addSite as bingAddSite, getSiteEntry as bingGetSiteEntry, pollUntilVerified as bingPollUntilVerified } from '../lib/bingWebmaster.js';
 import { fetchWordPressPages, detectSitemapUrl, submitToGoogle, submitToBing, listGoogleSitemaps } from '../lib/sitemapGenerator.js';
@@ -1582,7 +1584,15 @@ router.post('/sites/:siteId/gbp/create-listing', async (req, res) => {
       categories: { primaryCategory },
       phoneNumbers: { primaryPhone: String(phone).trim() },
     };
-    if (website_uri && String(website_uri).trim()) locationBody.websiteUri = String(website_uri).trim();
+    if (website_uri && String(website_uri).trim()) {
+      // Auto-UTM (LEADGEN_POST_CAPTURE_SCOPE §8.3 item 5, decision L11): the
+      // website link on a Google Business Profile is a link WE publish, so we
+      // stamp it before it leaves. SPARK-owning tenants only — SPARK is where
+      // the attribution lands. Idempotent, and a link the client already
+      // tagged is left exactly as it is.
+      const ownsSpark = await tenantOwnsService(tenantId, 'spark');
+      locationBody.websiteUri = maybeTagGbpWebsite(String(website_uri).trim(), { ownsSpark });
+    }
     if (hasAddress) {
       locationBody.storefrontAddress = {
         regionCode: address?.regionCode || 'US',
@@ -5895,7 +5905,14 @@ router.patch('/business/update', async (req, res) => {
     const maskParts = [];
     if (name !== undefined) { updates.title = name; maskParts.push('title'); }
     if (phone !== undefined) { updates.phoneNumbers = { primaryPhone: phone }; maskParts.push('phoneNumbers.primaryPhone'); }
-    if (website !== undefined) { updates.websiteUri = website; maskParts.push('websiteUri'); }
+    if (website !== undefined) {
+      // Auto-UTM on the profile's website link — see the note on
+      // /gbp/create-listing above. SPARK-owning tenants only; never
+      // double-tagged; a link the client tagged themselves is untouched.
+      const ownsSpark = await tenantOwnsService(tenantId, 'spark');
+      updates.websiteUri = maybeTagGbpWebsite(website, { ownsSpark });
+      maskParts.push('websiteUri');
+    }
     if (description !== undefined) { updates.profile = { description }; maskParts.push('profile.description'); }
     if (regularHours !== undefined) { updates.regularHours = regularHours; maskParts.push('regularHours'); }
     if (specialHours !== undefined) { updates.specialHours = specialHours; maskParts.push('specialHours'); }
