@@ -169,6 +169,10 @@ router.post('/:kind', async (req, res) => {
         kind,
         block_json:     result.block,
         elementor_json: result.elementor,
+        // Present when the adapter refused to build the section (e.g. a
+        // contact form with no notification recipient). The draft is saved
+        // either way; the portal must show this rather than a bare success.
+        elementor_error: result.elementorError || null,
         tokens_used: {
           input:  result.tokens?.input  || 0,
           output: result.tokens?.output || 0,
