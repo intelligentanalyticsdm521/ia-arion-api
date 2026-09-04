@@ -278,6 +278,50 @@ async function upsertPage(existing, { title, status, sections }) {
     console.log(`[seed] arion.site ${SITE_ID} -> ${DOMAIN} (tier ${TIER}, tenant ${TENANT})`);
   }
 
+  // 1b. The signup session the brand context reads.
+  //
+  // Without it `loadBrandContext` answers with an empty business name and an
+  // empty notification email, and everything downstream quietly degrades: a
+  // starter hero says "Welcome to our business", and the curated CONTACT
+  // layouts are refused outright because a form has to know which inbox to
+  // notify. On a real site this row is written at signup; the fixture was
+  // missing it, so the fixture was not actually the shape a client's site is.
+  if (APPLY) {
+    await pool.request()
+      .input('siteId',   sql.UniqueIdentifier, SITE_ID)
+      .input('tenantId', sql.UniqueIdentifier, TENANT)
+      .input('email',    sql.NVarChar(320),    BRAND.email)
+      .input('stripe',   sql.NVarChar(255),    `dev-fixture-${SITE_ID}`)
+      .input('answers',  sql.NVarChar(sql.MAX), JSON.stringify({
+        businessName:   BRAND.business_name,
+        contactEmail:   BRAND.email,
+        industry:       'Garden rooms and outbuildings',
+        tagline:        'Garden rooms built to last a lifetime',
+        description:    'A three-person joinery firm building insulated garden rooms, studios and guest rooms.',
+        targetAudience: 'Homeowners who need another room and do not want to move',
+        services:       BLOCKS.services.services.map((x) => x.title),
+        brandVoice:     'warm, plain-spoken, unhurried',
+        stylePreference: 'clean, photographic',
+        location:       'Fernbrook and forty miles around it',
+      }))
+      .query(`
+        MERGE arion.signup_session AS t
+        USING (SELECT @stripe AS stripe_session_id) AS s
+          ON t.stripe_session_id = s.stripe_session_id
+        WHEN MATCHED THEN UPDATE SET
+          tenant_id = @tenantId, site_id = @siteId, email = @email,
+          questionnaire_json = @answers, questionnaire_submitted_at = SYSDATETIMEOFFSET(),
+          submitted_at = SYSDATETIMEOFFSET()
+        WHEN NOT MATCHED THEN INSERT
+          (stripe_session_id, tenant_id, site_id, email, questionnaire_json,
+           questionnaire_submitted_at, created_at, submitted_at)
+          VALUES
+          (@stripe, @tenantId, @siteId, @email, @answers,
+           SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET());
+      `);
+    console.log(`[seed] brand context: ${BRAND.business_name} <${BRAND.email}>`);
+  }
+
   // 2. Prove the plugin answers before writing anything into it.
   const health = await plugin('/status');
   const status = health?.data ?? health ?? {};

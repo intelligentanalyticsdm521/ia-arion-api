@@ -8,8 +8,14 @@
  * TIERS (W-4): the editor is on EVERY ARION tier, Lite included. Nothing here
  * is tier-gated except which section archetypes can be ADDED — Lite sites have
  * no Elementor Pro, so the one archetype that needs the Pro form widget is
- * offered with `available:false` and the reason stated, never silently hidden.
- * Only the AI actions (Phase 1B) will cost credits; none of these do.
+ * offered with `available:false` and the reason stated, never silently hidden
+ * — and the AI actions, which need a paid plan ("Lite never gets LLM",
+ * feedback_intelligence_tier_data_gated). Only the AI actions cost credits.
+ *
+ * AI (Phase 1B): the model PROPOSES field values and nothing else. A proposal
+ * is stored, shown to the client as a before/after, and reaches the website
+ * only through the ordinary save below — same snapshot, same Undo. Every call
+ * is metered through ARGUS before a token is spent (lib/websiteBuilder/aiEdit.js).
  *
  * SAFETY (W-3): live edit, a snapshot before every write, one-tap Undo, and a
  * preview that never writes. New pages are born drafts. There is no per-page
@@ -27,6 +33,11 @@
  *   POST   /pages/:pageId/preview       -> HTML, writes nothing
  *   POST   /media                       -> sideload into the site's library
  *   GET    /section-library             -> the "add a section" catalogue
+ *   GET    /ai-pricing                  -> what an AI action costs, from the DB
+ *   POST   /pages/:pageId/sections/:handle/ai-edit  -> propose, never write
+ *   POST   /pages/:pageId/ai-edit                   -> propose across the page
+ *   GET    /pages/:pageId/proposals
+ *   POST   /proposals/:proposalId/discard
  */
 
 import { Router } from 'express';
@@ -43,10 +54,21 @@ import {
   fetchPages, fetchPageSections, writePageSections, undoPage, createPage, sideloadMedia,
 } from '../../lib/websiteBuilder/pageClient.js';
 import { pluginPost } from '../../lib/pluginClient.js';
+import {
+  proposeSectionEdit, proposePageEdit, aiTierGate,
+  ACTION_SECTION_EDIT, ACTION_PAGE_EDIT, MAX_INSTRUCTION_CHARS,
+} from '../../lib/websiteBuilder/aiEdit.js';
+import {
+  saveProposal, markProposalsApplied, resolveProposal, listProposals,
+} from '../../lib/websiteBuilder/proposalStore.js';
+import { libraryPickerRows, buildLibrarySection } from '../../lib/websiteBuilder/libraryCatalog.js';
+import { maybeDevModel } from '../../lib/websiteBuilder/aiDevStub.js';
+import { getActionPricing } from '../../lib/argus/callWrapper.js';
 
 const router = Router({ mergeParams: true });
 
 const MAX_SECTIONS_PER_PAGE = 60;
+const TOP_LEVEL_EL_TYPES = Object.freeze(new Set(['section', 'container']));
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
 const ALLOWED_MEDIA_TYPES = Object.freeze({
   'image/jpeg': 'jpg',
@@ -300,7 +322,10 @@ function buildNodes(incoming) {
 
   incoming.forEach((entry, i) => {
     const node = entry?.node;
-    if (!node || typeof node !== 'object' || node.elType !== 'section') {
+    // `section` is classic Elementor; `container` is the flexbox element every
+    // curated-library blueprint is built from. Both are legitimate top-level
+    // page nodes and both must survive the round trip.
+    if (!node || typeof node !== 'object' || !TOP_LEVEL_EL_TYPES.has(node.elType)) {
       errors.push({ field: `sections[${i}]`, message: 'One of the sections is missing its content.' });
       return;
     }
@@ -338,6 +363,10 @@ router.put('/pages/:pageId/sections', async (req, res) => {
   const incoming = Array.isArray(req.body?.sections) ? req.body.sections : null;
   const title = req.body?.title == null ? null : String(req.body.title).trim();
   const status = req.body?.status == null ? null : String(req.body.status).toLowerCase();
+  // The AI proposals this save is carrying. They are stamped `applied` AFTER
+  // the write reaches the website, never before — an audit row that records a
+  // publish that did not happen is worse than no audit row at all.
+  const proposalIds = Array.isArray(req.body?.proposalIds) ? req.body.proposalIds : [];
 
   if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
   if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
@@ -394,6 +423,11 @@ router.put('/pages/:pageId/sections', async (req, res) => {
     // this the client hits Save, reloads, and sees the old page.
     const purge = await pluginPost(site, '/purge-cache', {});
 
+    // The write landed, so and only so the proposals it carried are `applied`.
+    const stamped = proposalIds.length
+      ? await markProposalsApplied(pool, { tenantId, siteId, proposalIds })
+      : { applied: 0, ids: [] };
+
     return res.json({
       data: {
         pageId,
@@ -404,6 +438,7 @@ router.put('/pages/:pageId/sections', async (req, res) => {
         canUndo: true,
         undoCount: Number(result.data?.snapshot_count || 0),
         cachePurged: !!purge.ok,
+        proposalsApplied: stamped.applied,
       },
       meta: { site_id: siteId },
     });
@@ -580,27 +615,51 @@ router.post('/media', async (req, res) => {
 router.post('/sections', async (req, res) => {
   const tenantId = req.tenant?.tenantId;
   const { siteId } = req.params;
+  const blueprintId = String(req.body?.blueprintId || '').trim();
   const kind = String(req.body?.kind || '').toLowerCase();
   if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
 
-  const meta = sectionKindMeta(kind);
-  if (!meta) return bad(res, 'UNKNOWN_SECTION', `We do not have a section called "${kind}".`);
+  // Either a plain archetype ("a hero, filled from my details") or one of the
+  // curated library's own layouts. The library path is Phase 1B; the rule it
+  // obeys is unchanged from 1A — a layout the editor cannot take charge of is
+  // never offered and, if asked for anyway, is refused with the reason.
+  const meta = blueprintId ? null : sectionKindMeta(kind);
+  if (!blueprintId && !meta) return bad(res, 'UNKNOWN_SECTION', `We do not have a section called "${kind}".`);
 
   try {
     const pool = await getServicesPool();
     const site = await loadSite(pool, tenantId, siteId);
     if (!site) return notFound(res, 'That website is not on your account.');
 
-    if (meta.requiresElementorPro && !siteAllowsPro(site)) {
+    const allowPro = siteAllowsPro(site);
+    if (meta?.requiresElementorPro && !allowPro) {
       return bad(res, 'SECTION_NOT_AVAILABLE', meta.proReason);
     }
 
     const brand = await loadBrandContext(pool, { tenantId, siteId });
-    const built = buildStarterSection(kind, brand);
-    if (!built.ok) return bad(res, built.code.toUpperCase(), built.message);
 
-    const [entry] = reduceToSectionList([built.node]);
-    return res.status(201).json({ data: { section: publicSection(entry) }, meta: { site_id: siteId } });
+    let node;
+    if (blueprintId) {
+      const built = await buildLibrarySection({ blueprintId, brand, allowPro });
+      if (!built.ok) return bad(res, built.code, built.message);
+      node = built.node;
+    } else {
+      const built = buildStarterSection(kind, brand);
+      if (!built.ok) return bad(res, built.code.toUpperCase(), built.message);
+      node = built.node;
+    }
+
+    const [entry] = reduceToSectionList([node]);
+    if (!entry?.editable) {
+      // Belt and braces: whatever we just built, if the ordinary read path
+      // cannot edit it, the client is not getting it.
+      return bad(res, 'SECTION_NOT_EDITABLE',
+        'The editor could not take charge of every part of that layout, so we did not add it.');
+    }
+    return res.status(201).json({
+      data: { section: publicSection(entry), blueprintId: blueprintId || null },
+      meta: { site_id: siteId },
+    });
   } catch (err) {
     return boom(res, err, 'arion/pages:build-section');
   }
@@ -620,16 +679,33 @@ router.get('/section-library', async (req, res) => {
     if (!site) return notFound(res, 'That website is not on your account.');
 
     const allowPro = siteAllowsPro(site);
+    const brand = await loadBrandContext(pool, { tenantId, siteId });
+    // Curated-library layouts, but only the ones the editor can look after
+    // afterwards. Unreachable library (local dev, blob hiccup) means an empty
+    // list and the eight scratch archetypes — a smaller menu, not a broken one.
+    let variants = {};
+    try {
+      variants = await libraryPickerRows({ allowPro, brand });
+    } catch (err) {
+      console.warn('[arion/pages:section-library] library variants unavailable:', err?.message);
+    }
+
     // The FULL field spec goes to the Portal — labels, types, limits, choices,
     // and the sub-fields of every list. The edit sheet renders from this, so
     // there is one description of a section and it lives in sectionSchema.js.
     const catalog = sectionCatalog({ allowPro }).map((entry) => ({
       ...entry,
       fields: sectionKindMeta(entry.kind).fields,
+      variants: variants[entry.kind] || [],
     }));
 
+    const gate = aiTierGate(site);
     return res.json({
-      data: { sections: catalog, elementorProAvailable: allowPro },
+      data: {
+        sections: catalog,
+        elementorProAvailable: allowPro,
+        ai: { available: gate.allowed, reason: gate.message },
+      },
       meta: { site_id: siteId, tier: site.arion_tier || null },
     });
   } catch (err) {
@@ -637,5 +713,411 @@ router.get('/section-library', async (req, res) => {
   }
 });
 
+/* ==========================================================================
+ * "Ask ARGUS to change it" — Phase 1B.
+ *
+ * Everything below PROPOSES. Nothing below writes to a website. A proposal
+ * becomes real when the client approves it and the ordinary
+ * PUT /pages/:pageId/sections carries it, which is why there is no "apply"
+ * route here: a second write path would be a second thing to keep safe, and
+ * the save path already has the snapshot, the Undo and the cache purge.
+ * ======================================================================== */
+
+/** Everything the two AI routes need before they can spend anything. */
+async function aiPreflight(req, res) {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  if (!tenantId || !siteId) { bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.'); return null; }
+
+  const pageId = readPageId(req.params.pageId);
+  if (!pageId) { bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.'); return null; }
+
+  const instruction = String(req.body?.instruction || '').trim();
+  if (!instruction) { bad(res, 'NO_INSTRUCTION', 'Tell us what you would like changed first.'); return null; }
+  if (instruction.length > MAX_INSTRUCTION_CHARS) {
+    bad(res, 'INSTRUCTION_TOO_LONG',
+      `Keep the request under ${MAX_INSTRUCTION_CHARS} characters — a sentence or two works best.`);
+    return null;
+  }
+
+  const pool = await getServicesPool();
+  const site = await loadSite(pool, tenantId, siteId);
+  if (!site) { notFound(res, 'That website is not on your account.'); return null; }
+
+  // The plan gate is here, ahead of everything expensive. A refused plan
+  // costs no token, no credit and no round trip to a model.
+  const gate = aiTierGate(site);
+  if (!gate.allowed) {
+    res.status(403).json({
+      error: { code: 'AI_NOT_ON_THIS_PLAN', message: gate.message, status: 403 },
+      meta: { current_tier: gate.tier },
+    });
+    return null;
+  }
+
+  const brand = await loadBrandContext(pool, { tenantId, siteId });
+  return { tenantId, siteId, pageId, instruction, pool, site, brand };
+}
+
+function aiFailure(res, error) {
+  const status = Number(error?.status) || 502;
+  return res.status(status).json({
+    error: {
+      code: error?.code || 'AI_FAILED',
+      message: error?.message || 'ARGUS AI could not answer just now. Nothing was changed.',
+      status,
+    },
+    ...(error?.errors ? { errors: error.errors } : {}),
+    ...(error?.balance != null ? { meta: { balance: error.balance, required: error.required } } : {}),
+  });
+}
+
+/* --------------------------------------------------------------------------
+ * POST /pages/:pageId/sections/:handle/ai-edit
+ * Body: { instruction, section: { index?, fields, node } }
+ *
+ * The section travels in the body, exactly as it does for Preview: the editor
+ * is looking at unsaved changes and those are what the client means when they
+ * say "make this friendlier". `:handle` names the section for the audit row;
+ * it is not unique on a page (two heroes share one), so `index` rides along.
+ * ------------------------------------------------------------------------ */
+router.post('/pages/:pageId/sections/:handle/ai-edit', async (req, res) => {
+  let ctx;
+  try {
+    ctx = await aiPreflight(req, res);
+  } catch (err) {
+    return boom(res, err, 'arion/pages:ai-edit-section:preflight');
+  }
+  if (!ctx) return undefined;
+
+  const handle = String(req.params.handle || '');
+  const incoming = req.body?.section || {};
+  const node = incoming.node;
+  const parsed = parseSectionHandle(node?.settings?._title);
+  const kind = parsed?.kind && sectionKindMeta(parsed.kind) ? parsed.kind : null;
+
+  if (!kind) {
+    return bad(res, 'SECTION_NOT_EDITABLE',
+      'That section was built on the website itself, so ARGUS AI cannot change it here. Use “Ask us to change it”.');
+  }
+  const fields = (incoming.fields && typeof incoming.fields === 'object')
+    ? incoming.fields
+    : extractFields(node, kind);
+
+  try {
+    const result = await proposeSectionEdit({
+      pool: ctx.pool,
+      tenantId: ctx.tenantId,
+      userId: req.user?.userId || req.user?.oid || null,
+      site: ctx.site,
+      kind,
+      fields,
+      brand: ctx.brand,
+      instruction: ctx.instruction,
+      // Local dev only, and only against a local database. Everything else on
+      // this path — the plan gate, the balance check, the ARGUS audit row, the
+      // debit — runs exactly as it does in production; the stand-in replaces
+      // the provider request and nothing else. Null in every other environment.
+      ...(maybeDevModel() ? { callModel: maybeDevModel() } : {}),
+    });
+    if (!result.ok) return aiFailure(res, result.error);
+
+    const p = result.proposal;
+    const stored = await saveProposal(ctx.pool, {
+      proposalId: p.proposal_id,
+      tenantId: ctx.tenantId,
+      siteId: ctx.siteId,
+      pageId: ctx.pageId,
+      scope: 'section',
+      sectionHandle: handle.slice(0, 200) || null,
+      sectionIndex: Number.isInteger(Number(incoming.index)) ? Number(incoming.index) : null,
+      sectionKind: kind,
+      instruction: ctx.instruction,
+      before: p.before,
+      after: p.after,
+      diffPlain: p.diff_plain,
+      creditsCharged: p.cost_units,
+      model: p.model,
+      actorEmail: req.user?.email || null,
+    });
+
+    return res.status(201).json({
+      data: {
+        proposal_id: p.proposal_id,
+        scope: 'section',
+        kind,
+        before: p.before,
+        after: p.after,
+        diff: p.diff,
+        diff_plain: p.diff_plain,
+        summary: p.summary,
+        cost_units: p.cost_units,
+        recorded: stored.stored,
+        poweredBy: 'ARGUS AI',
+      },
+      meta: { site_id: ctx.siteId, page_id: ctx.pageId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:ai-edit-section');
+  }
+});
+
+/* --------------------------------------------------------------------------
+ * POST /pages/:pageId/ai-edit
+ * Body: { instruction, sections: [ { fields, node } ] }
+ *
+ * Page-level: "make the tone warmer", "add a section about winter services".
+ * It may propose edits to existing sections AND brand-new sections, which the
+ * Portal shows as rows marked "· proposed" until they are approved.
+ * ------------------------------------------------------------------------ */
+router.post('/pages/:pageId/ai-edit', async (req, res) => {
+  let ctx;
+  try {
+    ctx = await aiPreflight(req, res);
+  } catch (err) {
+    return boom(res, err, 'arion/pages:ai-edit-page:preflight');
+  }
+  if (!ctx) return undefined;
+
+  const incoming = Array.isArray(req.body?.sections) ? req.body.sections : null;
+  if (!incoming || incoming.length === 0) {
+    return bad(res, 'NO_SECTIONS', 'There is nothing on this page to change yet.');
+  }
+  if (incoming.length > MAX_SECTIONS_PER_PAGE) {
+    return bad(res, 'TOO_MANY_SECTIONS', `A page can hold up to ${MAX_SECTIONS_PER_PAGE} sections.`);
+  }
+
+  // Describe the page to the engine in its own vocabulary: which sections it
+  // may touch, and what they currently say.
+  const described = incoming.map((entry, i) => {
+    const parsed = parseSectionHandle(entry?.node?.settings?._title);
+    const kind = parsed?.kind && sectionKindMeta(parsed.kind) ? parsed.kind : null;
+    const fields = (entry?.fields && typeof entry.fields === 'object')
+      ? entry.fields
+      : (kind ? extractFields(entry.node, kind) : null);
+    return { index: i, kind, editable: !!kind && !!fields, fields };
+  });
+
+  try {
+    const result = await proposePageEdit({
+      pool: ctx.pool,
+      tenantId: ctx.tenantId,
+      userId: req.user?.userId || req.user?.oid || null,
+      site: ctx.site,
+      sections: described,
+      brand: ctx.brand,
+      instruction: ctx.instruction,
+      ...(maybeDevModel() ? { callModel: maybeDevModel() } : {}),
+    });
+    if (!result.ok) return aiFailure(res, result.error);
+
+    const p = result.proposal;
+
+    // A proposed NEW section needs a real Elementor node before the editor can
+    // show it, preview it or save it. The server builds it, the same way "add
+    // a section" does, and then applies the proposed copy to it — the Portal
+    // still never invents Elementor JSON.
+    const additions = [];
+    for (const add of p.additions) {
+      const built = buildStarterSection(add.kind, ctx.brand);
+      if (!built.ok) continue;
+      const base = extractFields(built.node, add.kind);
+      const merged = { ...base, ...add.fields };
+      const check = validateFields(add.kind, merged);
+      if (!check.ok) continue;
+      const node = applyFields(built.node, add.kind, merged);
+      const [entry] = reduceToSectionList([node]);
+      if (!entry?.editable) continue;
+      additions.push({
+        afterIndex: add.afterIndex,
+        label: add.label,
+        diff: add.diff,
+        section: publicSection(entry),
+      });
+    }
+
+    if (p.edits.length === 0 && additions.length === 0) {
+      return res.status(422).json({
+        error: {
+          code: 'AI_NOTHING_TO_CHANGE',
+          message: 'ARGUS AI did not find anything it could change for that request. Try describing it a different way.',
+          status: 422,
+        },
+      });
+    }
+
+    const stored = await saveProposal(ctx.pool, {
+      proposalId: p.proposal_id,
+      tenantId: ctx.tenantId,
+      siteId: ctx.siteId,
+      pageId: ctx.pageId,
+      scope: 'page',
+      instruction: ctx.instruction,
+      before: p.edits.map((e) => ({ index: e.index, fields: e.before })),
+      after: {
+        edits: p.edits.map((e) => ({ index: e.index, fields: e.after })),
+        additions: additions.map((a) => ({ afterIndex: a.afterIndex, kind: a.section.kind, fields: a.section.fields })),
+      },
+      diffPlain: p.diff_plain,
+      creditsCharged: p.cost_units,
+      model: p.model,
+      actorEmail: req.user?.email || null,
+    });
+
+    return res.status(201).json({
+      data: {
+        proposal_id: p.proposal_id,
+        scope: 'page',
+        edits: p.edits.map((e) => ({
+          index: e.index, kind: e.kind, label: e.label, before: e.before, after: e.after, diff: e.diff,
+        })),
+        additions,
+        skipped: p.skipped,
+        diff_plain: p.diff_plain,
+        summary: p.summary,
+        cost_units: p.cost_units,
+        recorded: stored.stored,
+        poweredBy: 'ARGUS AI',
+      },
+      meta: { site_id: ctx.siteId, page_id: ctx.pageId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:ai-edit-page');
+  }
+});
+
+/* --------------------------------------------------------------------------
+ * POST /proposals/:proposalId/discard — the client said no.
+ *
+ * No refund, and the row says so: the model call happened and ARGUS debited
+ * it at call time. Pretending otherwise would mean the credit ledger and the
+ * proposal list disagree.
+ * ------------------------------------------------------------------------ */
+router.post('/proposals/:proposalId/discard', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId, proposalId } = req.params;
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!/^[0-9a-f-]{36}$/i.test(String(proposalId || ''))) {
+    return bad(res, 'BAD_PROPOSAL_ID', 'That suggestion reference is not valid.');
+  }
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const moved = await resolveProposal(pool, { tenantId, siteId, proposalId, status: 'discarded' });
+    if (moved === 0) {
+      return res.status(409).json({
+        error: {
+          code: 'PROPOSAL_ALREADY_RESOLVED',
+          message: 'That suggestion has already been used or thrown away.',
+          status: 409,
+        },
+      });
+    }
+    return res.json({ data: { proposalId, status: 'discarded' }, meta: { site_id: siteId } });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:proposal-discard');
+  }
+});
+
+/* --------------------------------------------------------------------------
+ * GET /pages/:pageId/proposals — what ARGUS has suggested on this page.
+ * ------------------------------------------------------------------------ */
+router.get('/pages/:pageId/proposals', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const pageId = readPageId(req.params.pageId);
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    let rows = [];
+    try {
+      rows = await listProposals(pool, { tenantId, siteId, pageId });
+    } catch (err) {
+      // Migration 059 not applied here yet. An empty history is the truth in
+      // that case, and it must not take the editor down with it.
+      console.warn('[arion/pages:proposals] history unavailable:', err?.message);
+    }
+    return res.json({
+      data: {
+        proposals: rows.map((r) => ({
+          proposalId: r.proposal_id,
+          scope: r.scope,
+          sectionKind: r.section_kind,
+          sectionIndex: r.section_index,
+          instruction: r.instruction,
+          diffPlain: r.diff_plain,
+          status: r.status,
+          creditsCharged: r.credits_charged,
+          by: r.actor_email,
+          createdAt: r.created_at,
+          resolvedAt: r.resolved_at,
+        })),
+      },
+      meta: { site_id: siteId, page_id: pageId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:proposals');
+  }
+});
+
+/* --------------------------------------------------------------------------
+ * GET /ai-pricing — what an AI action costs, read from the database.
+ *
+ * The Portal shows "This uses N credits" BEFORE the client sends anything,
+ * and N comes from here. It is never hardcoded in the UI: the existing
+ * WebsiteAiBuilder page does exactly that and the server charges something
+ * else, which is the defect SCOPE §2.4 records (feedback_no_fabricated_catalog).
+ * ------------------------------------------------------------------------ */
+router.get('/ai-pricing', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const gate = aiTierGate(site);
+    const actions = {};
+    for (const [key, actionType] of [['section', ACTION_SECTION_EDIT], ['page', ACTION_PAGE_EDIT]]) {
+      let row = null;
+      try {
+        row = await getActionPricing(pool, actionType);
+      } catch (err) {
+        console.warn(`[arion/pages:ai-pricing] ${actionType} unreadable:`, err?.message);
+      }
+      actions[key] = {
+        actionType,
+        credits: row && row.is_active ? Number(row.credits_per_call) : null,
+        available: !!(row && row.is_active),
+      };
+    }
+
+    return res.json({
+      data: {
+        actions,
+        ai: { available: gate.allowed, reason: gate.message },
+        poweredBy: 'ARGUS AI',
+      },
+      meta: { site_id: siteId, tier: site.arion_tier || null },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:ai-pricing');
+  }
+});
+
 export default router;
-export const __test__ = { buildNodes, siteAllowsPro, readPageId, ALLOWED_MEDIA_TYPES, MAX_SECTIONS_PER_PAGE };
+export const __test__ = {
+  buildNodes, siteAllowsPro, readPageId, ALLOWED_MEDIA_TYPES, MAX_SECTIONS_PER_PAGE,
+  TOP_LEVEL_EL_TYPES, aiFailure,
+};
+
