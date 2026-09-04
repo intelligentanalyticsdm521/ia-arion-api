@@ -1,0 +1,57 @@
+{
+  "_readme": [
+    "SEAM-3-B, as data. THIS FILE IS BYTE-IDENTICAL IN platform-api, oliver-api, LUMEN-API,",
+    "arion-api AND the Portal. Do not edit one copy.",
+    "",
+    "  WHEN WE CANNOT DECIDE WHAT A BUSINESS BOUGHT:",
+    "  ALLOW THE FEATURE. REFUSE THE SPEND.",
+    "",
+    "Every suite runs every case below against its own copy of mayUseFeature/maySpend.",
+    "Change the rule in one repo and forget the others and the others turn red.",
+    "",
+    "entry     the { active | owned | tier, decided } node from the entitlement payload",
+    "min_tier  null, or the floor the caller needs",
+    "feature   what mayUseFeature(entry, min_tier) must return",
+    "spend     what maySpend(entry, min_tier) must return"
+  ],
+  "cases": [
+    { "why": "no payload at all - the seam is down",
+      "entry": null, "min_tier": null, "feature": true, "spend": false },
+    { "why": "no payload at all, with a tier floor",
+      "entry": null, "min_tier": "pro", "feature": true, "spend": false },
+
+    { "why": "UNDECIDED tier - 2026-08-17: never deny, never spend",
+      "entry": { "tier": "pro", "decided": false }, "min_tier": "business", "feature": true, "spend": false },
+    { "why": "UNDECIDED tier that would have passed the floor anyway",
+      "entry": { "tier": "business", "decided": false }, "min_tier": "pro", "feature": true, "spend": false },
+    { "why": "UNDECIDED add-on",
+      "entry": { "active": false, "decided": false }, "min_tier": null, "feature": true, "spend": false },
+    { "why": "UNDECIDED add-on that reads active",
+      "entry": { "active": true, "decided": false }, "min_tier": null, "feature": true, "spend": false },
+    { "why": "UNDECIDED ownership",
+      "entry": { "owned": false, "decided": false }, "min_tier": null, "feature": true, "spend": false },
+
+    { "why": "DECIDED and high enough",
+      "entry": { "tier": "business", "decided": true }, "min_tier": "pro", "feature": true, "spend": true },
+    { "why": "DECIDED and exactly at the floor",
+      "entry": { "tier": "pro", "decided": true }, "min_tier": "pro", "feature": true, "spend": true },
+    { "why": "DECIDED and genuinely too low - a resolved no IS a no",
+      "entry": { "tier": "standard", "decided": true }, "min_tier": "pro", "feature": false, "spend": false },
+    { "why": "DECIDED Lite against a Standard floor",
+      "entry": { "tier": "lite", "decided": true }, "min_tier": "standard", "feature": false, "spend": false },
+    { "why": "DECIDED, paid, but the Stripe product name carried no tier word",
+      "entry": { "tier": "active", "decided": true }, "min_tier": "standard", "feature": true, "spend": true },
+    { "why": "DECIDED with no tier at all - resolved to nothing is still not a no",
+      "entry": { "tier": null, "decided": true }, "min_tier": "pro", "feature": true, "spend": false },
+
+    { "why": "DECIDED add-on, active",
+      "entry": { "active": true, "decided": true }, "min_tier": null, "feature": true, "spend": true },
+    { "why": "DECIDED add-on, not bought",
+      "entry": { "active": false, "decided": true }, "min_tier": null, "feature": false, "spend": false },
+    { "why": "DECIDED ownership, owned",
+      "entry": { "owned": true, "decided": true }, "min_tier": null, "feature": true, "spend": true },
+    { "why": "DECIDED ownership, not owned",
+      "entry": { "owned": false, "decided": true }, "min_tier": null, "feature": false, "spend": false }
+  ],
+  "rank": { "lite": 1, "standard": 2, "active": 2, "pro": 3, "business": 4, "enterprise": 5 }
+}
