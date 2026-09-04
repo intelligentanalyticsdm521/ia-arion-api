@@ -17,6 +17,13 @@
  *   About us        published — about, a HAND-BUILT Elementor section with no
  *                   ia: handle (so the "Custom section" round trip is real),
  *                   then an FAQ
+ *   Our workshop    published — FIVE hand-built sections and nothing else, the
+ *                   way every page on the five real sites is: a banner and a
+ *                   three-card row the Phase 3 mapper can take charge of, a
+ *                   quote block with a Pro form it can take charge of on
+ *                   Standard and above but must refuse on Lite, a video band
+ *                   it must refuse because it cannot carry a video, and an
+ *                   awards strip it cannot identify at all
  *   Contact         published — the contact + form section
  *   Autumn offer    DRAFT     — proves the pages list shows drafts, which the
  *                   publish-only /content/seo-detail never could
@@ -166,10 +173,82 @@ function section(kind, block, seed) {
   });
 }
 
+/* ── hand-built sections for the Phase 3 adoption walk ──────────────────
+ *
+ * Nothing on these carries an `ia:` handle or a field marker, exactly like the
+ * five real sites. Between them they cover every answer the mapper can give:
+ * two it can take charge of, one it cannot identify, one carrying content it
+ * cannot carry over. So "N of M sections adoptable" on the fixture site is a
+ * real number with a real reason for every row.
+ * --------------------------------------------------------------------- */
+
+/** Adoptable → hero. One big headline over a background picture, one button. */
+function handBuiltHero() {
+  return {
+    id: 'hbhero1',
+    elType: 'section',
+    settings: {
+      _title: 'Workshop banner (built in Elementor)',
+      background_image: { url: `http://${DOMAIN}/wp-content/uploads/fernbrook-hero.jpg`, id: '' },
+      background_background: 'classic',
+      layout: 'full_width',
+    },
+    elements: [{
+      id: 'hbherocol', elType: 'column', settings: { _column_size: 100 },
+      elements: [
+        {
+          id: 'hbheroh', elType: 'widget', widgetType: 'heading',
+          settings: { title: 'Built in Shropshire, delivered to your garden', header_size: 'h1', align: 'center' },
+        },
+        {
+          id: 'hbherop', elType: 'widget', widgetType: 'text-editor',
+          settings: { editor: '<p>Insulated garden rooms, made to measure, up in three weeks.</p>', align: 'center' },
+        },
+        {
+          id: 'hbherob', elType: 'widget', widgetType: 'button',
+          settings: { text: 'Book a survey', link: { url: '/contact/', is_external: '', nofollow: '' }, align: 'center' },
+        },
+      ],
+    }],
+    isInner: false,
+  };
+}
+
+/** Adoptable → services. Three matching columns of heading and paragraph. */
+function handBuiltServices() {
+  const card = (n, title, body) => ({
+    id: `hbsvccol${n}`, elType: 'column', settings: { _column_size: 33 },
+    elements: [
+      { id: `hbsvch${n}`, elType: 'widget', widgetType: 'heading', settings: { title, header_size: 'h3', align: 'center' } },
+      { id: `hbsvcp${n}`, elType: 'widget', widgetType: 'text-editor', settings: { editor: `<p>${body}</p>`, align: 'center' } },
+    ],
+  });
+  return {
+    id: 'hbsvc1',
+    elType: 'section',
+    settings: { _title: 'Three things we make (built in Elementor)', structure: '30' },
+    elements: [
+      {
+        id: 'hbsvchcol', elType: 'column', settings: { _column_size: 100 },
+        elements: [{
+          id: 'hbsvchead', elType: 'widget', widgetType: 'heading',
+          settings: { title: 'Three things we make', header_size: 'h2', align: 'center' },
+        }],
+      },
+      card(1, 'Garden offices', 'Insulated, wired and ready to work in on the day it lands.'),
+      card(2, 'Garden gyms', 'Rubber floors, mirrors and a door wide enough for a rack.'),
+      card(3, 'Studios', 'Soundproofed to order, for people who make a noise.'),
+    ],
+    isInner: false,
+  };
+}
+
 /**
- * A section built by hand in Elementor: no `ia:` handle, no field markers.
- * The editor must show it in position, refuse to edit it, and hand it back
- * byte for byte on save (SCOPE §3.3, walkthrough T3/T6).
+ * NOT adoptable → the mapper cannot say what this is.
+ * A heading in one column and a line in another matches no archetype, so the
+ * row stays greyed and says so. This one has been on the fixture since 1A and
+ * is also what proves a custom section round-trips byte for byte
+ * (SCOPE §3.3, walkthrough T3/T6).
  */
 function handBuiltSection() {
   return {
@@ -189,6 +268,92 @@ function handBuiltSection() {
         elements: [{
           id: 'handw2', elType: 'widget', widgetType: 'text-editor',
           settings: { editor: '<p>Highly commended, small workshop of the year.</p>', align: 'center' },
+        }],
+      },
+    ],
+    isInner: false,
+  };
+}
+
+/**
+ * NOT adoptable → it holds a video, and the editor has no field for one.
+ * Reads as a call to action otherwise, so this is the row that proves the
+ * mapper refuses on CONTENT it cannot carry rather than on confidence alone.
+ */
+function handBuiltVideoBand() {
+  return {
+    id: 'hbvid1',
+    elType: 'section',
+    settings: { _title: 'See one being built (built in Elementor)', structure: '10' },
+    elements: [{
+      id: 'hbvidcol', elType: 'column', settings: { _column_size: 100 },
+      elements: [
+        {
+          id: 'hbvidh', elType: 'widget', widgetType: 'heading',
+          settings: { title: 'See one being built', header_size: 'h2', align: 'center' },
+        },
+        {
+          id: 'hbvidv', elType: 'widget', widgetType: 'video',
+          settings: { youtube_url: 'https://www.youtube.com/watch?v=aqz-KE-bpKQ', video_type: 'youtube' },
+        },
+        {
+          id: 'hbvidb', elType: 'widget', widgetType: 'button',
+          settings: { text: 'Watch the build', link: { url: '#', is_external: '', nofollow: '' }, align: 'center' },
+        },
+      ],
+    }],
+    isInner: false,
+  };
+}
+
+/**
+ * Adoptable on Standard and above, REFUSED on Lite.
+ * A hand-built contact block with an Elementor Pro form on it. The mapper
+ * reads it as a contact section either way; the tier is what decides whether
+ * the offer is made, because a Lite site has no Pro form widget to rebuild it
+ * with. This is the only fixture row that proves the tier gate on the
+ * adoption path rather than on the "add a section" picker.
+ */
+function handBuiltContact() {
+  return {
+    id: 'hbcon1',
+    elType: 'section',
+    settings: { _title: 'Get a quote (built in Elementor)', structure: '20' },
+    elements: [
+      {
+        id: 'hbconcol1', elType: 'column', settings: { _column_size: 50 },
+        elements: [
+          {
+            id: 'hbconh', elType: 'widget', widgetType: 'heading',
+            settings: { title: 'Ask us for a price', header_size: 'h2', align: 'left' },
+          },
+          {
+            id: 'hbconl', elType: 'widget', widgetType: 'icon-list',
+            settings: {
+              icon_list: [
+                { _id: 'hbcl1', text: 'Phone: 01952 000 000', selected_icon: { value: 'fas fa-phone', library: 'fa-solid' }, link: { url: 'tel:01952000000', is_external: '', nofollow: '' } },
+                { _id: 'hbcl2', text: 'Email: hello@fernbrook.invalid', selected_icon: { value: 'fas fa-envelope', library: 'fa-solid' }, link: { url: 'mailto:hello@fernbrook.invalid', is_external: '', nofollow: '' } },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        id: 'hbconcol2', elType: 'column', settings: { _column_size: 50 },
+        elements: [{
+          id: 'hbconf', elType: 'widget', widgetType: 'form',
+          settings: {
+            form_name: 'Quote request',
+            form_css_class: 'ia-quote',
+            email_to: 'quotes@fernbrook.invalid',
+            button_text: 'Send my details',
+            form_fields: [
+              { _id: 'hbf1', custom_id: 'name', field_type: 'text', field_label: 'Name', required: 'true', width: '100' },
+              { _id: 'hbf2', custom_id: 'email', field_type: 'email', field_label: 'Email', required: 'true', width: '100' },
+              { _id: 'hbf3', custom_id: 'square_footage', field_type: 'number', field_label: 'Square Footage', required: '', width: '100' },
+              { _id: 'hbf4', custom_id: 'message', field_type: 'textarea', field_label: 'Message', required: '', width: '100' },
+            ],
+          },
         }],
       },
     ],
@@ -390,6 +555,22 @@ async function upsertPage(existing, { title, status, sections }) {
       section('about', BLOCKS.about, 'about-story'),
       handBuiltSection(),
       section('faq', BLOCKS.faq, 'about-faq'),
+    ],
+  });
+
+  // Phase 3: a page that is ALL hand-built, the way every page on the five
+  // real sites is. Four sections, two the mapper can take charge of and two it
+  // must refuse — one because it cannot say what the section is, one because
+  // it holds a video the editor has no field for.
+  await upsertPage(existing, {
+    title: 'Our workshop',
+    status: 'publish',
+    sections: [
+      handBuiltHero(),
+      handBuiltServices(),
+      handBuiltContact(),
+      handBuiltVideoBand(),
+      handBuiltSection(),
     ],
   });
 
