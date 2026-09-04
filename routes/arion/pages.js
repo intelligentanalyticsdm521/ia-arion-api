@@ -62,6 +62,7 @@ import {
   saveProposal, markProposalsApplied, resolveProposal, listProposals,
 } from '../../lib/websiteBuilder/proposalStore.js';
 import { libraryPickerRows, buildLibrarySection } from '../../lib/websiteBuilder/libraryCatalog.js';
+import { maybeDevModel } from '../../lib/websiteBuilder/aiDevStub.js';
 import { getActionPricing } from '../../lib/argus/callWrapper.js';
 
 const router = Router({ mergeParams: true });
@@ -813,6 +814,11 @@ router.post('/pages/:pageId/sections/:handle/ai-edit', async (req, res) => {
       fields,
       brand: ctx.brand,
       instruction: ctx.instruction,
+      // Local dev only, and only against a local database. Everything else on
+      // this path — the plan gate, the balance check, the ARGUS audit row, the
+      // debit — runs exactly as it does in production; the stand-in replaces
+      // the provider request and nothing else. Null in every other environment.
+      ...(maybeDevModel() ? { callModel: maybeDevModel() } : {}),
     });
     if (!result.ok) return aiFailure(res, result.error);
 
@@ -901,6 +907,7 @@ router.post('/pages/:pageId/ai-edit', async (req, res) => {
       sections: described,
       brand: ctx.brand,
       instruction: ctx.instruction,
+      ...(maybeDevModel() ? { callModel: maybeDevModel() } : {}),
     });
     if (!result.ok) return aiFailure(res, result.error);
 

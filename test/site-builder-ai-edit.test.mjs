@@ -581,3 +581,57 @@ test('every AI failure says nothing was changed, and never names a vendor', () =
   assert.match(cases[1].message, /ARGUS AI/);
   assert.match(cases[3].message, /Nothing was changed/);
 });
+
+/* ==========================================================================
+ * 8. The dev stand-in for the model — three locks, all presence checks
+ * ======================================================================== */
+
+test('the dev model stand-in is inert unless it is switched on AND local', async () => {
+  const { maybeDevModel, devStubActive, isLocalDatabase } = await import('../lib/websiteBuilder/aiDevStub.js');
+
+  // Off by default. This is the case that matters: production sets none of it.
+  assert.equal(devStubActive({}), false);
+  assert.equal(maybeDevModel({}), null);
+
+  const local = { ARION_AI_DEV_STUB: '1', SERVICES_SQL_SERVER: 'localhost,1433' };
+  assert.equal(devStubActive(local), true);
+  assert.equal(typeof maybeDevModel(local), 'function');
+
+  // Lock 2: NODE_ENV.
+  assert.equal(devStubActive({ ...local, NODE_ENV: 'production' }), false);
+
+  // Lock 3, the load-bearing one: the database has to be local. An env var can
+  // be set by accident; a connection string to localhost cannot be prod.
+  assert.equal(devStubActive({ ARION_AI_DEV_STUB: '1', SERVICES_SQL_SERVER: 'sql-iadm-prod-cus.database.windows.net' }), false);
+  assert.equal(devStubActive({ ARION_AI_DEV_STUB: '1' }), false, 'no server named is not local');
+  // …and a host that merely LOOKS local is not local.
+  assert.equal(isLocalDatabase({ SERVICES_SQL_SERVER: 'localhost.evil.invalid' }), false);
+  assert.equal(isLocalDatabase({ SERVICES_SQL_SERVER: 'notlocalhost,1433' }), false);
+  assert.equal(isLocalDatabase({ SERVICES_SQL_SERVER: '127.0.0.1,1433' }), true);
+});
+
+test('the stand-in is still fully metered — it replaces the provider, nothing else', async () => {
+  const { maybeDevModel } = await import('../lib/websiteBuilder/aiDevStub.js');
+  const pool = fakePool({ credits: 1 });
+  const stub = maybeDevModel({ ARION_AI_DEV_STUB: '1', SERVICES_SQL_SERVER: 'localhost,1433' });
+
+  const out = await proposeSectionEdit({
+    pool, tenantId: TENANT, site: PAID_SITE, kind: 'hero',
+    fields: HERO_NOW, brand: BRAND, instruction: 'Make it warmer', callModel: stub,
+  });
+
+  assert.equal(out.ok, true);
+  assert.equal(auditInserts(pool).length, 1, 'the audit row is written for a stubbed call too');
+  assert.equal(debitInserts(pool).length, 1, 'and the credits are still debited');
+  assert.ok(out.proposal.diff.length > 0);
+
+  // And a Lite site still cannot reach it.
+  const pool2 = fakePool({ credits: 1 });
+  const refused = await proposeSectionEdit({
+    pool: pool2, tenantId: TENANT, site: LITE_SITE, kind: 'hero',
+    fields: HERO_NOW, brand: BRAND, instruction: 'warmer', callModel: stub,
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.status, 403);
+  assert.equal(auditInserts(pool2).length, 0);
+});
