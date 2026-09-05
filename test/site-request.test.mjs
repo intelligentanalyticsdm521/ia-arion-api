@@ -292,13 +292,21 @@ test("the role path asks the ONE founder answer, and holds no SQL of its own", a
   assert.equal(none, null, "a client with no platform role is not a founder");
 });
 
-test("MUTATION: a lookup we could not RUN is 500, never the 403 for 'you may not'", async () => {
+test("MUTATION: a lookup we could not RUN is a retryable 503, never the 403 for 'you may not'", async () => {
+  // PRE-WALK 1b: this was a 500. Walk row W-4B-F.7 states the rule — 503
+  // `founder_lookup_unavailable`, retryable, NOT 403 — because "we could not
+  // check" and "we checked and you may not" are different statements and only
+  // one is actionable. A 500 is neither: a founder reading it cannot tell a
+  // stopped platform-api from a bug in the page.
   const src = read("middleware/requireFounder.js");
   assert.match(src, /code: "FORBIDDEN", message: "Founder access required", status: 403/);
-  assert.match(src, /code: "INTERNAL_ERROR"[\s\S]{0,200}status: 500/, "a DB failure must not open the queue to everyone");
+  assert.match(src, /code: "founder_lookup_unavailable"[\s\S]{0,300}status: 503/,
+    "a lookup failure must say which kind of closed it is");
+  assert.match(src, /Retry-After/, "retryable is a header, not just a word in the body");
 
   const statuses = [];
-  const res = { status(c) { statuses.push(c); return { json() {} }; } };
+  const headers = {};
+  const res = { status(c) { statuses.push(c); return { json() {} }; }, set(k, v) { headers[k] = v; } };
   let nexted = false;
 
   // A real refusal.
@@ -313,7 +321,8 @@ test("MUTATION: a lookup we could not RUN is 500, never the 403 for 'you may not
     e.reason = "founder_unreachable";
     throw e;
   });
-  assert.equal(statuses.at(-1), 500, "an outage told the founder we had checked and refused them");
+  assert.equal(statuses.at(-1), 503, "an outage must be told apart from a refusal");
+  assert.equal(headers["Retry-After"], "5", "and the caller must be told it is worth trying again");
   assert.equal(nexted, false, "and it must still not open the queue");
 });
 
@@ -414,12 +423,12 @@ test("PATCH emails the client only when the status actually MOVED to done/declin
   assert.match(src, /clientEmailQueued: movedToResolved/, "the founder UI can say whether the client was told");
 });
 
-test("the role gate lets a founder through and refuses everyone else — 403, and 500 if it cannot tell", async () => {
+test("the role gate lets a founder through and refuses everyone else — 403, and a retryable 503 if it cannot tell", async () => {
   // SEAMS PACK 4B — the injected fourth argument is the RESOLVER now, not a
   // pool factory: the founder question is answered once, in platform-api, and
   // this repo asks it over POST /internal/founder. The three branches are the
   // same three, and the third is the one that matters most.
-  const mkRes = () => { const r = { code: null, body: null }; r.status = (c) => { r.code = c; return r; }; r.json = (b) => { r.body = b; return r; }; return r; };
+  const mkRes = () => { const r = { code: null, body: null, headers: {} }; r.status = (c) => { r.code = c; return r; }; r.json = (b) => { r.body = b; return r; }; r.set = (k, v) => { r.headers[k] = v; return r; }; return r; };
 
   // founder → through
   let req = { auth: { oid: "s1", email: "brandon@example.com" } };
@@ -439,11 +448,13 @@ test("the role gate lets a founder through and refuses everyone else — 403, an
   assert.equal(res.code, 403);
   assert.equal(res.body.error.code, "FORBIDDEN");
 
-  // no answer at all → 500, still closed
+  // no answer at all → 503, retryable, still closed
   req = { auth: { oid: "s3", email: "brandon@example.com" } };
   res = mkRes();
   passed = false;
   await founderRoleGate(req, res, () => { passed = true; }, async () => { throw new Error("platform-api down"); });
   assert.equal(passed, false, "an absence-based guard would have failed OPEN here");
-  assert.equal(res.code, 500);
+  assert.equal(res.code, 503);
+  assert.equal(res.body.error.code, "founder_lookup_unavailable");
+  assert.equal(res.body.error.retryable, true);
 });

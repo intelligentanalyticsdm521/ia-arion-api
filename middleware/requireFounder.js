@@ -46,7 +46,7 @@ export function matchesFounderAdminToken(req) {
  *
  * Throws FounderUnavailable when there is no answer — never null. A gate that
  * reads "could not check" as "not a founder" answers 403, which tells a
- * founder we checked and refused them; the caller below turns it into 500.
+ * founder we checked and refused them; the caller below turns it into 503.
  */
 export async function findFounderRole(claims) {
   const facts = await resolveFounderFacts(claims);
@@ -58,8 +58,18 @@ export async function findFounderRole(claims) {
  *
  * A caller who is signed in but not a founder gets 403 (they exist, they are
  * simply not allowed) — never a 401, which would send the Portal off to
- * re-authenticate in a loop. A lookup failure is a 500, never a quiet pass:
- * an unreachable platform DB must not open the queue to everyone.
+ * re-authenticate in a loop. A lookup we could not RUN is a 503, never a quiet
+ * pass: an unreachable platform DB must not open the queue to everyone.
+ *
+ * PRE-WALK 2 found this answering 500. Walk row W-4B-F.7 states the rule for
+ * the same question on view-as: **503 `founder_lookup_unavailable`, retryable
+ * — NOT 403**, because "we could not check" and "we checked and you may not"
+ * are different statements and only one of them is actionable. A 500 is worse
+ * than the 403 the row forbids: it is neither actionable NOR attributable — a
+ * founder reading it cannot tell a stopped platform-api from a bug in this
+ * page. platform-api's own resolver already answers exactly this
+ * (routes/internal/founder.js:69), and the retry hint is the shape
+ * middleware/sqlTokenRetry.js already uses.
  *
  * Exported with an injectable pool so the refusal can be tested without a
  * database — every dev fixture user carries the founder role, so dev traffic
@@ -76,14 +86,23 @@ export async function founderRoleGate(req, res, next, resolve = findFounderRole)
     req.founderAuth = { via: "platform_role", roleKey: founder.roleKey };
     return next();
   } catch (err) {
-    // A lookup we could not RUN is 500, never the 403 above: "we checked and
+    // A lookup we could not RUN is 503, never the 403 above: "we checked and
     // you may not" is a different statement from "we could not check", and a
     // founder can act on only one of them.
     const why = err instanceof FounderUnavailable || err?.name === "FounderUnavailable"
       ? err.reason : err.message;
     console.error("[requireFounder] founder lookup unavailable:", why);
-    return res.status(500).json({
-      error: { code: "INTERNAL_ERROR", message: "Could not verify founder access", status: 500 },
+    // Retry-After is what makes "retryable" a fact the browser can act on
+    // rather than a word in a JSON body.
+    res.set("Retry-After", "5");
+    return res.status(503).json({
+      error: {
+        code: "founder_lookup_unavailable",
+        message: "We could not check whether you are the founder. Try again in a moment.",
+        status: 503,
+        retryable: true,
+        reason: why,
+      },
     });
   }
 }

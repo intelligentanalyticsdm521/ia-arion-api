@@ -53,7 +53,7 @@ import { Router } from 'express';
 import crypto from 'node:crypto';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
-import { loadBrandContext } from '../../lib/websiteBuilder/brandContext.js';
+import { loadBrandContext, BUSINESS_NAME_NOT_SET } from '../../lib/websiteBuilder/brandContext.js';
 import {
   reduceToSectionList, applyFields, validateFields, extractFields,
   sectionCatalog, sectionKindMeta, parseSectionHandle,
@@ -1431,7 +1431,14 @@ router.get('/section-library', async (req, res) => {
         // form's read-only recipient shows.
         bookingHref,
         businessEmail: String(brand.email || ''),
-        businessName: String(brand.business_name || ''),
+        // PRE-WALK 2 read "Fernbrook Garden Rooms" here for Summit Lawn: the
+        // builder had its own name chain over the onboarding questionnaire.
+        // It is the ONE business identity now, and a business with no recorded
+        // name gets the SENTENCE, never a guess (walk rows D3, S3-7).
+        businessName: brand.business_name_status === 'set'
+          ? String(brand.business_name || '')
+          : BUSINESS_NAME_NOT_SET,
+        businessNameStatus: brand.business_name_status || 'not_set',
       },
       meta: { site_id: siteId, tier: site.arion_tier || null },
     });
