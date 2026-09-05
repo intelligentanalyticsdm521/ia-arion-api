@@ -28,7 +28,7 @@ import { BUSINESS_NAME_NOT_SET } from '../lib/websiteBuilder/brandContext.js';
 import { NEUTRAL_BUSINESS_NAME } from '../lib/businessIdentityClient.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const src = (rel) => readFileSync(path.join(ROOT, rel), 'utf8');
+const src = (rel) => readFileSync(path.join(ROOT, rel), 'utf8').split(String.fromCharCode(13, 10)).join(String.fromCharCode(10));
 
 /* ── 1. one name, and no invented one ───────────────────────────────────── */
 
