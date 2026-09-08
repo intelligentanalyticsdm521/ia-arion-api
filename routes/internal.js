@@ -42,6 +42,32 @@ router.post('/gbp-auto-reply-tick', requireIngestKey, async (req, res) => {
   }
 });
 
+// POST /internal/content-agent-tick — the ARION Content & Social Agent weekly
+// cycle, triggered by the arion-func timer (same split as gbp-auto-reply-tick:
+// logic here, scheduling there). Runs every enabled, un-halted tenant from
+// arion.content_agent_tenant_config; one tenant's failure never costs
+// another's cycle. Closes with the 60% margin report, and every alert it
+// raises leaves through the ONE notification gate with a category_key.
+//
+// KILL SWITCH: CONTENT_AGENT_DISABLED is honoured inside runTick, so it stops
+// this endpoint too and not merely the timer that normally calls it. A
+// disabled tick reads no config, drafts nothing and queues nothing, and says
+// so in the response.
+//
+// AUTH: requireIngestKey, the same internal-token gate the other two ticks use
+// (x-arion-ingest-key, set on the Functions app as ARION_INGEST_KEY).
+router.post('/content-agent-tick', requireIngestKey, async (req, res) => {
+  try {
+    const pool = await getServicesPool();
+    const { runTick } = await import('../lib/contentAgent/tick.js');
+    const summary = await runTick({ pool, log: (m) => console.log(`[content-agent] ${m}`) });
+    res.json({ ok: true, summary });
+  } catch (err) {
+    console.error('[internal:content-agent-tick]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // POST /internal/insights-snapshot-tick — monthly IA Insights refresh,
 // triggered by the arion-func timer on the 1st (same thin-scheduler split as
 // gbp-auto-reply-tick). Aggregates SE Ranking position history + pulls the

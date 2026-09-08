@@ -54,6 +54,7 @@ import pluginRouter from './arion/plugin.js';
 import blocksRouter from './arion/blocks.js';
 import sitePagesRouter from './arion/pages.js';
 import intelligenceRouter from './arion/intelligence.js';
+import contentAgentRouter from './arion/contentAgent.js';
 import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } from '../lib/websiteBuilder/costGuard.js';
 import { signOAuthState } from '../lib/oauthState.js';
 import { attachAgencyContext, isAgencyCaller } from '../lib/agency.js';
@@ -103,6 +104,11 @@ router.use('/sites/:siteId', sitePagesRouter);
 // itself + cross-tenant readout live in routes/intelligence.js + the
 // platform_pulse_cache migration).
 router.use('/sites/:siteId/intelligence', intelligenceRouter);
+
+// ARION Content & Social Agent — review queue, run log, learned style and the
+// propose-only code queue. See lib/contentAgent/ + db/migrations/063_content_agent.sql.
+// Tenant-scoped from req.tenant.tenantId only; never from a route param.
+router.use('/content-agent', contentAgentRouter);
 
 // Cross-product plugin proxy — used by LUMEN-API for newsletter publishing.
 router.use('/plugin', pluginRouter);
