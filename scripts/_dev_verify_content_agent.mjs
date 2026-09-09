@@ -94,11 +94,21 @@ async function counts(pool) {
   return r.recordset[0];
 }
 
+// EVERY tenant the tick touched. ARGUS pack 1 put a second business (the IA
+// POC fixture) on the agent, and a cleanup scoped to one tenant leaves the
+// other one's run rows behind for ever.
 const runIdsSince = async (pool, since) => (await pool.request()
-  .input('t', sql.UniqueIdentifier, FIXTURE_TENANT)
   .input('s', sql.DateTimeOffset, since)
-  .query('SELECT run_id FROM arion.content_agent_run_log WHERE tenant_id=@t AND triggered_at >= @s'))
+  .query('SELECT run_id FROM arion.content_agent_run_log WHERE triggered_at >= @s'))
   .recordset.map((x) => x.run_id);
+
+// The whole-table baseline, so cleanup is measured against what was here when
+// this run started rather than against a number typed in when there was only
+// one fixture business.
+const wholeCounts = async (pool) => (await pool.request().query(`
+  SELECT (SELECT COUNT(*) FROM arion.content_agent_run_log)      AS runs,
+         (SELECT COUNT(*) FROM arion.content_agent_output)       AS outputs,
+         (SELECT COUNT(*) FROM arion.content_agent_tenant_style) AS styles`)).recordset[0];
 
 /* ── the borrowed pricing rows ──────────────────────────────────────────── */
 
@@ -110,18 +120,32 @@ async function pricingState(pool) {
   return r.recordset;
 }
 
+// The rows THIS script inserted, and only those. LUMEN migration 174 now seeds
+// the three prices into argus.action_pricing permanently, so an unconditional
+// DELETE here hands the database back missing the very rows 174 exists to put
+// there — the agent goes dead again and nothing says so. Found by pre-walk
+// pass 3, which ran this script twice and then measured 3 of 6 agent prices.
+let borrowedActions = [];
+
 async function borrowPricing(pool) {
+  const already = new Set((await pricingState(pool))
+    .filter((r) => r.tbl === 'consolidated')
+    .map((r) => r.action_type));
+  borrowedActions = AGENT_ACTIONS.filter((a) => !already.has(a));
+  if (borrowedActions.length === 0) return;
   await pool.request().query(`
     INSERT INTO argus.action_pricing (action_type, credits_per_call, description, outlier_cap_usd, is_active)
     SELECT l.action_type, l.credits_per_call, l.description, l.outlier_cap_usd, l.is_active
       FROM lumen.argus_action_pricing l
-     WHERE l.action_type IN ('${AGENT_ACTIONS.join("','")}')
+     WHERE l.action_type IN ('${borrowedActions.join("','")}')
        AND NOT EXISTS (SELECT 1 FROM argus.action_pricing a WHERE a.action_type = l.action_type)`);
 }
 
 async function returnPricing(pool) {
+  if (borrowedActions.length === 0) return;
   await pool.request().query(`
-    DELETE FROM argus.action_pricing WHERE action_type IN ('${AGENT_ACTIONS.join("','")}')`);
+    DELETE FROM argus.action_pricing WHERE action_type IN ('${borrowedActions.join("','")}')`);
+  borrowedActions = [];
 }
 
 /* ── the canned draft (no network, no tokens bought) ────────────────────── */
@@ -172,21 +196,30 @@ async function main() {
   try {
     /* 0. the ground truth we are exercising against */
     console.log('0. the fixture and the platform state');
+    const baseline = await wholeCounts(pool);
     const enabled = await loadEnabledTenants(pool);
     const cfg = enabled.find((c) => String(c.tenant_id).toLowerCase() === FIXTURE_TENANT);
     check(!!cfg, 'the fixture business has an agent config row and it is enabled');
     check(cfg && !cfg.halted_at, 'it is not halted');
     check(cfg && cfg.keyword_provider === 'none', 'its keyword provider is `none` — no SEO tool, no outbound research call',
       cfg ? `provider=${cfg.keyword_provider}` : '');
-    check(enabled.length === 1, 'exactly one business on this dev database has the agent switched on', `${enabled.length} enabled`);
+    // ARGUS pack 1 switched the agent on for the IA POC fixture too, so "one"
+    // stopped being the answer. What still has to be true is that the business
+    // this script drives is one of them.
+    check(!!cfg, 'the business this script drives is among the ones with the agent switched on',
+      `${enabled.length} enabled on this database`);
 
     const priced = await pricingState(pool);
     const inConsolidated = priced.filter((p) => p.tbl === 'consolidated').map((p) => p.action_type);
     const inLegacy = priced.filter((p) => p.tbl === 'legacy').map((p) => p.action_type);
     check(inLegacy.length === 3, 'LUMEN 149 seeded all three action prices', `legacy: ${inLegacy.join(', ') || 'none'}`);
-    check(inConsolidated.length === 0,
-      'DEFECT CONFIRMED: none of them is in argus.action_pricing, which is the table this repo reads',
-      `consolidated: ${inConsolidated.join(', ') || 'none'}`);
+    // Was DEFECT CONFIRMED. LUMEN migration 174 (ARGUS pack 1, merged
+    // 2026-09-08) copies these three into the consolidated home, which is the
+    // table this repo reads. A database missing them has an agent that cannot
+    // make a single call, so the check is now the other way up.
+    check(inConsolidated.length === 3,
+      'all three prices are in argus.action_pricing, which is the table this repo reads (LUMEN 174)',
+      `consolidated: ${inConsolidated.join(', ') || 'NONE — apply LUMEN migration 174'}`);
 
     const keyless = !process.env.ANTHROPIC_API_KEY;
     check(keyless, 'ANTHROPIC_API_KEY is empty for this run — nothing here can cost money',
@@ -204,9 +237,20 @@ async function main() {
     check(after.runs > before.runs, 'the run was recorded anyway (AC6: a failed run still leaves a row)', `${before.runs} -> ${after.runs}`);
     check(after.debits === before.debits, 'no credits were debited', `${before.debits} -> ${after.debits}`);
     check(summary.ran > 0, 'the tick did attempt the tenant rather than skipping it silently', `ran=${summary.ran}`);
-    const unknownAction = JSON.stringify(summary.alerts).includes('unknown_action');
-    check(unknownAction, 'and it stopped on the metering refusal — the pricing row the defect is about',
-      unknownAction ? 'unknown_action' : JSON.stringify(summary.alerts).slice(0, 160));
+    // Which door closed first depends on whether LUMEN 174 has been applied.
+    // Before it, the meter refuses (unknown_action). After it, the price is
+    // found and the missing key is the door. Either way nothing was drafted
+    // and nothing was charged, which is what A1 exists to prove.
+    const alertsA1 = JSON.stringify(summary.alerts);
+    const pricedAlready = inConsolidated.length === AGENT_ACTIONS.length;
+    const closedDoor = pricedAlready
+      ? alertsA1.includes('ANTHROPIC_API_KEY is not set')
+      : alertsA1.includes('unknown_action');
+    check(closedDoor,
+      pricedAlready
+        ? 'and it stopped on the missing key — LUMEN 174 has landed, so the price is no longer the door'
+        : 'and it stopped on the metering refusal — the pricing row the defect is about',
+      alertsA1.slice(0, 160));
 
     /* A2. with the pricing borrowed: now the KEY is the closed door */
     console.log('\nA2. keyless run with the three prices borrowed into the consolidated table');
@@ -293,7 +337,13 @@ async function main() {
       .query('SELECT status, cost_usd, tokens_in, tokens_out, decision_rule_flags_json FROM arion.content_agent_run_log WHERE run_id=@r')).recordset[0];
     check(runRow && runRow.status === 'completed', 'the run log agrees the run completed');
     check(runRow && Number(runRow.cost_usd) > 0, 'and carries the cost, in dollars', `$${runRow?.cost_usd}`);
-    check(runRow && runRow.decision_rule_flags_json === '[]', 'with an empty flag list rather than a null one');
+    // An ARRAY, never null: "no flags" and "flags were never evaluated" must not
+    // look the same. It is no longer always EMPTY — ARGUS pack 1 made the
+    // decision rules actually run, so a clean draft can still carry a note.
+    const flagsRaw = runRow && runRow.decision_rule_flags_json;
+    let flagsParsed = null;
+    try { flagsParsed = JSON.parse(flagsRaw); } catch { flagsParsed = null; }
+    check(Array.isArray(flagsParsed), 'with a flag list rather than a null one', String(flagsRaw));
 
     /* C. clean up, and PROVE it */
     console.log('\nC. removing every row this exercise created');
@@ -330,19 +380,29 @@ async function main() {
                 WHERE tenant_id=@t AND created_at >= @s
                   AND action_type IN ('${AGENT_ACTIONS.join("','")}')`);
 
-    const gone = await counts(pool);
-    const original = { runs: 4, outputs: 3 };
-    check(gone.runs === original.runs,
-      `the run log is back to its ${original.runs} pre-existing fixture rows`, `now ${gone.runs}`);
-    check(gone.outputs === original.outputs,
-      `the queue is back to its ${original.outputs} pre-existing fixture rows`, `now ${gone.outputs}`);
+    // Any voice profile the tick learned while running. It is written by the
+    // cycle, it is not attached to a run id, and leaving it behind makes the
+    // NEXT script report that the agent has learned something it was taught by
+    // a test.
+    await pool.request().input('s', sql.DateTimeOffset, startedAt)
+      .query('DELETE FROM arion.content_agent_tenant_style WHERE created_at >= @s');
+
+    const gone = await wholeCounts(pool);
+    check(gone.runs === baseline.runs,
+      `the run log is back to its ${baseline.runs} pre-existing fixture rows`, `now ${gone.runs}`);
+    check(gone.outputs === baseline.outputs,
+      `the queue is back to its ${baseline.outputs} pre-existing fixture rows`, `now ${gone.outputs}`);
+    check(gone.styles === baseline.styles,
+      `the learned voices are back to the ${baseline.styles} that were here`, `now ${gone.styles}`);
     for (const runId of uniqueRuns) {
       const n = (await pool.request().input('r', sql.UniqueIdentifier, runId)
         .query('SELECT COUNT(*) n FROM arion.content_agent_run_log WHERE run_id=@r')).recordset[0].n;
       check(n === 0, `run ${String(runId).slice(0, 8)} is gone`);
     }
-    const leftover = (await pricingState(pool)).filter((p) => p.tbl === 'consolidated').length;
-    check(leftover === 0, 'the borrowed pricing rows were returned — argus.action_pricing is as we found it', `${leftover} left`);
+    const nowPricedAfter = (await pricingState(pool)).filter((p) => p.tbl === 'consolidated').length;
+    check(nowPricedAfter === inConsolidated.length,
+      'argus.action_pricing is exactly as we found it — nothing borrowed was kept, nothing pre-existing was eaten',
+      `${nowPricedAfter} of the 3, was ${inConsolidated.length}`);
   } finally {
     if (borrowed) { await returnPricing(pool).catch(() => {}); }
     await pool.close();

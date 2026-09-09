@@ -173,6 +173,15 @@ async function main() {
   const server = await startApi();
   const mine = [];
 
+  // What was here before this walk started. It used to be three numbers typed
+  // into the file; ARGUS pack 1 added a second fixture business with a draft
+  // and a signal of its own, and the typed numbers said the walk had left rows
+  // behind when it had not.
+  const baseline = (await pool.request().query(`
+    SELECT (SELECT COUNT(*) FROM arion.content_agent_run_log)     AS runs,
+           (SELECT COUNT(*) FROM arion.content_agent_output)      AS outputs,
+           (SELECT COUNT(*) FROM arion.content_agent_style_signal) AS signals`)).recordset[0];
+
   try {
     /* 1. the queue */
     console.log('1. the review queue');
@@ -404,7 +413,8 @@ async function main() {
       SELECT (SELECT COUNT(*) FROM arion.content_agent_run_log) AS runs,
              (SELECT COUNT(*) FROM arion.content_agent_output) AS outputs,
              (SELECT COUNT(*) FROM arion.content_agent_style_signal) AS signals`)).recordset[0];
-    check(counts.runs === 4 && counts.outputs === 3 && counts.signals === 2,
+    check(counts.runs === baseline.runs && counts.outputs === baseline.outputs
+       && counts.signals === baseline.signals,
       'the three pre-existing fixture drafts and their two signals are exactly as they were',
       `runs=${counts.runs} outputs=${counts.outputs} signals=${counts.signals}`);
   } finally {
