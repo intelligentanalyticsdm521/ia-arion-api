@@ -6842,78 +6842,22 @@ router.get('/sites/:siteId/content-seo', async (req, res) => {
   }
 });
 
-// --- PUT /arion/sites/:siteId/content-seo/:postId (Pro+ tier) ---
-router.put('/sites/:siteId/content-seo/:postId', async (req, res) => {
-  const tenantId = req.tenant.tenantId;
-  const { siteId, postId } = req.params;
-  const { rank_math_title, rank_math_description, rank_math_focus_keyword } = req.body;
-  try {
-    const pool = await getServicesPool();
-    const site = await getSiteForTenant(pool, tenantId, siteId);
-    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    if (!meetsMinTier(site.arion_tier, 'pro'))
-      return res.status(402).json({ error: { code: 'TIER_REQUIRED', message: 'Pro plan required for inline SEO editing', status: 402 } });
-    const domain = site.domain;
-    const appPwRef = site.wp_app_password_ref;
-    if (!appPwRef) return res.status(409).json({ error: { code: 'NOT_CONFIGURED', message: 'WP Application Password not configured', status: 409 } });
-    const meta = {};
-    if (rank_math_title !== undefined) meta.rank_math_title = rank_math_title;
-    if (rank_math_description !== undefined) meta.rank_math_description = rank_math_description;
-    if (rank_math_focus_keyword !== undefined) meta.rank_math_focus_keyword = rank_math_focus_keyword;
-    // 2026-08-24 — the collection was hard-coded to /wp/v2/posts/, but the
-    // sibling GET (/content-seo, :6615) returns PAGES AND POSTS in one payload
-    // with no type discriminator, so saving SEO meta on any page 404'd. WP
-    // keeps pages and posts in separate REST collections; try the caller's
-    // declared type first, then fall back to the other one rather than making
-    // the Portal know which it is holding.
-    //
-    // Also: the old code checked only `wpRes.ok` and never read the body. WP
-    // returns 200 with the meta silently absent when a key is not registered
-    // with show_in_rest — so a save could "succeed" and persist nothing. We now
-    // read the response and confirm the values actually came back.
-    const declared = String(req.query.type || '').toLowerCase();
-    const order = declared === 'page' ? ['pages', 'posts']
-                : declared === 'post' ? ['posts', 'pages']
-                : ['posts', 'pages'];
-
-    const auth = 'Basic ' + Buffer.from(appPwRef).toString('base64');
-    let wpRes = null; let body = null; let usedCollection = null;
-    for (const collection of order) {
-      wpRes = await fetch(`https://${domain}/wp-json/wp/v2/${collection}/${encodeURIComponent(postId)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: auth },
-        body: JSON.stringify({ meta }),
-      });
-      if (wpRes.status === 404) continue;   // wrong collection — try the other
-      usedCollection = collection;
-      break;
-    }
-    if (!usedCollection) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: `No page or post ${postId} on this site`, status: 404 } });
-    }
-    body = await wpRes.json().catch(() => null);
-    if (!wpRes.ok) {
-      throw new Error(`WP REST API returned ${wpRes.status}${body?.message ? ': ' + body.message : ''}`);
-    }
-    // Confirm the write actually landed. Unregistered meta keys are dropped
-    // silently by WP, which would otherwise read to the client as a save.
-    const returned = body?.meta || {};
-    const notPersisted = Object.keys(meta).filter((k) => returned[k] !== meta[k]);
-    if (notPersisted.length) {
-      return res.status(502).json({
-        error: {
-          code: 'META_NOT_PERSISTED', status: 502,
-          message: `WordPress accepted the request but did not store: ${notPersisted.join(', ')}. `
-                 + 'This usually means Rank Math is inactive on the site, so its meta keys are not registered with the REST API.',
-        },
-      });
-    }
-    res.json({ data: { post_id: postId, type: usedCollection === 'pages' ? 'page' : 'post', updated: true }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
-  } catch (err) {
-    console.error('[content-seo:put]', err);
-    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
-  }
-});
+// PUT /arion/sites/:siteId/content-seo/:postId is DELETED (2026-09-08, ARION
+// pack 1). It wrote the three Rank Math meta keys through CORE WordPress REST
+// with a WP application password from `arion.site.wp_app_password_ref` — a
+// column that is NULL on all five production sites and has ZERO writers
+// anywhere in the platform — and it was gated at Pro. It therefore never ran
+// once on a client site, and no Portal component ever called it.
+//
+// Its replacement is `POST /arion/sites/:siteId/pages/:pageId/seo`
+// (routes/arion/pages.js), which goes through the IA plugin on the site token
+// like every other write to a client's WordPress, reads the values back before
+// it answers, and is on EVERY tier — depth is what a plan gates, not existence.
+// One mechanism per concern, and the replaced one goes
+// (memory: feedback_replace_means_delete).
+//
+// The GET sibling above stays: it is the content-SEO aggregate the read-only
+// overview page renders, and it does not need the app password.
 
 // --- GET /arion/sites/:siteId/vulnerabilities ---
 // v2.0.11 — Pivoted away from the broken Wordfence public feed
