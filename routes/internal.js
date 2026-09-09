@@ -88,6 +88,36 @@ router.post('/insights-snapshot-tick', requireIngestKey, async (req, res) => {
   }
 });
 
+// GET /internal/gbp/:siteId/intake — what this listing has for SPARK (D-69).
+//
+// SPARK's Google Business Profile lead source has been written and switched OFF
+// since pack 2, waiting for exactly this: ARION owns the Google connection, the
+// OAuth app, the refresh-token exchange and the quota, so ARION reads Google and
+// hands the answer over. LUMEN never grows a second Google client.
+//
+// TWO HALVES: `questions` are ARRIVALS (a person, so a lead) and `call_clicks` /
+// `website_clicks` are ATTRIBUTION (a count, never a lead — Google does not tell
+// anyone WHO tapped Call). The arrivals half is empty today because Google
+// retired the public Q&A API in 2022, and this says so with a reason rather than
+// answering `[]` as though the listing were quiet.
+//
+// `?since=<iso8601>` is when SPARK last looked: it trims the questions and sizes
+// the click window (1-30 days).
+router.get('/gbp/:siteId/intake', requireIngestKey, async (req, res) => {
+  try {
+    const pool = await getServicesPool();
+    const { readGbpIntake } = await import('../lib/gbpIntake.js');
+    const out = await readGbpIntake(pool, req.params.siteId, { since: req.query.since || null });
+    if (!out.ok) {
+      return res.status(out.status).json({ error: { code: out.code, message: out.message, status: out.status } });
+    }
+    return res.json(out);
+  } catch (err) {
+    console.error('[internal:gbp-intake]', err);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // POST /internal/sites/:siteId/complete-provisioning
 // Called by admin after manual Golden Master setup is done
 router.post('/sites/:siteId/complete-provisioning', requireIngestKey, async (req, res) => {
