@@ -76,6 +76,59 @@ function cleanContentTypes(v, current) {
 }
 
 // ---------------------------------------------------------------------------
+// WHAT A PUT MAY NAME — one list, read by the writer AND by the refusal.
+// ---------------------------------------------------------------------------
+// Pre-walk pass 3 (2026-09-09): `PUT /arion/agents/settings` was
+// `if (body.content && typeof body.content === 'object') { … }` with no else,
+// and then re-read and returned the settings. So a caller sending
+// `{ key: 'content', enabled: false }` — the shape the OLIVER and SPARK agent
+// pages use — got a cheerful 200, an unchanged payload and no clue that nothing
+// had been saved. It cost that pass a wrong reading of three walk rows before
+// the route was read.
+//
+// A 200 that changed nothing is the platform's recurring
+// catch -> swallow -> report success shape wearing a different coat: the caller
+// is TOLD it worked. So an unrecognised body is a 400 that names the fields,
+// and the fields are named from these two lists rather than typed into the
+// message — a field can never be accepted and unnamed, or named and unaccepted.
+const SETTINGS_SECTIONS = Object.freeze(['content']);
+const CONTENT_FIELDS = Object.freeze([
+  'enabled', 'posts_per_week', 'price_usd_monthly', 'content_types',
+  'keyword_provider', 'paused',
+]);
+
+/**
+ * @returns {string|null} null when the body names something this route can act
+ * on; otherwise the sentence to send back, in the caller's words.
+ */
+function whyBodyIsUnusable(body) {
+  const keys = Object.keys(body);
+  const shape = `Send { "${SETTINGS_SECTIONS[0]}": { … } } naming one or more of: ${CONTENT_FIELDS.join(', ')}.`;
+
+  if (!keys.length) return `That request named nothing to change. ${shape}`;
+
+  const unknownSections = keys.filter((k) => !SETTINGS_SECTIONS.includes(k));
+  if (unknownSections.length) {
+    return `This endpoint does not know ${unknownSections.map((k) => `"${k}"`).join(', ')}. `
+      + `It changes ${SETTINGS_SECTIONS.map((k) => `"${k}"`).join(', ')} only. ${shape}`;
+  }
+
+  for (const section of keys) {
+    const v = body[section];
+    if (!v || typeof v !== 'object' || Array.isArray(v)) {
+      return `"${section}" must be an object. ${shape}`;
+    }
+    const fields = Object.keys(v);
+    if (!fields.length) return `"${section}" named nothing to change. ${shape}`;
+    const unknownFields = fields.filter((f) => !CONTENT_FIELDS.includes(f));
+    if (unknownFields.length) {
+      return `"${section}" does not have ${unknownFields.map((f) => `"${f}"`).join(', ')}. ${shape}`;
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // GET /arion/agents/activity
 // ---------------------------------------------------------------------------
 router.get('/activity', async (req, res) => {
@@ -181,6 +234,10 @@ router.put('/settings', async (req, res) => {
   if (typeof body !== 'object' || Array.isArray(body)) {
     return fail(res, 400, 'BAD_REQUEST', 'Expected an object.');
   }
+  // A body this route cannot act on is refused, out loud, with the field names
+  // in it. It used to answer 200 and change nothing — see whyBodyIsUnusable.
+  const why = whyBodyIsUnusable(body);
+  if (why) return fail(res, 400, 'BAD_REQUEST', why);
   try {
     const pool = await getServicesPool();
     const before = await readSettings(pool, tenantId);
