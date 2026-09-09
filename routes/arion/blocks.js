@@ -31,6 +31,15 @@ import { loadBrandContext, mergeBrandContext } from '../../lib/websiteBuilder/br
 import { hasEmitter, listEmitterKinds } from '../../lib/websiteBuilder/emitterRegistry.js';
 import { assemblePage, assemblePageWithMedia } from '../../lib/websiteBuilder/pageAssembler.js';
 import { injectPageToWordpress } from '../../lib/websiteBuilder/wpInjector.js';
+// ONE PRICE LIST (P18). Before this, generating a section quoted a price the
+// Portal invented client-side and the server debited nothing at all
+// (grep meterAndAudit here = 0 hits), while costGuard enforced a dollar ceiling
+// nobody was shown. Both actions are priced in argus.action_pricing now and
+// charged through the one metering path.
+import {
+  assertBuilderCredits, chargeBuilderAction,
+  ACTION_GENERATE_SECTION, ACTION_ASSEMBLE_PAGE,
+} from '../../lib/websiteBuilder/builderMeter.js';
 
 const router = Router({ mergeParams: true });
 
@@ -87,6 +96,17 @@ router.post('/:kind', async (req, res) => {
     const site = await loadSiteForTenant(pool, { tenantId, siteId });
     if (!site) return notFound(res, 'Site not found for this tenant');
 
+    // 0. THE PRICE, from the one price list, BEFORE any work (P18). A client
+    //    who cannot afford this is told now, not after a model has been paid
+    //    for. The number the Portal showed came from the same row.
+    const afford = await assertBuilderCredits({ pool, tenantId, actionType: ACTION_GENERATE_SECTION });
+    if (!afford.ok) {
+      return res.status(afford.status).json({
+        error: { code: afford.code, message: afford.message, status: afford.status },
+        ...(afford.balance != null ? { meta: { balance: afford.balance, required: afford.required } } : {}),
+      });
+    }
+
     // 1. Load brand context (site + signup questionnaire + tenant fallbacks).
     const baseBrand = await loadBrandContext(pool, { tenantId, siteId });
     const brand = body.brandOverride
@@ -137,6 +157,24 @@ router.post('/:kind', async (req, res) => {
       return res.status(httpStatus).json(errBody);
     }
 
+    // 2b. CHARGE - and only for work a provider actually did. Six of the eight
+    //     archetypes are answered out of the curated section library with no
+    //     model call at all (callEmitter's short-circuit), and a library answer
+    //     is free: charging for it would be inventing a cost, the mirror of the
+    //     defect this is fixing.
+    const fromLibrary = result.source === 'section_library';
+    const charged = fromLibrary
+      ? { ok: true, creditsCharged: 0 }
+      : await chargeBuilderAction({
+        pool, tenantId, userId,
+        actionType: ACTION_GENERATE_SECTION,
+        provider: 'anthropic',
+        model: result.model || null,
+        meta: { surface: 'arion.website_builder', kind, site_id: siteId },
+        inputTokens: result.tokens?.input || 0,
+        outputTokens: result.tokens?.output || 0,
+      });
+
     // 3. Persist as draft.
     const blockJson = JSON.stringify(result.block);
     const elementorJson = result.elementor ? JSON.stringify(result.elementor) : null;
@@ -183,6 +221,11 @@ router.post('/:kind', async (req, res) => {
         model_id:   result.model || null,
         accepted:   false,
         created_at: inserted.created_at,
+        // What was ACTUALLY charged, from the one price list. `0` with
+        // `from_library:true` is the honest answer for a curated layout: no
+        // model ran, so nothing was spent.
+        credits_charged: charged.creditsCharged,
+        from_library:    fromLibrary,
       },
       meta: { tenant_id: tenantId, site_id: siteId, timestamp: new Date().toISOString() },
     });
@@ -348,6 +391,17 @@ router.post('/assemble', async (req, res) => {
     const site = siteRowRes.recordset[0];
     if (!site) return notFound(res, 'Site not found for this tenant');
 
+    // The price list decides, not this file. The row ships at 0 credits -
+    // publishing sections you have already accepted makes no model call - and
+    // if that row ever changes, this charges what it says (P18).
+    const afford = await assertBuilderCredits({ pool, tenantId, actionType: ACTION_ASSEMBLE_PAGE });
+    if (!afford.ok) {
+      return res.status(afford.status).json({
+        error: { code: afford.code, message: afford.message, status: afford.status },
+        ...(afford.balance != null ? { meta: { balance: afford.balance, required: afford.required } } : {}),
+      });
+    }
+
     // Load every draft in one round-trip via a TVP-equivalent: comma-join the
     // IDs and use STRING_SPLIT — SQL Server supports this on 2016+ and we're
     // on Azure SQL which is well past that. Parameterized via @ids NVarChar.
@@ -478,12 +532,27 @@ router.post('/assemble', async (req, res) => {
         `);
     }
 
+    // Charged after the page has actually landed, never before, and skipped
+    // entirely for a dry run - which writes nothing anywhere.
+    let creditsCharged = 0;
+    if (!dryRun && afford.credits > 0) {
+      const charged = await chargeBuilderAction({
+        pool, tenantId, userId,
+        actionType: ACTION_ASSEMBLE_PAGE,
+        provider: 'internal',
+        model: null,
+        meta: { surface: 'arion.website_builder', stage: 'assemble', site_id: siteId, sections: sectionsBuilt },
+      });
+      creditsCharged = charged.creditsCharged;
+    }
+
     return res.json({
       data: {
         pageId:           finalPageId,
         elementorEditUrl: injectResult.elementorEditUrl || null,
         blocksInjected:   sectionsBuilt,
         dryRun:           !!dryRun,
+        credits_charged:  creditsCharged,
         skipped,
         media: mediaResult,
       },

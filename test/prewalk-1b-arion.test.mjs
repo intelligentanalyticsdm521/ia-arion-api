@@ -33,10 +33,46 @@ const src = (rel) => readFileSync(path.join(ROOT, rel), 'utf8').split(String.fro
 /* ── 1. one name, and no invented one ───────────────────────────────────── */
 
 test('the builder asks the ONE business identity, and nothing else, for the name', () => {
+  // 2026-09-08 (ARION pack 1): the lookup moved out of brandContext into
+  // `lib/businessName.js`, because FOUR MORE readers needed the same answer —
+  // the onboarding driver's brand object and FAQ seed, the Hostinger fallback
+  // pages, the copy bundle and the image prompts were all still reading
+  // `answers.businessName` off the questionnaire. The rule is unchanged and
+  // the pin moved with it: ONE call to the ONE resolver, and no chain after it.
+  const one = src('lib/businessName.js');
+  assert.match(one, /import \{ getBusinessIdentity \} from '\.\/businessIdentityClient\.js'/);
+  assert.match(one, /identity = await getBusinessIdentity\(tenantId\)/);
+  assert.match(one, /const named = !!\(identity && identity\.found && identity\.name_source !== 'neutral'\);/);
+
   const brand = src('lib/websiteBuilder/brandContext.js');
-  assert.match(brand, /import \{ getBusinessIdentity \} from '\.\.\/\.\.\/lib\/businessIdentityClient\.js'/);
-  assert.match(brand, /const identity = await getBusinessIdentity\(tenantId\);/);
-  assert.match(brand, /const businessName = identityNamed \? String\(identity\.display_name \|\| ''\)\.trim\(\) : '';/);
+  assert.match(brand, /import \{ resolveBusinessName, BUSINESS_NAME_NOT_SET \} from '\.\.\/businessName\.js'/);
+  assert.match(brand, /const resolved = await resolveBusinessName\(tenantId\);/);
+  // ...and brandContext does NOT keep a second opinion beside it.
+  assert.doesNotMatch(brand, /getBusinessIdentity\(/,
+    'one resolver, one call site: a second lookup here is how twelve chains happened');
+});
+
+test('every reader of a business name asks the resolver, not the questionnaire', () => {
+  // The five files GAP_ANALYSIS_2026-09-08 named. Each one used to read
+  // `answers.businessName`; two of them invented a last resort ("Your
+  // Business", "this business") and printed it on a client's own website.
+  for (const rel of [
+    'lib/websiteBuilder/onboardingDriver.js',
+    'lib/websiteBuilder/brandContext.js',
+    'lib/aiCopy.js',
+    'lib/imageGen.js',
+    'lib/hostingerSsh.js',
+  ]) {
+    const code = src(rel);
+    assert.match(code, /from '\.\.?\/businessName\.js'/, `${rel} must ask the one resolver`);
+    // Only in comments now — never in an expression that builds a name.
+    const live = code.split(String.fromCharCode(10))
+      .filter((l) => !l.trim().startsWith('*') && !l.trim().startsWith('//'))
+      .join(String.fromCharCode(10));
+    assert.doesNotMatch(live, /answers\??\.businessName/,
+      `${rel} still reads the questionnaire for the business's name`);
+    assert.doesNotMatch(live, /\|\| 'Your Business'/, `${rel} still invents a name`);
+  }
 });
 
 test('the email local-part is never a business name again', () => {
@@ -48,6 +84,10 @@ test('the email local-part is never a business name again', () => {
     'the questionnaire is one business\'s answer typed once; the record is the answer');
   // And no other split-for-a-name crept in beside it.
   assert.doesNotMatch(brand, /Name[^\n]*\.split\('@'\)/);
+  // ...nor in the one resolver the whole platform now goes through.
+  const one = src('lib/businessName.js');
+  assert.doesNotMatch(one, /\.split\('@'\)/,
+    'a mailbox is not a name, and in the ONE resolver least of all');
 });
 
 test('no recorded name is a SENTENCE, never the neutral brand and never a guess', () => {

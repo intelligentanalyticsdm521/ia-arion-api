@@ -15,7 +15,7 @@ import {
   fetchPages, fetchPageSections, writePageSections, undoPage, createPage, sideloadMedia,
 } from '../lib/websiteBuilder/pageClient.js';
 import { __test__ as routeInternals } from '../routes/arion/pages.js';
-import { renderSectionListHtml } from '../lib/websiteBuilder/sectionPreview.js';
+import { previewPage, __test__ as clientInternals } from '../lib/websiteBuilder/pageClient.js';
 import { blockToElementorSection } from '../lib/websiteBuilder/elementorAdapter.js';
 import { getEmitter } from '../lib/websiteBuilder/emitterRegistry.js';
 import { reduceToSectionList, extractFields } from '../lib/websiteBuilder/sectionSchema.js';
@@ -179,34 +179,75 @@ test('a node that is not a section is refused', () => {
 
 /* ── preview ───────────────────────────────────────────────────────────── */
 
-test('preview renders the words, escapes them, and touches nothing', () => {
+/* ── preview: WORDPRESS renders it now (D-ARION-B) ─────────────────────── */
+
+// The three tests that used to live here pinned `renderSectionListHtml`,
+// arion-api's own HTML approximation of a page. It is DELETED: the Preview
+// button asks the website to render the page, so the client sees the real
+// theme, the real Elementor output and the real fonts (D-ARION-B,
+// feedback_replace_means_delete). What has to hold now is the transport and the
+// contract: the candidate sections go to the page's own preview route, the
+// answer carries a link, and nothing is saved.
+
+test('preview posts the sections to the page\'s own preview route and never writes', async () => {
   const list = reduceToSectionList([hero({ headline: 'Rooms & <script>alert(1)</script>' }), CUSTOM]);
   const before = JSON.stringify(list.map((s) => s.node));
+  const seen = [];
 
-  const html = renderSectionListHtml(
-    list.map((s) => ({ kind: s.kind, fields: s.fields })),
-    { primary_color: '#245A4A' },
-    { pageTitle: 'Home' },
+  const res = await previewPage(
+    { site_id: 's1', domain: 'localhost:8084', site_token_raw: 'tok' },
+    412,
+    { sections: list.map((s) => ({ handle: s.handle, node: s.node })), title: 'Home' },
+    {
+      fetchImpl: async (url, init) => {
+        seen.push({ url, method: init.method, body: JSON.parse(init.body) });
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            success: true,
+            page_id: 412,
+            preview_post_id: 999,
+            preview_url: 'http://localhost:8084/?ia_preview=999&ia_preview_key=abc',
+            expires_at: '2026-09-08T12:00:00Z',
+            ttl_seconds: 3600,
+            sections_previewed: 2,
+            saved: false,
+          }),
+        };
+      },
+    },
   );
 
-  assert.match(html, /^<!doctype html>/i);
-  assert.match(html, /Rooms &amp; &lt;script&gt;/);
-  assert.ok(!html.includes('<script>alert(1)</script>'), 'no live script reaches the preview');
-  assert.match(html, /Custom section — built on the site/);
-  assert.match(html, /Nothing has been saved yet/);
-  assert.match(html, /--ia-primary:#245A4A/);
+  assert.equal(res.ok, true);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].method, 'POST');
+  assert.match(seen[0].url, /\/pages\/412\/preview\?/, seen[0].url);
+  assert.match(seen[0].url, new RegExp(clientInternals.NAMESPACE.replace(/\//g, '\\/')));
+  assert.equal(seen[0].body.sections.length, 2, 'every section travels, custom ones included');
+  // The link needs no WordPress login, and the payload says nothing was saved.
+  assert.match(res.data.preview_url, /ia_preview_key=/);
+  assert.equal(res.data.saved, false);
   assert.equal(JSON.stringify(list.map((s) => s.node)), before, 'preview mutates nothing');
 });
 
-test('preview refuses to render a picture from a non-web source', () => {
-  const html = renderSectionListHtml([{ kind: 'hero', fields: { headline: 'H', image_url: 'javascript:alert(1)' } }]);
-  assert.ok(!html.includes('javascript:'), html.slice(0, 400));
+test('a preview the website could not build is never a success', async () => {
+  const res = await previewPage(
+    { site_id: 's1', domain: 'localhost:8084', site_token_raw: 'tok' },
+    412,
+    { sections: [] },
+    {
+      fetchImpl: async () => ({
+        ok: false,
+        status: 409,
+        text: async () => JSON.stringify({ error: 'Elementor is not active on this website', code: 'elementor_missing' }),
+      }),
+    },
+  );
+  assert.equal(res.ok, false);
+  assert.equal(res.status, 409);
+  assert.match(res.message, /Elementor is not active/);
 });
-
-test('preview of an empty page says so rather than rendering a blank sheet', () => {
-  assert.match(renderSectionListHtml([]), /no sections yet/);
-});
-
 /* ── adding a section ──────────────────────────────────────────────────── */
 
 test('a freshly added section is editable the moment it is added', () => {

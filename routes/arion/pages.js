@@ -18,8 +18,14 @@
  * is metered through ARGUS before a token is spent (lib/websiteBuilder/aiEdit.js).
  *
  * SAFETY (W-3): live edit, a snapshot before every write, one-tap Undo, and a
- * preview that never writes. New pages are born drafts. There is no per-page
- * staging and there is deliberately not going to be one.
+ * preview that never writes to the page being previewed. New pages are born
+ * drafts. There is no per-page staging and there is deliberately not going to
+ * be one.
+ *
+ * ELEMENTOR IS DETECTED, NOT ASSUMED (D-ARION-E, 2026-09-08). Every write below
+ * asks lib/websiteBuilder/siteCapability.js what the site actually has and
+ * refuses with a sentence when the site says it has no Elementor. Before this,
+ * such a save answered 200 and left the page blank on a green toast.
  *
  * THE RULE THIS FILE MUST NOT BREAK: never a success response on a failed
  * write (reference_catch_swallow_report_success). Every plugin call's `ok` is
@@ -30,8 +36,18 @@
  *   GET    /pages/:pageId/sections
  *   PUT    /pages/:pageId/sections      -> snapshot + write
  *   POST   /pages/:pageId/undo
- *   POST   /pages/:pageId/preview       -> HTML, writes nothing
+ *   POST   /pages/:pageId/preview       -> a signed WordPress preview link
+ *   GET    /pages/:pageId/settings      -> slug, layout, parent, home page
+ *   POST   /pages/:pageId/settings
+ *   POST   /pages/:pageId/trash         -> into WordPress's bin (30 days)
+ *   POST   /pages/:pageId/restore
+ *   GET    /pages/:pageId/seo           -> title, description, focus keyword
+ *   POST   /pages/:pageId/seo
+ *   POST   /sections/swap               -> the same words, a different layout
  *   POST   /media                       -> sideload into the site's library
+ *   GET    /media/:attachmentId/usage   -> where is this picture used
+ *   DELETE /media/:attachmentId         -> only when the answer is nowhere
+ *   POST   /media/:attachmentId/replace -> same id, so every page updates
  *   GET    /section-library             -> the "add a section" catalogue
  *   GET    /ai-pricing                  -> what an AI action costs, from the DB
  *   POST   /pages/:pageId/sections/:handle/ai-edit  -> propose, never write
@@ -58,7 +74,7 @@ import {
   reduceToSectionList, applyFields, validateFields, extractFields,
   sectionCatalog, sectionKindMeta, parseSectionHandle,
 } from '../../lib/websiteBuilder/sectionSchema.js';
-import { renderSectionListHtml, renderAdoptionPreviewHtml } from '../../lib/websiteBuilder/sectionPreview.js';
+import { renderAdoptionPreviewHtml } from '../../lib/websiteBuilder/sectionPreview.js';
 import {
   analyseSection, analysePage, buildAdoptedSection, sectionFingerprint,
   previewTools, ADOPT_MIN_CONFIDENCE, ADOPT_UNDO_DAYS,
@@ -70,7 +86,14 @@ import { buildStarterSection } from '../../lib/websiteBuilder/starterSections.js
 import {
   fetchPages, fetchPageSections, writePageSections, undoPage, createPage, sideloadMedia,
   listMedia, setMediaAlt, pushBookingConfig,
+  // ARION pack 1 — the wp-admin-only jobs, all on the same site token.
+  fetchPageSettings, writePageSettings, fetchPageSeo, writePageSeo,
+  previewPage, trashPage, restorePage,
+  fetchMediaUsage, deleteMedia, replaceMedia,
 } from '../../lib/websiteBuilder/pageClient.js';
+import {
+  getSiteCapability, elementorRefusal, allowProFor, NO_ELEMENTOR_MESSAGE,
+} from '../../lib/websiteBuilder/siteCapability.js';
 import { pluginPost } from '../../lib/pluginClient.js';
 import {
   proposeSectionEdit, proposePageEdit, aiTierGate,
@@ -82,6 +105,9 @@ import {
 import { libraryPickerRows, buildLibrarySection } from '../../lib/websiteBuilder/libraryCatalog.js';
 import { maybeDevModel } from '../../lib/websiteBuilder/aiDevStub.js';
 import { getActionPricing } from '../../lib/argus/callWrapper.js';
+import {
+  ACTION_GENERATE_SECTION, ACTION_ASSEMBLE_PAGE,
+} from '../../lib/websiteBuilder/builderMeter.js';
 
 const router = Router({ mergeParams: true });
 
@@ -143,14 +169,43 @@ async function loadSite(pool, tenantId, siteId) {
   return r.recordset[0] || null;
 }
 
+/**
+ * THE FALLBACK ONLY (D-ARION-E, 2026-09-08).
+ *
+ * This used to be the whole answer to "does this site have Elementor Pro", and
+ * it never asked the site. `lib/websiteBuilder/siteCapability.js` asks now;
+ * this stays as what we fall back to when the site cannot be asked (a plugin
+ * older than 1.7.3, or a site that is not answering), because it is what we had
+ * before and it is better than refusing a working client their own editor.
+ *
+ * Reached through `allowProFor(site, capability)`, never called directly by a
+ * route any more.
+ */
 function siteAllowsPro(site) {
-  // Lite is the only ARION tier without Elementor Pro
-  // (reference_arion_plugin_stack: elementor-pro ships on every tier, but the
-  // section library's Pro-dependent variants are filtered for Lite and the
-  // Lite plan does not carry the licence). Unknown tier is treated as Pro-
-  // capable because that is what every provisioned site actually has.
   const tier = String(site?.arion_tier || '').trim().toLowerCase();
   return tier !== 'lite';
+}
+
+/**
+ * The write gate. Returns null to carry on, or sends the refusal and returns
+ * true — so a caller reads `if (await refuseWithoutElementor(res, site)) return;`
+ *
+ * Only a site that TOLD us it has no Elementor is refused. See siteCapability's
+ * three answers: "we could not ask" is not "there is none".
+ */
+async function refuseWithoutElementor(res, site) {
+  const capability = await getSiteCapability(site);
+  const refusal = elementorRefusal(capability);
+  if (!refusal) return false;
+  res.status(refusal.status).json({
+    error: { code: refusal.code, message: refusal.message, status: refusal.status },
+    meta: {
+      elementor_active: false,
+      elementor_version: capability.elementorVersion,
+      plugin_version: capability.pluginVersion,
+    },
+  });
+  return true;
 }
 
 /** A page id is a WordPress post id: a positive integer, nothing else. */
@@ -273,8 +328,11 @@ router.post('/pages', async (req, res) => {
     const site = await loadSite(pool, tenantId, siteId);
     if (!site) return notFound(res, 'That website is not on your account.');
 
+    if (await refuseWithoutElementor(res, site)) return undefined;
+
     const brand = await loadBrandContext(pool, { tenantId, siteId });
-    const allowPro = siteAllowsPro(site);
+    const capability = await getSiteCapability(site);
+    const { allowPro } = allowProFor(site, capability);
 
     const nodes = [];
     for (const entry of wanted) {
@@ -346,7 +404,8 @@ router.get('/pages/:pageId/sections', async (req, res) => {
 
     /* --- Phase 3: which greyed rows could be made editable, and which
      * editable rows got that way by adoption. ---------------------------- */
-    const allowPro = siteAllowsPro(site);
+    const capability = await getSiteCapability(site);
+    const { allowPro } = allowProFor(site, capability);
     const view = analysePage(sections, { allowPro });
     // The plugin has its own opinion, from its own widget census, and the two
     // are compared rather than trusted: a row the Portal is about to offer
@@ -536,6 +595,11 @@ router.put('/pages/:pageId/sections', async (req, res) => {
     const site = await loadSite(pool, tenantId, siteId);
     if (!site) return notFound(res, 'That website is not on your account.');
 
+    // Ahead of everything: a site with no Elementor cannot render what we are
+    // about to write, and writing it anyway is the blank page this pack exists
+    // to stop. The plugin refuses too — two ends, on purpose.
+    if (await refuseWithoutElementor(res, site)) return undefined;
+
     const brand = await loadBrandContext(pool, { tenantId, siteId });
     const { nodes, errors } = buildNodes(incoming, brand);
     if (errors.length > 0) {
@@ -615,6 +679,8 @@ router.post('/pages/:pageId/undo', async (req, res) => {
     const site = await loadSite(pool, tenantId, siteId);
     if (!site) return notFound(res, 'That website is not on your account.');
 
+    if (await refuseWithoutElementor(res, site)) return undefined;
+
     const result = await undoPage(site, pageId);
     if (!result.ok) return pluginFailure(res, result, 'undoing the last change');
     if (result.data?.restored === false) {
@@ -644,16 +710,38 @@ router.post('/pages/:pageId/undo', async (req, res) => {
 });
 
 /* ==========================================================================
- * POST /pages/:pageId/preview — HTML for the preview pane. Writes nothing.
+ * POST /pages/:pageId/preview — WORDPRESS renders it (D-ARION-B).
+ * --------------------------------------------------------------------------
+ * This used to render the section list to arion-api's own HTML, and
+ * lib/websiteBuilder/sectionPreview.js said so in its own header: "It is NOT a
+ * pixel-accurate render of the live theme — we do not run Elementor here and we
+ * never will". A builder whose preview does not match the site is the complaint
+ * this whole area exists to fix, so the preview is now the site itself: the real
+ * theme, the real Elementor render, the real fonts and colours.
+ *
+ * HOW IT STAYS SAFE: the plugin puts the candidate sections on a companion
+ * DRAFT page (`_ia_preview_of`), never on the page being previewed, and hands
+ * back a link carrying a one-hour key so the client — who has no WordPress
+ * account — can open it. The page being previewed keeps its bytes, its
+ * snapshots and its Undo ring. `saved:false` rides in the payload and the
+ * Portal says it out loud.
+ *
+ * The approximate renderer is GONE (feedback_replace_means_delete). What is
+ * left in sectionPreview.js is the adoption before/after, which answers a
+ * different question — "does every word survive if we rebuild this section" —
+ * and is not replaced by anything here.
  * ======================================================================== */
 router.post('/pages/:pageId/preview', async (req, res) => {
   const tenantId = req.tenant?.tenantId;
   const { siteId } = req.params;
+  const pageId = readPageId(req.params.pageId);
   const incoming = Array.isArray(req.body?.sections) ? req.body.sections : null;
-  const pageTitle = String(req.body?.title || 'Preview');
+  const title = req.body?.title == null ? null : String(req.body.title).trim();
 
   if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
   if (!incoming) return bad(res, 'NO_SECTIONS', 'There is nothing to preview yet.');
+  if (incoming.length === 0) return bad(res, 'NO_SECTIONS', 'There is nothing to preview yet.');
   if (incoming.length > MAX_SECTIONS_PER_PAGE) {
     return bad(res, 'TOO_MANY_SECTIONS', `A page can hold up to ${MAX_SECTIONS_PER_PAGE} sections.`);
   }
@@ -663,24 +751,65 @@ router.post('/pages/:pageId/preview', async (req, res) => {
     const site = await loadSite(pool, tenantId, siteId);
     if (!site) return notFound(res, 'That website is not on your account.');
 
+    // No Elementor, no preview. Rendering a blank page and calling it a preview
+    // is worse than saying why.
+    if (await refuseWithoutElementor(res, site)) return undefined;
+
     const brand = await loadBrandContext(pool, { tenantId, siteId });
 
-    // Render from the values the client is looking at right now. Anything they
-    // did not touch is read back out of its own node, so a preview of an
-    // untouched section shows what the site shows.
-    const forRender = incoming.map((entry) => {
-      const parsed = parseSectionHandle(entry?.node?.settings?._title);
-      const kind = parsed?.kind && sectionKindMeta(parsed.kind) ? parsed.kind : null;
-      if (!kind) return { kind: null, fields: null };
-      const fields = (entry?.fields && typeof entry.fields === 'object')
-        ? entry.fields
-        : extractFields(entry.node, kind);
-      return { kind, fields };
-    });
+    // The same nodes a Save would write, built the same way, so what the client
+    // is looking at IS what publishing does. A form with no recipient is
+    // refused here too — a preview that shows a form the save would reject
+    // would send somebody to Publish for the error.
+    const { nodes, errors } = buildNodes(incoming, brand);
+    if (errors.length > 0) {
+      return res.status(422).json({
+        error: {
+          code: 'CONTENT_NOT_VALID',
+          message: 'Some of what you typed needs another look before it can be previewed. Nothing was saved.',
+          status: 422,
+        },
+        errors,
+      });
+    }
+    if (nodes.length !== incoming.length) {
+      return res.status(500).json({
+        error: {
+          code: 'SECTION_COUNT_MISMATCH',
+          message: 'We could not build the preview safely, so nothing was changed.',
+          status: 500,
+        },
+      });
+    }
 
-    const html = renderSectionListHtml(forRender, brand, { pageTitle });
+    const result = await previewPage(site, pageId, {
+      sections: nodes,
+      ...(title ? { title } : {}),
+    });
+    if (!result.ok) return pluginFailure(res, result, 'building a preview');
+
+    const previewUrl = result.data?.preview_url;
+    if (!previewUrl) {
+      // A 200 with no link is a failed preview wearing a success.
+      return res.status(502).json({
+        error: {
+          code: 'SITE_REJECTED',
+          message: 'Your website built the preview but did not say where it is. Try again.',
+          status: 502,
+        },
+      });
+    }
+
     return res.json({
-      data: { html, sectionCount: forRender.length, saved: false },
+      data: {
+        pageId,
+        previewUrl: String(previewUrl),
+        expiresAt: result.data?.expires_at || null,
+        ttlSeconds: Number(result.data?.ttl_seconds || 0),
+        sectionCount: Number(result.data?.sections_previewed || nodes.length),
+        /** The page itself was not touched. The Portal shows this. */
+        saved: false,
+      },
       meta: { site_id: siteId },
     });
   } catch (err) {
@@ -806,7 +935,8 @@ router.post('/pages/:pageId/sections/:index/adopt-preview', async (req, res) => 
       return bad(res, 'ALREADY_EDITABLE', 'You can already edit that section here.');
     }
 
-    const allowPro = siteAllowsPro(site);
+    const capability = await getSiteCapability(site);
+    const { allowPro } = allowProFor(site, capability);
     const analysis = analyseSection(live.node, { allowPro });
     const brand = await loadBrandContext(pool, { tenantId, siteId });
 
@@ -899,6 +1029,8 @@ router.post('/pages/:pageId/sections/:index/adopt', async (req, res) => {
     const site = await loadSite(pool, tenantId, siteId);
     if (!site) return notFound(res, 'That website is not on your account.');
 
+    if (await refuseWithoutElementor(res, site)) return undefined;
+
     const live = await loadLiveSection(site, pageId, index);
     if (!live.ok) {
       if (live.plugin) return pluginFailure(res, live.plugin, 'reading that section');
@@ -918,7 +1050,8 @@ router.post('/pages/:pageId/sections/:index/adopt', async (req, res) => {
       });
     }
 
-    const allowPro = siteAllowsPro(site);
+    const capability = await getSiteCapability(site);
+    const { allowPro } = allowProFor(site, capability);
     const analysis = analyseSection(live.node, { allowPro });
     if (!analysis.adoptable) {
       return bad(res, 'NOT_ADOPTABLE', analysis.reasonText
@@ -1344,7 +1477,8 @@ router.post('/sections', async (req, res) => {
     const site = await loadSite(pool, tenantId, siteId);
     if (!site) return notFound(res, 'That website is not on your account.');
 
-    const allowPro = siteAllowsPro(site);
+    const capability = await getSiteCapability(site);
+    const { allowPro } = allowProFor(site, capability);
     if (meta?.requiresElementorPro && !allowPro) {
       return bad(res, 'SECTION_NOT_AVAILABLE', meta.proReason);
     }
@@ -1391,7 +1525,8 @@ router.get('/section-library', async (req, res) => {
     const site = await loadSite(pool, tenantId, siteId);
     if (!site) return notFound(res, 'That website is not on your account.');
 
-    const allowPro = siteAllowsPro(site);
+    const capability = await getSiteCapability(site);
+    const { allowPro, source: proSource } = allowProFor(site, capability);
     const brand = await loadBrandContext(pool, { tenantId, siteId });
     // Curated-library layouts, but only the ones the editor can look after
     // afterwards. Unreachable library (local dev, blob hiccup) means an empty
@@ -1425,6 +1560,24 @@ router.get('/section-library', async (req, res) => {
       data: {
         sections: catalog,
         elementorProAvailable: allowPro,
+        // What the site itself says it is running (D-ARION-E). The editor shows
+        // a banner and stops offering Save when `active` is false, rather than
+        // letting a client type into a form whose save is going to be refused.
+        //
+        // `pageEngine` and not the vendor's name, deliberately: the Portal is
+        // the one place a client reads, and no vendor's UI or vocabulary is ever
+        // shown there (feedback_no_third_party_product_surface). The plugin's
+        // /status and lib/websiteBuilder/siteCapability.js name it accurately,
+        // because nothing a client reads comes off either of them.
+        pageEngine: {
+          known: !!capability.known,
+          active: capability.known ? !!capability.elementorActive : null,
+          version: capability.elementorVersion,
+          addOnActive: capability.known ? !!capability.proActive : null,
+          addOnVersion: capability.proVersion,
+          addOnSource: proSource,
+          reason: (capability.known && !capability.elementorActive) ? NO_ELEMENTOR_MESSAGE : null,
+        },
         ai: { available: gate.allowed, reason: gate.message },
         // What the editor needs to offer sensible defaults without inventing
         // anything: where "Link to your booking page" goes, and the inbox a
@@ -1839,13 +1992,552 @@ router.get('/pages/:pageId/proposals', async (req, res) => {
   }
 });
 
+/* ==========================================================================
+ * ARION PACK 1 — the jobs that had no Portal home at all (2026-09-08)
+ * --------------------------------------------------------------------------
+ * Page settings, per-page SEO, trash and restore, swap-the-look, and the two
+ * media jobs. Every one of them goes through the PLUGIN on the site token.
+ *
+ * The route that used to do SEO — PUT /arion/sites/:siteId/content-seo/:postId
+ * — is still there and still dead: it needs `arion.site.wp_app_password_ref`,
+ * which is NULL on all five production sites and has never been written by
+ * anything, and it is gated at Pro. Depth is what a tier gates, not existence
+ * (memory: reference_report_tier_model), so these are on every ARION tier.
+ * ======================================================================== */
+
+/** The three Elementor page templates, in words a client uses. */
+const TEMPLATE_LABELS = Object.freeze({
+  '': 'Normal page (your theme’s header and footer)',
+  'elementor_header_footer': 'Full width, with your header and footer',
+  'elementor_canvas': 'Blank canvas (no header or footer)',
+  'elementor_theme': 'Your theme’s own layout',
+});
+
+function publicTemplates(rows) {
+  return (Array.isArray(rows) ? rows : []).map((r) => ({
+    file: String(r?.file ?? ''),
+    label: TEMPLATE_LABELS[String(r?.file ?? '')] || String(r?.label || r?.file || ''),
+  }));
+}
+
+function publicPageSettings(data) {
+  return {
+    pageId: Number(data?.page_id) || null,
+    title: String(data?.title || ''),
+    slug: String(data?.slug || ''),
+    // What the address will BECOME when a draft is published, if WordPress has
+    // to make it unique. Equal to `slug` when there is nothing to change.
+    slugOnPublish: String(data?.slug_on_publish || data?.slug || ''),
+    status: String(data?.status || 'draft'),
+    type: String(data?.type || 'page'),
+    permalink: data?.permalink || null,
+    template: String(data?.template ?? ''),
+    templates: publicTemplates(data?.templates),
+    parentId: Number(data?.parent_id || 0),
+    parents: (Array.isArray(data?.parents) ? data.parents : []).map((p) => ({
+      pageId: Number(p?.page_id) || null,
+      title: String(p?.title || '(no title)'),
+      status: String(p?.status || 'draft'),
+    })),
+    isHomePage: !!data?.is_front_page,
+    homePageId: Number(data?.front_page_id || 0),
+    blogPageId: Number(data?.blog_page_id || 0),
+    ...(data?.slug_adjusted ? { slugAdjusted: true } : {}),
+    ...(Array.isArray(data?.changed) ? { changed: data.changed } : {}),
+  };
+}
+
+/* ==========================================================================
+ * GET /pages/:pageId/settings
+ * ======================================================================== */
+router.get('/pages/:pageId/settings', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const pageId = readPageId(req.params.pageId);
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const result = await fetchPageSettings(site, pageId);
+    if (!result.ok) return pluginFailure(res, result, 'reading that page’s settings');
+    return res.json({ data: publicPageSettings(result.data), meta: { site_id: siteId } });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:settings-get');
+  }
+});
+
+/* ==========================================================================
+ * POST /pages/:pageId/settings
+ * Body: { slug?, template?, parentId?, makeHomePage? }
+ *
+ * The website reads every value back before it answers, so a 200 here means
+ * the site is holding what was asked for — not that the request was accepted.
+ * ======================================================================== */
+router.post('/pages/:pageId/settings', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const pageId = readPageId(req.params.pageId);
+  const body = req.body || {};
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
+
+  const payload = {};
+  if (body.slug !== undefined) {
+    const slug = String(body.slug || '').trim();
+    if (!slug) return bad(res, 'SLUG_REQUIRED', 'A page address cannot be empty.');
+    if (slug.length > 190) return bad(res, 'SLUG_TOO_LONG', 'Keep the address under 190 characters.');
+    payload.slug = slug;
+  }
+  if (body.template !== undefined) payload.template = String(body.template ?? '');
+  if (body.parentId !== undefined) {
+    const parent = Number(body.parentId);
+    if (!Number.isInteger(parent) || parent < 0) {
+      return bad(res, 'BAD_PARENT', 'That page reference is not valid.');
+    }
+    payload.parent_id = parent;
+  }
+  if (body.makeHomePage) payload.make_homepage = true;
+  if (Object.keys(payload).length === 0) {
+    return bad(res, 'NOTHING_TO_CHANGE', 'Nothing was sent to change.');
+  }
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const result = await writePageSettings(site, pageId, payload);
+    if (!result.ok) return pluginFailure(res, result, 'saving those settings');
+
+    // The address and the home page both change which URLs are cached.
+    const purge = await pluginPost(site, '/purge-cache', {});
+    return res.json({
+      data: { ...publicPageSettings(result.data), cachePurged: !!purge.ok },
+      meta: { site_id: siteId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:settings-set');
+  }
+});
+
+/* ==========================================================================
+ * POST /pages/:pageId/trash  ·  POST /pages/:pageId/restore
+ * ======================================================================== */
+router.post('/pages/:pageId/trash', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const pageId = readPageId(req.params.pageId);
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const result = await trashPage(site, pageId);
+    if (!result.ok) return pluginFailure(res, result, 'deleting that page');
+    const purge = await pluginPost(site, '/purge-cache', {});
+    return res.json({
+      data: {
+        pageId,
+        status: String(result.data?.status || 'trash'),
+        title: String(result.data?.title || ''),
+        cachePurged: !!purge.ok,
+      },
+      meta: { site_id: siteId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:trash');
+  }
+});
+
+router.post('/pages/:pageId/restore', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const pageId = readPageId(req.params.pageId);
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const result = await restorePage(site, pageId);
+    if (!result.ok) return pluginFailure(res, result, 'bringing that page back');
+    const purge = await pluginPost(site, '/purge-cache', {});
+    return res.json({
+      data: {
+        pageId,
+        // It comes back as a DRAFT, which is WordPress's own behaviour and the
+        // safe one: a page nobody meant to publish does not go live again by
+        // being un-deleted.
+        status: String(result.data?.status || 'draft'),
+        title: String(result.data?.title || ''),
+        permalink: result.data?.permalink || null,
+        cachePurged: !!purge.ok,
+      },
+      meta: { site_id: siteId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:restore');
+  }
+});
+
+/* ==========================================================================
+ * GET|POST /pages/:pageId/seo — the three SEO fields, on every tier.
+ * ======================================================================== */
+function publicSeo(data) {
+  const seo = data?.seo || {};
+  const plugin = data?.seo_plugin || {};
+  return {
+    pageId: Number(data?.page_id) || null,
+    title: String(seo.title || ''),
+    description: String(seo.description || ''),
+    focusKeyword: String(seo.focus_keyword || ''),
+    recommended: {
+      title: Number(data?.recommended?.title || 60),
+      description: Number(data?.recommended?.description || 160),
+    },
+    // A site with no SEO plugin active STORES these fine — they are ordinary
+    // post meta — but nothing renders them. Saying so is the difference
+    // between a client trusting the field and wondering why Google ignores it.
+    seoPluginActive: !!plugin.active,
+    seoPluginNote: plugin.active ? null
+      : 'We have saved these on your website, but its SEO plugin is not switched on at the moment, '
+        + 'so search engines will not see them yet. Ask us and we will turn it back on.',
+    ...(Array.isArray(data?.changed) ? { changed: data.changed } : {}),
+  };
+}
+
+router.get('/pages/:pageId/seo', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const pageId = readPageId(req.params.pageId);
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const result = await fetchPageSeo(site, pageId);
+    if (!result.ok) return pluginFailure(res, result, 'reading that page’s search settings');
+    return res.json({ data: publicSeo(result.data), meta: { site_id: siteId } });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:seo-get');
+  }
+});
+
+const SEO_LIMITS = Object.freeze({ title: 200, description: 500, focusKeyword: 200 });
+
+router.post('/pages/:pageId/seo', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const pageId = readPageId(req.params.pageId);
+  const body = req.body || {};
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
+
+  const payload = {};
+  const errors = [];
+  for (const [field, key] of [['title', 'title'], ['description', 'description'], ['focusKeyword', 'focus_keyword']]) {
+    if (body[field] === undefined) continue;
+    const value = String(body[field] ?? '').trim();
+    if (value.length > SEO_LIMITS[field]) {
+      errors.push({ field, message: `Keep this under ${SEO_LIMITS[field]} characters.` });
+      continue;
+    }
+    payload[key] = value;
+  }
+  if (errors.length) {
+    return res.status(422).json({
+      error: { code: 'CONTENT_NOT_VALID', message: 'Some of what you typed needs another look. Nothing was saved.', status: 422 },
+      errors,
+    });
+  }
+  if (Object.keys(payload).length === 0) {
+    return bad(res, 'NOTHING_TO_CHANGE', 'Nothing was sent to change.');
+  }
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const result = await writePageSeo(site, pageId, payload);
+    if (!result.ok) return pluginFailure(res, result, 'saving those search settings');
+    const purge = await pluginPost(site, '/purge-cache', {});
+    return res.json({
+      data: { ...publicSeo(result.data), cachePurged: !!purge.ok },
+      meta: { site_id: siteId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:seo-set');
+  }
+});
+
+/* ==========================================================================
+ * POST /sections/swap — the same words in a different layout (D-ARION-F).
+ * Body: { blueprintId, kind, fields }
+ *
+ * Both halves already existed and nothing joined them: `buildLibrarySection`
+ * builds a curated layout, `applyFields` writes a section's values onto a
+ * node. Swapping is the two of them in a row.
+ *
+ * Writes NOTHING. The swapped section reaches the website on the next Save,
+ * like every other edit, so the plugin snapshot and one-tap Undo cover it.
+ *
+ * The layout IS replaced — that is the point — so anything the old layout
+ * carried that the new one has no place for is reported back and the sheet
+ * shows the same warning the adoption sheet uses.
+ * ======================================================================== */
+router.post('/sections/swap', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const blueprintId = String(req.body?.blueprintId || '').trim();
+  const kind = String(req.body?.kind || '').toLowerCase();
+  const fields = (req.body?.fields && typeof req.body.fields === 'object') ? req.body.fields : null;
+
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!blueprintId) return bad(res, 'BAD_BLUEPRINT', 'Pick a layout first.');
+  if (!kind || !sectionKindMeta(kind)) return bad(res, 'UNKNOWN_SECTION', `We do not have a section called "${kind}".`);
+  if (!fields) return bad(res, 'NO_FIELDS', 'The section’s wording did not arrive, so nothing was changed.');
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const capability = await getSiteCapability(site);
+    const { allowPro } = allowProFor(site, capability);
+    const brand = await loadBrandContext(pool, { tenantId, siteId });
+
+    const built = await buildLibrarySection({ blueprintId, brand, allowPro });
+    if (!built.ok) return bad(res, built.code, built.message);
+
+    // A layout for a DIFFERENT kind of section is not a swap, it is a
+    // different section — and it would silently drop every word, because the
+    // field names do not line up.
+    if (built.kind !== kind) {
+      return bad(res, 'WRONG_SECTION_KIND',
+        'That layout is for a different kind of section, so your wording would not fit it. '
+        + 'Add it as a new section instead.');
+    }
+
+    const check = validateFields(kind, fields);
+    if (!check.ok) {
+      return res.status(422).json({
+        error: {
+          code: 'CONTENT_NOT_VALID',
+          message: 'Some of what is in this section will not fit that layout. Nothing was changed.',
+          status: 422,
+        },
+        errors: check.errors,
+      });
+    }
+
+    const node = applyFields(built.node, kind, fields);
+    const [entry] = reduceToSectionList([node]);
+    if (!entry?.editable) {
+      return bad(res, 'SECTION_NOT_EDITABLE',
+        'The editor could not take charge of every part of that layout, so we did not use it.');
+    }
+
+    // What did NOT survive the swap. `applyFields` clones the last card for
+    // extra list items, so a longer list is carried; a field the new layout
+    // simply has no slot for is not, and the client is told which.
+    const before = fields;
+    const after = entry.fields || {};
+    const dropped = Object.keys(before).filter((key) => {
+      const had = before[key];
+      if (had == null || had === '' || (Array.isArray(had) && had.length === 0)) return false;
+      const now = after[key];
+      return now == null || now === '' || (Array.isArray(now) && now.length === 0);
+    });
+
+    return res.status(200).json({
+      data: {
+        section: publicSection(entry),
+        blueprintId,
+        dropped,
+        warning: 'The layout is replaced, so this section will look different. Your wording and '
+          + 'pictures come across. You can put it back with Undo after you save.',
+      },
+      meta: { site_id: siteId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:swap-section');
+  }
+});
+
+/* ==========================================================================
+ * MEDIA — where is it used, delete it, replace it in place.
+ * ======================================================================== */
+function publicUsage(data) {
+  const places = Array.isArray(data?.places) ? data.places : [];
+  const notes = Array.isArray(data?.notes) ? data.notes : [];
+  const NOTE_TEXT = {
+    site_icon: 'It is your website’s icon (the little picture in a browser tab).',
+    custom_logo: 'It is your website’s logo.',
+  };
+  return {
+    attachmentId: Number(data?.attachment_id) || null,
+    filename: String(data?.filename || ''),
+    used: !!data?.used,
+    complete: String(data?.scan || '') === 'complete',
+    places: places.map((p) => ({
+      pageId: Number(p?.post_id) || null,
+      title: String(p?.title || '(no title)'),
+      status: String(p?.status || ''),
+      type: String(p?.type || 'page'),
+      permalink: p?.permalink || null,
+    })),
+    notes: notes.map((n) => NOTE_TEXT[String(n)] || String(n)),
+    canDelete: !data?.used && String(data?.scan || '') === 'complete',
+  };
+}
+
+router.get('/media/:attachmentId/usage', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const attachmentId = readPageId(req.params.attachmentId);
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!attachmentId) return bad(res, 'BAD_MEDIA_ID', 'That picture reference is not valid.');
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const result = await fetchMediaUsage(site, attachmentId);
+    if (!result.ok) return pluginFailure(res, result, 'checking where that picture is used');
+    return res.json({ data: publicUsage(result.data), meta: { site_id: siteId } });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:media-usage');
+  }
+});
+
+router.delete('/media/:attachmentId', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const attachmentId = readPageId(req.params.attachmentId);
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!attachmentId) return bad(res, 'BAD_MEDIA_ID', 'That picture reference is not valid.');
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const result = await deleteMedia(site, attachmentId);
+    if (!result.ok) {
+      // A refusal because the picture is still in use is not a transport
+      // failure — it is the answer, and it carries the list of pages.
+      const stillUsed = result.status === 409 && result.data && ('used' in result.data);
+      if (stillUsed) {
+        return res.status(409).json({
+          error: {
+            code: 'PICTURE_IN_USE',
+            message: String(result.data.error
+              || 'This picture is still being used, so it was not deleted.'),
+            status: 409,
+          },
+          data: publicUsage(result.data),
+        });
+      }
+      return pluginFailure(res, result, 'deleting that picture');
+    }
+    return res.json({
+      data: {
+        attachmentId,
+        deleted: true,
+        filename: String(result.data?.filename || ''),
+      },
+      meta: { site_id: siteId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:media-delete');
+  }
+});
+
+router.post('/media/:attachmentId/replace', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const attachmentId = readPageId(req.params.attachmentId);
+  const body = req.body || {};
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!attachmentId) return bad(res, 'BAD_MEDIA_ID', 'That picture reference is not valid.');
+
+  const fromUrl = String(body.url || '').trim();
+  const dataBase64 = typeof body.dataBase64 === 'string' ? body.dataBase64 : '';
+  if (!fromUrl && !dataBase64) return bad(res, 'NO_IMAGE', 'Choose the new picture first.');
+  if (fromUrl && !/^https?:\/\//i.test(fromUrl)) {
+    return bad(res, 'BAD_IMAGE_URL', 'A picture address has to start with http:// or https://.');
+  }
+  if (dataBase64) {
+    const approxBytes = Math.floor((dataBase64.length * 3) / 4);
+    if (approxBytes > MAX_MEDIA_BYTES) {
+      return bad(res, 'IMAGE_TOO_BIG', 'That picture is over 10 MB. Try a smaller one.');
+    }
+  }
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const result = await replaceMedia(site, attachmentId, {
+      url: fromUrl || undefined,
+      data_base64: dataBase64 || undefined,
+      alt: body.alt ? String(body.alt).slice(0, 300) : undefined,
+    });
+    if (!result.ok) return pluginFailure(res, result, 'replacing that picture');
+
+    // Every page keeps the same attachment id and the same address, so they
+    // all show the new picture with no edit and no publish. The one honest
+    // caveat is the client's own browser cache.
+    const purge = await pluginPost(site, '/purge-cache', {});
+    return res.json({
+      data: {
+        attachmentId,
+        url: String(result.data?.url || ''),
+        filename: String(result.data?.filename || ''),
+        width: result.data?.width == null ? null : Number(result.data.width),
+        height: result.data?.height == null ? null : Number(result.data.height),
+        bytes: result.data?.bytes == null ? null : Number(result.data.bytes),
+        sizeCount: Number(result.data?.size_count || 0),
+        usedOn: Number(result.data?.used_on || 0),
+        alt: String(result.data?.alt || ''),
+        cachePurged: !!purge.ok,
+        note: 'Every page using this picture now shows the new one. Your own browser may hold the '
+          + 'old picture for a while — reload the page to see it.',
+      },
+      meta: { site_id: siteId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:media-replace');
+  }
+});
+
 /* --------------------------------------------------------------------------
  * GET /ai-pricing — what an AI action costs, read from the database.
  *
- * The Portal shows "This uses N credits" BEFORE the client sends anything,
- * and N comes from here. It is never hardcoded in the UI: the existing
- * WebsiteAiBuilder page does exactly that and the server charges something
- * else, which is the defect SCOPE §2.4 records (feedback_no_fabricated_catalog).
+ * The Portal shows "This uses N credits" BEFORE the client sends anything, and
+ * N comes from here. It is never hardcoded in the UI.
+ *
+ * ONE PRICE SURFACE (P18, 2026-09-08). This now answers for all four builder
+ * actions, including the two the AI Builder page used to price itself with a
+ * hand-written coefficient table (`SECTION_COSTS`, `BLOCK_DEFAULTS` and a TODO
+ * asking for exactly this endpoint) while the server debited nothing at all.
+ * That table is deleted; every number a client sees comes from
+ * argus.action_pricing through here.
  * ------------------------------------------------------------------------ */
 router.get('/ai-pricing', async (req, res) => {
   const tenantId = req.tenant?.tenantId;
@@ -1859,7 +2551,12 @@ router.get('/ai-pricing', async (req, res) => {
 
     const gate = aiTierGate(site);
     const actions = {};
-    for (const [key, actionType] of [['section', ACTION_SECTION_EDIT], ['page', ACTION_PAGE_EDIT]]) {
+    for (const [key, actionType] of [
+      ['section', ACTION_SECTION_EDIT],
+      ['page', ACTION_PAGE_EDIT],
+      ['generate', ACTION_GENERATE_SECTION],
+      ['assemble', ACTION_ASSEMBLE_PAGE],
+    ]) {
       let row = null;
       try {
         row = await getActionPricing(pool, actionType);
@@ -1877,6 +2574,12 @@ router.get('/ai-pricing', async (req, res) => {
       data: {
         actions,
         ai: { available: gate.allowed, reason: gate.message },
+        // The one thing a client asks about a ready-made layout. Six of the
+        // eight archetypes are answered from our own curated library with no
+        // model call, and those are free — so the page says so instead of
+        // quoting a price it will not charge.
+        libraryNote: 'Ready-made layouts come from our own library, and those cost nothing. '
+          + 'We only charge when we write something new for you.',
         poweredBy: 'ARGUS AI',
       },
       meta: { site_id: siteId, tier: site.arion_tier || null },
@@ -1889,6 +2592,7 @@ router.get('/ai-pricing', async (req, res) => {
 export default router;
 export const __test__ = {
   buildNodes, siteAllowsPro, readPageId, ALLOWED_MEDIA_TYPES, MAX_SECTIONS_PER_PAGE,
+  publicPageSettings, publicTemplates, publicSeo, publicUsage, TEMPLATE_LABELS, SEO_LIMITS,
   TOP_LEVEL_EL_TYPES, aiFailure, withFormRecipient, publicMediaItem,
   syncBookingButton, bookingPushed, BOOKING_PUSH_TTL_MS,
   readSectionIndex, publicSection, publicAdoption, loadLiveSection,
