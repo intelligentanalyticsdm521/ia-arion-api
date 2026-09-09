@@ -207,6 +207,15 @@ test("ISOLATION holds against a real double-activation attempt", async (t) => {
       .input("t", sql.UniqueIdentifier, tenant)
       .input("v", sql.Int, v)
       .query("INSERT INTO arion.content_agent_tenant_style (tenant_id, profile_version, is_active) VALUES (@t, @v, 1)");
+    // Clear this tenant's active profile INSIDE the transaction first. The test
+    // is about the index biting on the SECOND insert; if a fixture (or another
+    // builder's exercise) has already left an active profile here, the FIRST
+    // insert fails and the test reports a red that is about the database's
+    // contents rather than about the guard. The rollback below takes the delete
+    // with it, so nothing survives either way. Found 2026-09-09.
+    await new sql.Request(tx)
+      .input("t", sql.UniqueIdentifier, tenant)
+      .query("DELETE FROM arion.content_agent_tenant_style WHERE tenant_id = @t AND is_active = 1");
     await ins(9001);
     await assert.rejects(
       () => ins(9002),
