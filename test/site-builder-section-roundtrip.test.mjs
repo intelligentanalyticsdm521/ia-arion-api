@@ -332,7 +332,7 @@ test('Lite is told WHY the form section is unavailable, not just denied it', () 
   const lite = sectionCatalog({ allowPro: false });
   const contact = lite.find((c) => c.kind === 'contact');
   assert.equal(contact.available, false);
-  assert.match(contact.unavailableReason, /Elementor Pro/);
+  assert.doesNotMatch(contact.unavailableReason, /Elementor/i); assert.match(contact.unavailableReason, /plan above Lite/);
   // And nothing else is withheld — the editor itself is on every tier (W-4).
   assert.equal(lite.filter((c) => !c.available).length, 1);
 

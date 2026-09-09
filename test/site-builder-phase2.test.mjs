@@ -582,7 +582,7 @@ test('only the Elementor Pro form section differs by tier, and it says why', () 
   const lite = sectionCatalog({ allowPro: siteAllowsPro({ arion_tier: 'lite' }) });
   const contact = lite.find((c) => c.kind === 'contact');
   assert.equal(contact.available, false);
-  assert.match(contact.unavailableReason, /Elementor Pro/);
+  assert.doesNotMatch(contact.unavailableReason, /Elementor/i); assert.match(contact.unavailableReason, /plan above Lite/);
   assert.match(contact.unavailableReason, /Lite/);
 
   // Everything else is available on Lite. A tier that hides more than the one
