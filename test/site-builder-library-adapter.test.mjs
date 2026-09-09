@@ -20,7 +20,7 @@ import {
   mapLibrarySection, stampLibrarySection, libraryCoverage, pickHeadline,
   LIBRARY_KIND_BY_ARCHETYPE, ARCHETYPES_WITHOUT_A_KIND, kindsWithoutLibraryVariants,
 } from '../lib/websiteBuilder/libraryAdapter.js';
-import { extractFields, applyFields, reduceToSectionList } from '../lib/websiteBuilder/sectionSchema.js';
+import { extractFields, applyFields, reduceToSectionList, validateFields } from '../lib/websiteBuilder/sectionSchema.js';
 import { __test__ as catalogInternals } from '../lib/websiteBuilder/libraryCatalog.js';
 import { __test__ as routeInternals } from '../routes/arion/pages.js';
 
@@ -326,12 +326,15 @@ test('the real 120-section library maps to exactly the coverage the walkthrough 
   assert.equal(cov.total, 120);
   // If this number moves, the walkthrough's "N of 120" is stale — re-run
   // scripts/_dev_library_coverage.mjs and update it in the same pass.
-  assert.equal(cov.pickable, 44);
+  // 44 before ARION pack 2b taught the adapter the list-item binding form;
+  // 74 after it. The thirty that moved are all pricing, team, stats and
+  // testimonials, and every one of them is proved to round-trip below.
+  assert.equal(cov.pickable, 74);
   assert.deepEqual(
     Object.fromEntries(Object.entries(cov.byArchetype).map(([a, n]) => [a, n.pickable])),
     {
-      hero: 7, features: 7, cta: 9, about: 8, faq: 5, contact: 8, testimonials: 0,
-      pricing: 0, team: 0, stats: 0, header: 0, footer: 0,
+      hero: 7, features: 7, cta: 9, about: 8, faq: 5, contact: 8, testimonials: 5,
+      pricing: 9, team: 9, stats: 7, header: 0, footer: 0,
     },
   );
 
@@ -350,6 +353,11 @@ test('the real 120-section library maps to exactly the coverage the walkthrough 
       assert.deepEqual(after[key], before[key], `${row.blueprint_id}.${key} drifted`);
     }
     assert.equal(reduceToSectionList([patched])[0].editable, true, row.blueprint_id);
+    // And it can be SAVED. A layout the client can add and then never save is
+    // worse than one that was never offered — `about.image-bullets.v1` was
+    // exactly that from Phase 1B until pack 2b (§4d).
+    const savable = validateFields(mapped.kind, before);
+    assert.equal(savable.ok, true, `${row.blueprint_id}: ${JSON.stringify(savable.errors)}`);
   }
 });
 

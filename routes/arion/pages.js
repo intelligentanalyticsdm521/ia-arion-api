@@ -72,7 +72,7 @@ import { getServicesPool } from '../../db/servicesPool.js';
 import { loadBrandContext, BUSINESS_NAME_NOT_SET } from '../../lib/websiteBuilder/brandContext.js';
 import {
   reduceToSectionList, applyFields, validateFields, extractFields,
-  sectionCatalog, sectionKindMeta, parseSectionHandle,
+  sectionCatalog, sectionKindMeta, parseSectionHandle, swapItemRoles,
 } from '../../lib/websiteBuilder/sectionSchema.js';
 import { renderAdoptionPreviewHtml } from '../../lib/websiteBuilder/sectionPreview.js';
 import {
@@ -496,6 +496,11 @@ function publicSection(entry, extra = null) {
     reason: entry.reason,
     label: entry.label,
     fields: entry.fields,
+    // Which fields of a list item THIS layout has somewhere to keep, and any
+    // role the adapter had to guess at. Both null on a section built from our
+    // own archetypes, where every field always has a home (pack 2b).
+    itemFields: entry.itemFields ?? null,
+    roleReview: entry.roleReview ?? null,
     node: entry.node,
   };
   return extra ? { ...out, ...extra } : out;
@@ -2409,6 +2414,62 @@ router.post('/sections/swap', async (req, res) => {
     });
   } catch (err) {
     return boom(res, err, 'arion/pages:swap-section');
+  }
+});
+
+/* ==========================================================================
+ * POST /sections/roles/swap — "no, that box is the other one" (pack 2b).
+ * Body: { kind, list, roles: [a, b], node }
+ *
+ * A hand-drawn card does not say which of its two text blocks is the period
+ * and which is the list of what is included, and on some layouts nothing in
+ * the content says either. `libraryAdapter.assignRoles` reaches for a marker
+ * first — a currency sign, a bullet, a quotation mark — and only falls back to
+ * "the longer one" when there is none. When it falls back it WRITES THAT DOWN
+ * on the section, the edit sheet shows it with "check this", and this route is
+ * the one tap that puts it right.
+ *
+ * Writes NOTHING. The swapped section reaches the website on the next Save,
+ * like every other edit, so the snapshot and one-tap Undo cover it. Only the
+ * two role markers move; not one setting of the layout is touched.
+ * ======================================================================== */
+router.post('/sections/roles/swap', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const kind = String(req.body?.kind || '').toLowerCase();
+  const list = String(req.body?.list || '').trim();
+  const roles = Array.isArray(req.body?.roles) ? req.body.roles.map((r) => String(r || '')) : [];
+  const node = (req.body?.node && typeof req.body.node === 'object') ? req.body.node : null;
+
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!kind || !sectionKindMeta(kind)) return bad(res, 'UNKNOWN_SECTION', `We do not have a section called "${kind}".`);
+  if (!node) return bad(res, 'NO_SECTION', 'The section did not arrive, so nothing was changed.');
+  if (roles.length !== 2 || !roles[0] || !roles[1] || roles[0] === roles[1]) {
+    return bad(res, 'BAD_ROLES', 'Say which two to swap over.');
+  }
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const swapped = swapItemRoles(node, kind, list, roles[0], roles[1]);
+    if (!swapped.ok) {
+      return bad(res, 'NOTHING_TO_SWAP',
+        'Those two are not two halves of the same card on this section, so there is nothing to swap.');
+    }
+
+    const [entry] = reduceToSectionList([swapped.node]);
+    if (!entry?.editable) {
+      return bad(res, 'SECTION_NOT_EDITABLE',
+        'Swapping those two would leave a part of this section we could not look after, so we did not.');
+    }
+    return res.status(200).json({
+      data: { section: publicSection(entry), swapped: swapped.swapped },
+      meta: { site_id: siteId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:swap-roles');
   }
 });
 
