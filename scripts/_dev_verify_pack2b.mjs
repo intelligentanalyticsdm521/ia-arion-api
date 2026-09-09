@@ -103,6 +103,28 @@ const ORIGINAL_JSON = JSON.stringify(ORIGINAL.map((s) => s.node));
 const ORIGINAL_STATUS = before.json.data.status;
 console.log(`  (page "${before.json.data.title}", ${ORIGINAL.length} sections, ${ORIGINAL_STATUS})`);
 
+/**
+ * The page as the world sees it, BEFORE this script touches it. Every "did one
+ * of the library's own words reach the website" check below counts against
+ * this rather than against zero — the site has a name and a footer of its own,
+ * and a needle that was already there is not a needle we put there.
+ */
+const ORIGINAL_HTML = await (await fetch(`${WP}/?page_id=${PAGE}&_cb=${Date.now()}`)).text();
+const countOf = (haystack, needle) => String(haystack).split(needle).length - 1;
+
+/**
+ * D-93. Every sample name, customer and number the curated library ships for
+ * team, testimonials and stats. None of them is the business's copy to edit —
+ * each one is a claim about a person, a customer or a figure, and every one of
+ * them belongs to somebody else.
+ */
+const SAMPLE_NEEDLES = [
+  'Sarah', 'Mike R.', 'Dana P.', 'Tom L.', 'Operations Lead', 'RetailCo',
+  'Brandon', 'Alex', 'Jordan', 'Software Engineer', 'Data Analyst', 'Project Manager',
+  'years building', 'clients served', 'client retention', 'faster reporting',
+  '15+', '200+', '98%',
+];
+
 /* ══════════════════ 1. what the picker now offers ════════════════════════ */
 
 console.log('\n-- the picker --');
@@ -157,19 +179,102 @@ for (const [kind, sec] of Object.entries(built)) {
 check('a hand-drawn quote card offers no star rating, because it has nowhere to put one',
   !built.testimonials.itemFields.testimonials.includes('rating'),
   JSON.stringify(built.testimonials.itemFields));
-check('a hand-drawn number splits into the number and what is around it',
-  (built.stats.fields.stats || []).some((s) => s.suffix === '+' || s.suffix === '%'),
-  JSON.stringify(built.stats.fields.stats));
+check('a hand-drawn number is still kept apart from what is around it',
+  built.stats.itemFields.stats.includes('value') && built.stats.itemFields.stats.includes('suffix'),
+  JSON.stringify(built.stats.itemFields));
+
+/* ── D-93: a name, a quote and a number are not sample copy either ──────── */
+
+console.log('\n-- the words a ready-made layout arrives with --');
+const quotes = built.testimonials?.fields?.testimonials || [];
+const people = built.team?.fields?.members || [];
+const numbers = built.stats?.fields?.stats || [];
+
+check('a quote layout arrives asking who said it, not quoting somebody else’s customer',
+  quotes.length >= 2 && quotes.every((q) => q.quote === 'What they said'
+    && q.attribution === 'Who said it' && q.role === 'Their job or company'),
+  JSON.stringify(quotes));
+check('a team layout arrives asking for a name, not naming one of ours',
+  people.length >= 2 && people.every((p) => p.name === 'Name' && p.role === 'Role'),
+  JSON.stringify(people));
+check('a numbers band arrives EMPTY, so nothing publishes a figure nobody gave us',
+  numbers.length >= 2 && numbers.every((s) => s.value === '' && s.prefix === '' && s.suffix === ''
+    && s.label === 'What this counts'),
+  JSON.stringify(numbers));
+
+/* the number widget itself, exactly as it would be written to the website */
+const numberTitles = [];
+(function walkNumbers(n) {
+  if (n?.settings?._ia_role === 'number') numberTitles.push(n.settings.title);
+  (n?.elements || []).forEach(walkNumbers);
+}(built.stats.node));
+check('...and an empty number is written out as NOTHING — not a nought, not NaN',
+  numberTitles.length >= 2 && numberTitles.every((t) => t === ''), JSON.stringify(numberTitles));
+
+check('the section’s OWN heading is untouched — that is copy about the business, not a claim',
+  built.team.fields.headline === 'Meet the team'
+  && built.testimonials.fields.headline === 'What clients say'
+  && built.stats.fields.headline === 'By the numbers',
+  JSON.stringify([built.team.fields.headline, built.testimonials.fields.headline, built.stats.fields.headline]));
+
+for (const [kind, listKey] of [['testimonials', 'testimonials'], ['team', 'members'], ['stats', 'stats']]) {
+  const json = JSON.stringify(built[kind].fields[listKey]);
+  const left = SAMPLE_NEEDLES.filter((n) => json.includes(n));
+  check(`no sample name, customer or number left on the ${kind} layout`, left.length === 0, left.join(', '));
+}
+
+/* and the five archetypes that keep their own sample copy still do */
+const KEEPS_ITS_WORDS = [
+  ['hero.centered-light-minimal.v1', 'Less busywork. More business.',
+    'Automate the repetitive parts of your operation and get your time back.'],
+  ['about.two-col-text.v1', 'About us',
+    'We started small and stayed senior. Every project is scoped and built by the same people, start to finish.'],
+];
+for (const [blueprintId, headline, subheadline] of KEEPS_ITS_WORDS) {
+  const res = await api(`${base}/sections`, { method: 'POST', body: { blueprintId } });
+  const f = res.json?.data?.section?.fields;
+  check(`${blueprintId} still arrives with every word the layout was written with`,
+    res.status === 201 && f?.headline === headline && f?.subheadline === subheadline,
+    `${res.status} ${JSON.stringify([f?.headline, f?.subheadline])}`);
+}
 
 /* ══════════════════ 3. on the page, published, rendered ══════════════════ */
 
 console.log('\n-- published and rendered --');
 const withNew = [...ORIGINAL, ...Object.values(built)];
-const saved = await api(`${base}/pages/${PAGE}/sections`, {
+
+// D-93. The numbers band arrives with nothing in the number boxes, so the page
+// CANNOT publish until the business types its own figures. That refusal is the
+// promise doing its job, and it is checked here before anything is saved.
+const refused = await api(`${base}/pages/${PAGE}/sections`, {
   method: 'PUT',
   body: { ...savePayload(withNew), status: 'publish' },
 });
-check('the page saves with all four on it', saved.status === 200, saved.text.slice(0, 300));
+check('a numbers band nobody has filled in cannot reach the website', refused.status === 422,
+  `${refused.status} ${refused.text.slice(0, 200)}`);
+check('...and the refusal names the box, in words the owner can act on and with nobody’s software in it',
+  (refused.json?.errors || []).some((e) => /The number cannot be empty\./.test(e.message))
+  && !/elementor|wordpress|plugin|theme|widget/i.test(refused.text),
+  refused.text.slice(0, 300));
+
+// What the business itself would type. Their figures, their words.
+const TYPED = [
+  { value: '12', prefix: '', suffix: '+', label: 'Years on the tools' },
+  { value: '480', prefix: '', suffix: '', label: 'Gardens looked after' },
+  { value: '96', prefix: '', suffix: '%', label: 'Come back next season' },
+  { value: '24', prefix: '', suffix: 'hr', label: 'To answer a quote' },
+];
+const filledIn = withNew.map((s) => (
+  s.kind === 'stats' && s.blueprintId === WANT.stats
+    ? { ...s, fields: { ...s.fields, stats: s.fields.stats.map((row, i) => ({ ...row, ...(TYPED[i] || TYPED[0]) })) } }
+    : s
+));
+const saved = await api(`${base}/pages/${PAGE}/sections`, {
+  method: 'PUT',
+  body: { ...savePayload(filledIn), status: 'publish' },
+});
+check('the page saves with all four on it, once the numbers are the business’s own',
+  saved.status === 200, saved.text.slice(0, 300));
 
 const readBack = await api(`${base}/pages/${PAGE}/sections`);
 const now = readBack.json?.data?.sections || [];
@@ -188,11 +293,16 @@ check('...and its prices came back off the website unchanged',
 const html = await (await fetch(`${WP}/?page_id=${PAGE}&_cb=${Date.now()}`)).text();
 check('the price RENDERS on the page', html.includes(plans[0].price) && html.includes(plans[0].name),
   `looking for "${plans[0].name}" and "${plans[0].price}"`);
-check('a person RENDERS on the page', html.includes(built.team.fields.members[0].name));
-check('a number RENDERS on the page',
-  html.includes(built.stats.fields.stats[0].value + built.stats.fields.stats[0].suffix));
-check('a quote RENDERS on the page',
-  html.includes(built.testimonials.fields.testimonials[0].quote.slice(2, 40)));
+check('the team card RENDERS on the page, asking for a name rather than giving one',
+  html.includes(built.team.fields.headline) && countOf(html, 'Name') > countOf(ORIGINAL_HTML, 'Name'),
+  `"${built.team.fields.headline}" / Name x${countOf(html, 'Name')} was x${countOf(ORIGINAL_HTML, 'Name')}`);
+check('the number the BUSINESS typed RENDERS on the page, with its "+" still on it',
+  html.includes('12+') && html.includes('Years on the tools'));
+check('the quote card RENDERS the prompt, not somebody else’s customer',
+  html.includes('What they said') && html.includes('Their job or company'));
+check('...and not one of the library’s people, customers or numbers came with them',
+  SAMPLE_NEEDLES.every((n) => countOf(html, n) === countOf(ORIGINAL_HTML, n)),
+  SAMPLE_NEEDLES.filter((n) => countOf(html, n) !== countOf(ORIGINAL_HTML, n)).join(', '));
 check('and none of our own plumbing reaches the page',
   !html.includes('_ia_role') && !html.includes('_ia_offering') && !html.includes('_ia_field'));
 
@@ -286,6 +396,19 @@ const noNode = await api(`${base}/sections/roles/swap`, {
 });
 check('a swap with no section is refused rather than reported done', noNode.status === 400);
 
+// D-93. The markers move, so the PROMPTS have to move with them: the big box a
+// client is about to type a quote into must still be the one that says "What
+// they said" afterwards, not the one asking for a job title.
+const quoteSwap = await api(`${base}/sections/roles/swap`, {
+  method: 'POST',
+  body: { kind: 'testimonials', list: 'testimonials', roles: ['quote', 'role'], node: built.testimonials.node },
+});
+const quoteSwapped = quoteSwap.json?.data?.section?.fields?.testimonials || [];
+check('swapping the quote and the job title puts the right PROMPT in the right box',
+  quoteSwap.status === 200 && quoteSwapped.length >= 2
+  && quoteSwapped.every((t) => t.quote === 'What they said' && t.role === 'Their job or company'),
+  `${quoteSwap.status} ${JSON.stringify(quoteSwapped)}`);
+
 /* ══════════════════ 7. broken on purpose, live ═══════════════════════════ */
 
 console.log('\n-- refused on purpose --');
@@ -314,7 +437,8 @@ check('...and byte for byte the tree it started with',
   JSON.stringify(finalSections.map((s) => s.node)) === ORIGINAL_JSON);
 const finalHtml = await (await fetch(`${WP}/?page_id=${PAGE}&_cb=${Date.now()}`)).text();
 check('...and nothing this script wrote is on the website any more',
-  !finalHtml.includes('$999') && !finalHtml.includes(plans[0].name));
+  !finalHtml.includes('$999') && !finalHtml.includes(plans[0].name)
+  && !finalHtml.includes('What they said') && !finalHtml.includes('Years on the tools'));
 
 console.log(`\n=== ${pass} passed, ${fail} failed ===\n`);
 process.exit(fail === 0 ? 0 : 1);

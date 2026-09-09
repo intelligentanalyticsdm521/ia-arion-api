@@ -102,7 +102,9 @@ import {
 import {
   saveProposal, markProposalsApplied, resolveProposal, listProposals,
 } from '../../lib/websiteBuilder/proposalStore.js';
-import { libraryPickerRows, buildLibrarySection } from '../../lib/websiteBuilder/libraryCatalog.js';
+import {
+  libraryPickerRows, buildLibrarySection, neutraliseSampleWords,
+} from '../../lib/websiteBuilder/libraryCatalog.js';
 import { maybeDevModel } from '../../lib/websiteBuilder/aiDevStub.js';
 import { getActionPricing } from '../../lib/argus/callWrapper.js';
 import {
@@ -2459,7 +2461,15 @@ router.post('/sections/roles/swap', async (req, res) => {
         'Those two are not two halves of the same card on this section, so there is nothing to swap.');
     }
 
-    const [entry] = reduceToSectionList([swapped.node]);
+    // The markers moved, so the PROMPTS have to move with them: the box the
+    // client is about to type a quote into must still say "What they said"
+    // after the swap, not "Their job or company". Only a value that is still
+    // one of our prompts is touched, so a section they have already filled in
+    // comes through the swap exactly as a swap has always worked — the two
+    // sets of words change places (D-93).
+    const settled = neutraliseSampleWords(swapped.node, kind, { onlyPrompts: true });
+
+    const [entry] = reduceToSectionList([settled]);
     if (!entry?.editable) {
       return bad(res, 'SECTION_NOT_EDITABLE',
         'Swapping those two would leave a part of this section we could not look after, so we did not.');

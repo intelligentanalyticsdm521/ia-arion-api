@@ -19,12 +19,14 @@ import {
   CODECS, COMPOSED_PARTS, BINDINGS, ROLE_MARKER, ROLE_REVIEW_MARKER,
   decodeStatNumber, encodeStatNumber,
   extractFields, applyFields, validateFields, reduceToSectionList,
-  itemFieldsFor, roleReviewFor, swapItemRoles, collectRoles,
+  itemFieldsFor, roleReviewFor, swapItemRoles, collectRoles, sectionKindMeta,
 } from '../lib/websiteBuilder/sectionSchema.js';
 import {
   findItemGroup, assignRoles, stampLibrarySection, mapLibrarySection,
 } from '../lib/websiteBuilder/libraryAdapter.js';
-import { fillPricingFromCatalogue } from '../lib/websiteBuilder/libraryCatalog.js';
+import {
+  fillPricingFromCatalogue, neutraliseSampleWords, neverInventValues, SAMPLE_WORD_PROMPTS,
+} from '../lib/websiteBuilder/libraryCatalog.js';
 
 /* ==========================================================================
  * Fixtures — drawn the way the curated library actually draws these.
@@ -671,12 +673,13 @@ test('the four list kinds all have a card binding and it is the one the plan use
 test('the thing that builds a section for the client is the thing that fills the prices', () => {
   // `fillPricingFromCatalogue` tested on its own proves the fill; this proves
   // it is WIRED, which is the half that actually reaches a client's page.
-  const src = fs.readFileSync(new URL('../lib/websiteBuilder/libraryCatalog.js', import.meta.url), 'utf8');
+  const src = catalogSource();
   const body = src.slice(src.indexOf('export async function buildLibrarySection'));
-  assert.match(body, /mapped\.kind === 'pricing'/);
-  assert.match(body, /fillPricingFromCatalogue\(mapped\.node, brand\)/);
+  assert.match(body, /const node = neverInventValues\(mapped\.node, mapped\.kind, brand\);/);
   assert.match(body, /return \{ ok: true, node, kind: mapped\.kind \}/,
     'and the filled node is the one handed back, not the unfilled one');
+  // ...and the never-invent step is where pricing is decided, still.
+  assert.match(src, /if \(kind === 'pricing'\) return fillPricingFromCatalogue\(node, brand\);/);
 });
 
 test('mapLibrarySection carries the kind and the review through to the caller', () => {
@@ -687,4 +690,245 @@ test('mapLibrarySection carries the kind and the review through to the caller', 
   assert.equal(res.ok, true);
   assert.equal(res.kind, 'pricing');
   assert.ok(roleReviewFor(res.node));
+});
+
+/* ==========================================================================
+ * 10. D-93 — a name, a quote and a number are not sample copy either
+ *
+ * The library's own words for these three archetypes are claims about a
+ * PERSON, a CUSTOMER or a NUMBER: "Sarah K., Operations Lead" said something
+ * glowing, "Brandon" is the Founder, the business has "15+ years building".
+ * They come out and prompts go in, through the same never-invent step the
+ * prices go through. The other five archetypes keep their sample copy, which
+ * is the business's own words to edit and has been walked that way since June.
+ * ======================================================================== */
+
+/** Read a source file the way this repo is checked out — CRLF, normalised. */
+function readSource(rel) {
+  return fs.readFileSync(new URL(rel, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+}
+function catalogSource() {
+  return readSource('../lib/websiteBuilder/libraryCatalog.js');
+}
+
+/**
+ * Every sample word the curated library actually ships for these three, read
+ * off the library export and pinned into the fixtures above. If one of these
+ * is on an adopted section, a client is looking at somebody else's claim.
+ */
+const LIBRARY_SAMPLE_WORDS = [
+  'Sarah', 'Mike', 'Dana', 'Tom', 'Operations Lead', 'RetailCo',
+  'Brandon', 'Alex', 'Sam', 'Founder', 'Software Engineer', 'Data Analyst',
+  '15', '200', '98', '40', 'years building', 'clients served', 'client retention',
+];
+
+function heroSection() {
+  return box([
+    heading('Build something people remember', 'h1'),
+    editor('<p>One line that says what you do and who for.</p>'),
+    button('Get started', '#contact'),
+  ]);
+}
+
+function aboutSection() {
+  return box([
+    heading('About the business', 'h2'),
+    editor('<p>A supporting line.</p>'),
+    editor('<p>How it started.</p><p>What we do today.</p>'),
+    w('icon-box', { title_text: 'We turn up', description_text: 'Every time, on the day we said.' }),
+  ]);
+}
+
+/** Two text blocks, neither of them quoted — so the roles are a guess. */
+function ambiguousTestimonials() {
+  return box([
+    heading('In their words', 'h2'),
+    box([1, 2].map(() => box([
+      editor('<p>They turned our reporting around in a fortnight and it has stayed that way.</p>'),
+      heading('Sarah K.', 'h5'),
+      editor('<p>Operations Lead</p>'),
+    ]))),
+  ]);
+}
+
+test('a curated quote layout arrives asking who said it, not quoting somebody else’s customer', () => {
+  const res = stamp('testimonials', testimonialsSection());
+  const before = extractFields(res.node, 'testimonials');
+  assert.match(before.testimonials[0].role, /Operations Lead/, 'the blueprint really does carry a sample job title');
+
+  const node = neutraliseSampleWords(res.node, 'testimonials');
+  const after = extractFields(node, 'testimonials');
+  assert.equal(after.testimonials.length, before.testimonials.length,
+    'the layout still has the cards its author drew');
+  for (const item of after.testimonials) {
+    assert.equal(item.quote, 'What they said');
+    assert.equal(item.attribution, 'Who said it');
+    assert.equal(item.role, 'Their job or company');
+  }
+  // The section's OWN heading is copy about the business, and it stays.
+  assert.equal(after.headline, 'What clients say');
+});
+
+test('a curated team layout arrives asking for a name, not naming one of ours', () => {
+  const res = stamp('team', teamSection());
+  const before = extractFields(res.node, 'team');
+  assert.equal(before.members[0].name, 'Brandon', 'the blueprint really does carry a sample name');
+
+  const node = neutraliseSampleWords(res.node, 'team');
+  const after = extractFields(node, 'team');
+  assert.equal(after.members.length, 3);
+  for (const item of after.members) {
+    assert.equal(item.name, 'Name');
+    assert.equal(item.role, 'Role');
+    assert.equal(item.photo_url, '', 'and the photograph is still empty, as pack 2b left it');
+  }
+  assert.equal(after.headline, 'Meet the team');
+});
+
+test('a curated numbers band arrives EMPTY, because a number is a claim and a nought is one too', () => {
+  const res = stamp('stats', statsSection());
+  const before = extractFields(res.node, 'stats');
+  assert.equal(before.stats[0].value, '15', 'the blueprint really does carry a sample number');
+  assert.equal(before.stats[0].suffix, '+');
+
+  const node = neutraliseSampleWords(res.node, 'stats');
+  const after = extractFields(node, 'stats');
+  assert.equal(after.stats.length, 4);
+  for (const item of after.stats) {
+    assert.equal(item.value, '', 'the number itself');
+    assert.equal(item.prefix, '', 'and whatever was in front of it');
+    assert.equal(item.suffix, '', 'and whatever was after it');
+    assert.equal(item.label, 'What this counts');
+  }
+  assert.equal(after.headline, 'By the numbers');
+});
+
+test('an empty number is written out as NOTHING — not a nought, not NaN, not undefined', () => {
+  // The serialised section is what reaches the website, so that is what is
+  // asserted on: the heading the number lived in is empty, and no arithmetic
+  // leaked into it on the way (memory: feedback_assert_presence_not_just_absence).
+  const node = neutraliseSampleWords(stamp('stats', statsSection()).node, 'stats');
+  const numbers = [];
+  const walk = (n) => {
+    if (n?.settings?.[ROLE_MARKER] === 'number') numbers.push(n.settings.title);
+    (n?.elements || []).forEach(walk);
+  };
+  walk(node);
+  assert.equal(numbers.length, 4, 'every card still has its number widget');
+  for (const title of numbers) assert.equal(title, '', JSON.stringify(title));
+  assert.equal(/NaN|undefined|"0"/.test(JSON.stringify(node)), false, JSON.stringify(node).slice(0, 300));
+});
+
+test('and the website is never handed a numbers band with nothing in it', () => {
+  // The other half of the same promise. An empty number cannot publish: the
+  // save refuses it in the client's own words until they type their own.
+  const node = neutraliseSampleWords(stamp('stats', statsSection()).node, 'stats');
+  const check = validateFields('stats', extractFields(node, 'stats'));
+  assert.equal(check.ok, false);
+  assert.ok(check.errors.every((e) => /The number cannot be empty\./.test(e.message)),
+    JSON.stringify(check.errors));
+  assert.equal(/elementor|wordpress|widget|theme|plugin/i.test(JSON.stringify(check.errors)), false,
+    'and it says so without naming anybody’s software');
+});
+
+test('not one of the library’s own sample words survives, and the prompts are all there', () => {
+  const cases = [
+    ['testimonials', testimonialsSection(), ['What they said', 'Who said it', 'Their job or company']],
+    ['team', teamSection(), ['Name', 'Role']],
+    ['stats', statsSection(), ['What this counts']],
+  ];
+  for (const [kind, fixture, wanted] of cases) {
+    const node = neutraliseSampleWords(stamp(kind, fixture).node, kind);
+    const listKey = sectionKindMeta(kind).fields.find((f) => f.type === 'list').key;
+    const items = JSON.stringify(extractFields(node, kind)[listKey]);
+    for (const needle of LIBRARY_SAMPLE_WORDS) {
+      assert.equal(items.includes(needle), false, kind + ' still says "' + needle + '": ' + items);
+    }
+    for (const prompt of wanted) {
+      assert.ok(items.includes(prompt), kind + ' does not offer the prompt "' + prompt + '": ' + items);
+    }
+  }
+});
+
+test('hero and about keep every word the library wrote, byte for byte', () => {
+  for (const [kind, fixture] of [['hero', heroSection()], ['about', aboutSection()]]) {
+    const res = stamp(kind, fixture);
+    assert.equal(res.ok, true, kind + ': ' + res.detail);
+    const out = neverInventValues(res.node, kind, PRICED_BRAND);
+    assert.equal(out, res.node, kind + ' came back as a different object');
+    assert.equal(JSON.stringify(out), JSON.stringify(res.node), kind + ' changed');
+    assert.equal(extractFields(out, kind).headline, extractFields(res.node, kind).headline);
+  }
+});
+
+test('the table names the three archetypes it is for, and no others', () => {
+  assert.deepEqual(Object.keys(SAMPLE_WORD_PROMPTS).sort(), ['stats', 'team', 'testimonials']);
+  for (const kind of ['hero', 'about', 'faq', 'contact', 'cta', 'services', 'gallery', 'pricing']) {
+    assert.equal(SAMPLE_WORD_PROMPTS[kind], undefined, kind + ' keeps its own sample copy');
+  }
+});
+
+test('every prompt names a box the edit sheet actually has', () => {
+  for (const [kind, prompts] of Object.entries(SAMPLE_WORD_PROMPTS)) {
+    const lists = sectionKindMeta(kind).fields.filter((f) => f.type === 'list');
+    assert.equal(lists.length, 1, kind + ' keeps its items in exactly one list');
+    const keys = lists[0].item.map((s) => s.key);
+    for (const field of Object.keys(prompts)) {
+      assert.ok(keys.includes(field), kind + '.' + field + ' is not a field of ' + lists[0].key);
+    }
+  }
+});
+
+test('the one never-invent step sends a price layout to the price list and the rest to the prompts', () => {
+  const priced = neverInventValues(stamp('pricing', pricingSection()).node, 'pricing', PRICED_BRAND);
+  assert.equal(extractFields(priced, 'pricing').plans[0].price, '$45');
+  const quotes = neverInventValues(stamp('testimonials', testimonialsSection()).node, 'testimonials', PRICED_BRAND);
+  assert.equal(extractFields(quotes, 'testimonials').testimonials[0].quote, 'What they said');
+});
+
+/* --- the "check this" swap still puts the right prompt in the right box --- */
+
+test('a swapped role takes its prompt with it', () => {
+  const res = stamp('testimonials', ambiguousTestimonials());
+  assert.equal(res.ok, true, res.detail);
+  assert.ok(roleReviewFor(res.node)?.some((r) => r.roles.includes('quote')), 'the guess was written down');
+
+  const adopted = neutraliseSampleWords(res.node, 'testimonials');
+  assert.equal(extractFields(adopted, 'testimonials').testimonials[0].quote, 'What they said');
+
+  const swapped = swapItemRoles(adopted, 'testimonials', 'testimonials', 'quote', 'role');
+  assert.equal(swapped.ok, true, swapped.reason);
+  assert.equal(swapped.swapped, 2, 'on every card');
+  // Without the refresh the two prompts are now in each other's boxes.
+  assert.equal(extractFields(swapped.node, 'testimonials').testimonials[0].quote, 'Their job or company');
+
+  const settled = neutraliseSampleWords(swapped.node, 'testimonials', { onlyPrompts: true });
+  for (const item of extractFields(settled, 'testimonials').testimonials) {
+    assert.equal(item.quote, 'What they said');
+    assert.equal(item.role, 'Their job or company');
+  }
+  assert.equal(roleReviewFor(settled), null, 'and the question is not asked twice');
+});
+
+test('a swap never overwrites a word the client typed', () => {
+  const adopted = neutraliseSampleWords(stamp('testimonials', ambiguousTestimonials()).node, 'testimonials');
+  const typed = applyFields(adopted, 'testimonials', {
+    testimonials: extractFields(adopted, 'testimonials').testimonials.map(() => ({
+      quote: 'They cleared the whole estate in a morning.', role: 'Owner, Summit Lawn',
+    })),
+  });
+  const swapped = swapItemRoles(typed, 'testimonials', 'testimonials', 'quote', 'role');
+  assert.equal(swapped.ok, true);
+  const settled = neutraliseSampleWords(swapped.node, 'testimonials', { onlyPrompts: true });
+  const item = extractFields(settled, 'testimonials').testimonials[0];
+  assert.equal(item.quote, 'Owner, Summit Lawn', 'the swap moved their words, as it always has');
+  assert.equal(item.role, 'They cleared the whole estate in a morning.');
+});
+
+test('the one tap behind "check this" is wired to the prompt refresh', () => {
+  const routes = readSource('../routes/arion/pages.js');
+  const body = routes.slice(routes.indexOf("router.post('/sections/roles/swap'"));
+  assert.match(body, /neutraliseSampleWords\(swapped\.node, kind, \{ onlyPrompts: true \}\)/);
+  assert.match(body, /reduceToSectionList\(\[settled\]\)/,
+    'and the refreshed section is the one handed back, not the raw swap');
 });

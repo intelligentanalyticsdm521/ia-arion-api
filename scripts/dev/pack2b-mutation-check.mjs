@@ -15,11 +15,26 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
-const ARION = 'C:/dev/iadm/arion-api-septa-arion2b';
-const PORTAL = 'C:/dev/iadm/Portal-septa-arion2b';
+const argv = process.argv.slice(2);
+const arg = (name, fallback) => {
+  const i = argv.indexOf(`--${name}`);
+  return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback;
+};
+
+// THE REPO THIS SCRIPT SHIPS IN, not a fixed path. A mutation edits a source
+// file and puts it back; pointed at a worktree somebody else is working in,
+// that is somebody else's afternoon. So it defaults to its own checkout and
+// every other worktree has to be asked for by name.
+const OWN_REPO = path.resolve(new URL('../..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const ARION = arg('arion', OWN_REPO).replace(/\\/g, '/');
+const PORTAL = arg('portal', 'C:/dev/iadm/Portal-septa-arion2b').replace(/\\/g, '/');
+// The Portal half lives in a different repo. `--skip-portal` says so out loud
+// rather than counting four unrun mutations as four that were caught.
+const SKIP_PORTAL = argv.includes('--skip-portal');
 
 const SCHEMA = `${ARION}/lib/websiteBuilder/sectionSchema.js`;
 const ADAPTER = `${ARION}/lib/websiteBuilder/libraryAdapter.js`;
@@ -29,6 +44,7 @@ const PAGES = `${PORTAL}/src/arion/pages/website/WebsitePages.tsx`;
 
 let caught = 0;
 let missed = 0;
+let skipped = 0;
 
 const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 
@@ -56,6 +72,11 @@ const checkers = {
 };
 
 function mutate(m) {
+  if (m.checker === 'portal' && SKIP_PORTAL) {
+    skipped += 1;
+    console.log(`  skipped ${m.name} — --skip-portal`);
+    return;
+  }
   const before = fs.readFileSync(m.file, 'utf8');
   const beforeSha = sha(m.file);
   const count = before.split(m.from).length - 1;
@@ -282,8 +303,8 @@ console.log('\n=== the one price source ===\n');
 mutate({
   name: 'a curated price layout is filled from the business’s own catalogue',
   file: CATALOG, checker: 'pack2b',
-  from: "  const node = mapped.kind === 'pricing'",
-  to: "  const node = mapped.kind === 'never'",
+  from: "  if (kind === 'pricing') return fillPricingFromCatalogue(node, brand);",
+  to: "  if (kind === 'never') return fillPricingFromCatalogue(node, brand);",
 });
 
 mutate({
@@ -298,6 +319,50 @@ mutate({
   file: CATALOG, checker: 'pack2b',
   from: '  if (plans.length === 0) return node;',
   to: '  if (plans.length >= 0) return node;',
+});
+
+console.log('\n=== a name, a quote and a number are not sample copy (D-93) ===\n');
+
+mutate({
+  name: 'the never-invent step is WIRED to the thing that builds a section',
+  file: CATALOG, checker: 'pack2b',
+  from: '  const node = neverInventValues(mapped.node, mapped.kind, brand);',
+  to: '  const node = mapped.node;',
+});
+
+mutate({
+  name: 'the prompts actually reach the section',
+  file: CATALOG, checker: 'pack2b',
+  from: '  return applyFields(node, kind, { [listKey]: next });',
+  to: '  return node;',
+});
+
+mutate({
+  name: 'a number comes out EMPTY — a nought is a claim too',
+  file: CATALOG, checker: 'pack2b',
+  from: "    value: '',",
+  to: "    value: '0',",
+});
+
+mutate({
+  name: 'the five archetypes that keep their own sample copy are not on the table',
+  file: CATALOG, checker: 'pack2b',
+  from: 'export const SAMPLE_WORD_PROMPTS = Object.freeze({',
+  to: "export const SAMPLE_WORD_PROMPTS = Object.freeze({ about: { title: 'Name' },",
+});
+
+mutate({
+  name: 'a swap never overwrites a word the client typed',
+  file: CATALOG, checker: 'pack2b',
+  from: "      if (onlyPrompts && current !== '' && !ours.has(current)) continue;",
+  to: '      if (false) continue;',
+});
+
+mutate({
+  name: 'the number and the two parts around it are written together, so an empty one really empties',
+  file: SCHEMA, checker: 'pack2b',
+  from: "    const owned = ['value', 'prefix', 'suffix'].filter((k) => k in item);",
+  to: '    const owned = [];',
 });
 
 console.log('\n=== the screen a client uses ===\n');
@@ -337,5 +402,5 @@ mutate({
   to: '      void e;',
 });
 
-console.log(`\n=== ${caught} caught, ${missed} missed ===\n`);
+console.log(`\n=== ${caught} caught, ${missed} missed${skipped ? `, ${skipped} skipped` : ''} ===\n`);
 process.exit(missed === 0 ? 0 : 1);
