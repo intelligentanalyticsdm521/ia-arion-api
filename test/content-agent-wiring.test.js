@@ -82,7 +82,7 @@ test('the two migrations are 063 and 064 and the old numbers are gone', () => {
 test('both migrations name their new number inside the file, not just in the filename', () => {
   for (const f of AGENT_MIGRATIONS) {
     const src = fs.readFileSync(`${MIGRATIONS}/${f}`, 'utf8');
-    assert.match(src.split('\n')[0], new RegExp(`^-- ${f}$`), `${f} header does not match its name`);
+    assert.match(src.split('\n')[0].trimEnd(), new RegExp(`^-- ${f}$`), `${f} header does not match its name`);
     assert.match(src, /RENUMBERED 05[34] -> 06[34]/, `${f} must carry the reason it was renumbered`);
   }
 });

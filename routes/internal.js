@@ -15,7 +15,11 @@ const ARION_API_BASE = (process.env.ARION_API_BASE_URL
 // Simple key check for internal endpoints
 function requireIngestKey(req, res, next) {
   const key = process.env.ARION_INGEST_KEY;
-  if (!key) return next(); // Skip if no key configured
+  if (!key) {
+    // 2026-09-08 (D-49): an unset key used to SKIP the check - every /internal route was open on any
+    // deployment without ARION_INGEST_KEY. Absence-based guards fail open; this one now fails closed.
+    return res.status(503).json({ error: { code: 'internal_key_not_configured', message: 'ARION_INGEST_KEY is not set on this service; every /internal route is refused until it is.', status: 503 } });
+  }
   const provided = req.headers['x-arion-ingest-key'];
   if (provided !== key) {
     return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid ingest key', status: 401 } });
