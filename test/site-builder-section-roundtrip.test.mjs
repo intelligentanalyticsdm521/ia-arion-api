@@ -338,5 +338,6 @@ test('Lite is told WHY the form section is unavailable, not just denied it', () 
 
   const pro = sectionCatalog({ allowPro: true });
   assert.equal(pro.every((c) => c.available), true);
-  assert.equal(pro.length, 8);
+  // Eight archetypes, plus pricing, team and stats from ARION pack 2.
+  assert.equal(pro.length, 11);
 });

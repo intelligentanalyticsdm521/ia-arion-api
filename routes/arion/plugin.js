@@ -12,7 +12,7 @@
 import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
-import { pluginGet, pluginPost } from '../../lib/pluginClient.js';
+
 import { resolveSiteHost } from '../../lib/pluginClient.js';
 
 const router = Router();
@@ -39,67 +39,29 @@ async function pickPrimarySite(pool, tenantId, explicitSiteId) {
   return r.recordset[0] || null;
 }
 
-/**
- * POST /arion/plugin/publish-newsletter
- * Body:
- *   { site_id? (uuid), title (required), summary?, content?, issue_number?,
- *     edition_date? (yyyy-mm-dd), category?, status? }
+/* ==========================================================================
+ * DELETED 2026-09-09 (ARION pack 2, D-ARION-C): POST /publish-newsletter.
  *
- * Looks up the tenant's primary WordPress site (or the explicit site_id if
- * provided), then forwards the payload to the IA plugin's
- * /publish-newsletter endpoint using the site's stored site_token_raw.
+ * It forwarded to the IA plugin's `/publish-newsletter` route, and the plugin
+ * has never registered such a route - `grep register_rest_route` across
+ * intelligent-analytics.php and includes/ finds no such path in any version.
+ * So publishing a newsletter to WordPress from the Portal answered
+ * `plugin_call_failed` on the first real call and has never once worked
+ * (GAP_ANALYSIS_2026-09-08, ARION). Keeping a proxy to nothing meant the
+ * failure looked like a website problem instead of a missing feature.
  *
- * Returns: { post_id, post_url, status } from the plugin, plus site_id we
- * routed to.
- */
-router.post('/publish-newsletter', async (req, res) => {
-  const tenantId = req.tenant.tenantId;
-  const body = req.body || {};
-  if (!body.title || typeof body.title !== 'string' || !body.title.trim()) {
-    return res.status(400).json({ error: 'title is required' });
-  }
-
-  try {
-    const pool = await getServicesPool();
-    const site = await pickPrimarySite(pool, tenantId, body.site_id || null);
-    if (!site) {
-      return res.status(404).json({
-        error: 'no_arion_site',
-        message: 'No ARION-managed WordPress site found for this tenant. Add an ARION site or pass site_id explicitly.',
-      });
-    }
-
-    const r = await pluginPost(site, '/publish-newsletter', {
-      tenant_id: tenantId,
-      title: body.title,
-      summary: body.summary || null,
-      content: body.content || null,
-      issue_number: body.issue_number ?? null,
-      edition_date: body.edition_date || null,
-      category: body.category || 'Newsletter',
-      status: body.status || 'publish',
-    }, { timeoutMs: 30_000 });
-
-    if (!r.ok) {
-      return res.status(502).json({
-        error: 'plugin_call_failed',
-        plugin_status: r.pluginStatus,
-        details: r.errorText || null,
-        site_id: site.site_id,
-      });
-    }
-    return res.json({
-      ok: true,
-      site_id: site.site_id,
-      post_id: r.data?.post_id || null,
-      post_url: r.data?.post_url || null,
-      status: r.data?.status || 'unknown',
-    });
-  } catch (err) {
-    console.error('[arion/plugin/publish-newsletter]', err);
-    res.status(500).json({ error: 'internal_error', message: err.message });
-  }
-});
+ * WRITING A POST NOW HAS A REAL HOME: ARION -> Website -> Pages -> New post
+ * composes a blog post in the same section editor as a page, through the
+ * plugin routes that do exist (POST /pages with type=post, then the section
+ * save and the page-settings sheet for its categories, tags and picture).
+ *
+ * ONE CALLER IS LEFT AND IS NOT OURS TO CHANGE: LUMEN-API
+ * `src/routes/newsletters.js:376` still POSTs here from
+ * `/newsletters/:id/publish`. It already treats a failure as a recorded
+ * `wp_status` rather than an error, so it degrades exactly as it did before -
+ * it just says 404 instead of 502 now. Pointing it at the new post path is
+ * SPARK's call to make, in SPARK's repo.
+ * ======================================================================== */
 
 /**
  * GET /arion/plugin/posts?category=Newsletter&limit=50
