@@ -104,18 +104,18 @@ test('the EDITED text is what gets sent to WordPress, not the original draft', a
   let sent = null;
   const res = await publishApproved({
     pool: fakePool({ output: approvedRow }), tenantId: TENANT, outputId: OUTPUT,
-    post: async (_site, _path, body) => { sent = body; return { ok: true, data: { post_id: 99, post_url: 'u' } }; },
+    compose: async (args) => { sent = args; return { ok: true, postId: 99, postUrl: 'u' }; },
   });
   assert.equal(res.ok, true);
-  assert.equal(sent.content, 'EDITED approved text', 'AC3: publishing the original would ship the wording Brandon changed');
-  assert.notEqual(sent.content, 'ORIGINAL draft text');
+  assert.match(sent.contentHtml, /EDITED approved text/, 'AC3: publishing the original would ship the wording Brandon changed');
+  assert.ok(!/ORIGINAL draft text/.test(sent.contentHtml));
 });
 
 test('the publish UPDATE re-asserts the approval gate in its WHERE clause', async () => {
   const pool = fakePool({ output: approvedRow });
   await publishApproved({
     pool, tenantId: TENANT, outputId: OUTPUT,
-    post: async () => ({ ok: true, data: { post_id: 1 } }),
+    compose: async () => ({ ok: true, postId: 1 }),
   });
   const upd = pool.queries.find((q) => /UPDATE arion\.content_agent_output/i.test(q.text) && /published_at\s*=/i.test(q.text));
   assert.ok(upd, 'the publish update ran');
@@ -131,7 +131,7 @@ test('a plugin failure leaves the row untouched and raises an F5 alert', async (
   const pool = fakePool({ output: approvedRow });
   const res = await publishApproved({
     pool, tenantId: TENANT, outputId: OUTPUT,
-    post: async () => ({ ok: false, pluginStatus: 502 }),
+    compose: async () => ({ ok: false, step: 'body', message: 'Your website answered with an error (502).' }),
   });
   assert.equal(res.ok, false);
   assert.equal(res.alert.failure_mode, 'F5');
@@ -143,7 +143,7 @@ test('a plugin failure leaves the row untouched and raises an F5 alert', async (
 test('a thrown plugin error is also F5, not an unhandled crash', async () => {
   const res = await publishApproved({
     pool: fakePool({ output: approvedRow }), tenantId: TENANT, outputId: OUTPUT,
-    post: async () => { throw new Error('ECONNRESET'); },
+    compose: async () => { throw new Error('ECONNRESET'); },
   });
   assert.equal(res.ok, false);
   assert.equal(res.alert.failure_mode, 'F5');
@@ -152,7 +152,7 @@ test('a thrown plugin error is also F5, not an unhandled crash', async () => {
 test('no ARION site is a clean F5, not a 500', async () => {
   const res = await publishApproved({
     pool: fakePool({ output: approvedRow, site: null }), tenantId: TENANT, outputId: OUTPUT,
-    post: async () => ({ ok: true, data: {} }),
+    compose: async () => ({ ok: true, postId: 1 }),
   });
   assert.equal(res.ok, false);
   assert.equal(res.alert.code, 'no_arion_site');

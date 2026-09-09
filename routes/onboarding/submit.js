@@ -666,21 +666,37 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
     // lumen.ai_usage — it was the only cost-invisible LLM call in the stack.
     const copyBundle = await generateSiteCopy(answers, { pool, tenantId: session.tenant_id });
 
-    // 17. NEW (V2 F-201) — Set Elementor Globals (brand colors + fonts) via
-    //     the Elementor v1/globals REST API. Cascades automatically through
-    //     every widget that references globals.primary / globals.heading_font
-    //     so we don't have to touch each leaf node.
-    //     Elementor REST needs Basic auth from a real WP user. We just
-    //     provisioned iaadmin with adminPassword above; synthesize an in-
-    //     memory site row that pluginClient.buildPluginAuth() will accept
-    //     so setElementorGlobals can authenticate during onboarding.
+    // 17. (V2 F-201, rewritten for D-81 on 2026-09-09) — Set the brand kit
+    //     (colours + fonts) THROUGH THE PLUGIN. Every widget that references
+    //     globals.primary / globals.heading_font follows automatically, so we
+    //     never touch a leaf node.
+    //
+    //     The plugin is the only write path to WordPress. The SSH/wp-cli
+    //     writer this replaces read an option Elementor does not define and
+    //     patched a meta key a kit's settings do not live in, so it had never
+    //     branded a single site — see lib/elementorGlobals.js.
+    //
+    //     AUTH AT THIS POINT IN THE RUN: the site row has no site token yet.
+    //     The plugin mints one only when its provisioning code is redeemed,
+    //     and that redeem runs on the first wp-admin page load (the plugin's
+    //     admin_init auto-redeem) — which has not happened during a headless
+    //     provisioning run. What the site DOES have is the iaadmin
+    //     application password minted at step 14b, and the plugin's
+    //     check_token_or_admin accepts Basic auth with one. So the shim below
+    //     carries it, exactly as the page publish at step 20 already does.
     await updatePhase(pool, session.site_id, 'setting_brand_globals');
     // V2 publish auth — the WP REST API rejects Basic auth with the user's
     // regular password since WP 5.6+. Only application passwords pass the
     // wp_authenticate_application_password filter. If we minted one in step 14b
-    // we use it here (and for postElementorPage below); otherwise we fall back
-    // to the regular password which will fail Basic auth (caller falls back to
-    // the provision-code header path).
+    // we use it here (and for postElementorPage below).
+    //
+    // If the mint FAILED there is no second way in. This used to say the
+    // caller falls back to the provision-code header; it does not, because the
+    // plugin has no such fallback — `check_token` reads X-Arion-Site-Token and
+    // nothing else, so `X-Arion-Provision-Code` has never authenticated
+    // anything. A run that gets here without an application password will be
+    // refused by the site, and the refusal is recorded as a phase error rather
+    // than dressed up as a success.
     const publishCreds = iaadminAppPassword
       ? `${adminLogin}:${iaadminAppPassword}`
       : `${adminLogin}:${adminPassword}`;
@@ -691,15 +707,11 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
     };
     let globalsResult = { ok: false, error: 'not_attempted' };
     try {
-      // setElementorGlobals writes Global Colors + Typography to the
-      // Elementor Kit via wp-cli over SSH (lib/hostingerSsh.runWpCli pulls
-      // SSH creds from KV — the same credentials we used to install plugins
-      // above). The Elementor REST endpoint at /wp-json/elementor/v1/globals
-      // is GET-only across the estate, so we don't bother POSTing to it —
-      // wp-cli is the canonical and only transport. Returns
-      // `{ ok: true, via: 'wp_cli', kit_id }` on success.
+      // The plugin asks Elementor which kit is live, writes the meta that kit
+      // reads, flushes the generated CSS, and reads the values back before it
+      // answers — so `ok: true` here means the colours are on the kit the site
+      // renders from. Returns `{ ok: true, via: 'plugin', kit_id }`.
       globalsResult = await setElementorGlobals({
-        domain:         domain.domain,
         brandName:      answers.businessName,
         primaryColor:   answers.primaryColor,
         secondaryColor: answers.secondaryColor,
@@ -707,12 +719,19 @@ async function runProvisioningBackground({ pool, session, domain, answers, hosti
         site:           onboardingSiteShim,
       });
       if (globalsResult.ok) {
-        console.log(`[onboarding/submit] Elementor globals applied via wp-cli on ${domain.domain} (kit ${globalsResult.kit_id || 'unknown'})`);
+        console.log(`[onboarding/submit] brand kit applied through the plugin on ${domain.domain} (kit ${globalsResult.kit_id || 'unknown'})`);
       }
     } catch (e) {
       globalsResult = { ok: false, error: e.message.slice(0, 300) };
-      phaseErrors.push({ phase: 'setting_brand_globals', error: globalsResult.error });
-      console.warn(`[onboarding/submit] setElementorGlobals failed (non-fatal): ${globalsResult.error}`);
+    }
+    // A refused kit write is a phase error whether it threw or answered. It
+    // used to be recorded ONLY when it threw, so the run that mattered — the
+    // plugin answering "no" — left the dashboard showing a clean provisioning
+    // over an unbranded site (memory: reference_catch_swallow_report_success).
+    if (!globalsResult.ok) {
+      const kitErr = [globalsResult.error, globalsResult.message].filter(Boolean).join(': ').slice(0, 300);
+      phaseErrors.push({ phase: 'setting_brand_globals', error: kitErr });
+      console.warn(`[onboarding/submit] brand kit not applied (non-fatal): ${kitErr}`);
     }
 
     // 17b. Also write the legacy ia_brand_* options via wp-cli so the IA

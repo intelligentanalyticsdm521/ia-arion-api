@@ -14,6 +14,7 @@ import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
 
 import { resolveSiteHost } from '../../lib/pluginClient.js';
+import { composePostFromHtml } from '../../lib/websiteBuilder/postComposer.js';
 
 const router = Router();
 
@@ -55,12 +56,17 @@ async function pickPrimarySite(pool, tenantId, explicitSiteId) {
  * plugin routes that do exist (POST /pages with type=post, then the section
  * save and the page-settings sheet for its categories, tags and picture).
  *
- * ONE CALLER IS LEFT AND IS NOT OURS TO CHANGE: LUMEN-API
- * `src/routes/newsletters.js:376` still POSTs here from
- * `/newsletters/:id/publish`. It already treats a failure as a recorded
- * `wp_status` rather than an error, so it degrades exactly as it did before -
- * it just says 404 instead of 502 now. Pointing it at the new post path is
- * SPARK's call to make, in SPARK's repo.
+ * SETTLED 2026-09-09 (D-82). The two callers left over have been moved onto
+ * the post path, because publishing an article to the website IS a live
+ * feature - the Portal offers it on SPARK -> Newsletter Studio with a button
+ * and a paragraph explaining it - and a live feature does not get to stay
+ * broken because the mechanism under it moved:
+ *
+ *   - LUMEN-API `/newsletters/:id/publish` now calls POST /arion/plugin/posts
+ *     below, and treats a refusal as a refusal instead of answering 200 with
+ *     the failure tucked into a `wp_status` field.
+ *   - `lib/contentAgent/publisher.js` posted to the same never-registered
+ *     plugin route; it now composes through the same path.
  * ======================================================================== */
 
 /**
@@ -268,6 +274,76 @@ router.get('/posts', async (req, res) => {
     });
   } catch (err) {
     console.error('[arion/plugin/posts]', err);
+    res.status(500).json({ error: 'internal_error', message: err.message });
+  }
+});
+
+/**
+ * POST /arion/plugin/posts — write one article to the tenant's website as a
+ * live blog post.
+ *
+ * D-82 (2026-09-09). This is what SPARK's "Publish to site" button needed and
+ * never had. The proxy it used to call forwarded to a plugin route that has
+ * never existed in any version, so the button has never once worked; the
+ * gravestone above says the rest.
+ *
+ * GET lists the posts on the site (the Newsletter Studio's import). POST puts
+ * one there. Both live here because this is the surface another product calls
+ * when it does not want to know about per-site tokens — the WRITE itself goes
+ * through exactly the plugin routes the Portal's own "New post" uses, which
+ * is the one mechanism (lib/websiteBuilder/postComposer.js).
+ *
+ * Body: { title, content_html, excerpt?, categories?: string[], site_id? }
+ * Answers 201 with { ok, post_id, post_url, warning? }, or a real error
+ * status — never a 200 carrying a failure in a field.
+ */
+router.post('/posts', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const title = String(req.body?.title || '').trim();
+  const contentHtml = String(req.body?.content_html || '');
+  const excerpt = req.body?.excerpt == null ? null : String(req.body.excerpt);
+  const categories = Array.isArray(req.body?.categories) ? req.body.categories : [];
+
+  if (!title) {
+    return res.status(400).json({ error: 'title_required', message: 'Give the article a title first.' });
+  }
+  try {
+    const pool = await getServicesPool();
+    const site = await pickPrimarySite(pool, tenantId, req.body?.site_id || null);
+    if (!site) {
+      return res.status(404).json({
+        error: 'no_arion_site',
+        message: 'No ARION-managed WordPress site found for this tenant.',
+      });
+    }
+
+    const result = await composePostFromHtml({ site, title, contentHtml, excerpt, categories });
+    if (!result.ok) {
+      // 400 when WE refused it (an empty article, no title) — the caller can
+      // fix that. 502 when the WEBSITE refused it, including a body refused
+      // after the post was made: a `post_id` in that answer is the draft left
+      // behind, which is the difference between "try again" and "go and tidy
+      // up first".
+      const ourFault = (result.step === 'body' && !result.postId)
+        || result.step === 'title' || result.step === 'site';
+      const status = result.step === 'site' ? 404 : (ourFault ? 400 : 502);
+      return res.status(status).json({
+        error: 'publish_failed',
+        step: result.step,
+        post_id: result.postId || null,
+        message: result.message,
+      });
+    }
+
+    return res.status(201).json({
+      ok: true,
+      site_id: site.site_id,
+      post_id: result.postId,
+      post_url: result.postUrl,
+      warning: result.warning || null,
+    });
+  } catch (err) {
+    console.error('[arion/plugin/posts:create]', err);
     res.status(500).json({ error: 'internal_error', message: err.message });
   }
 });
