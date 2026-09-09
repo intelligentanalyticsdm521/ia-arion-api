@@ -207,6 +207,23 @@ test('the pricing STARTER is built from the business own prices', () => {
   assert.equal(block.plans[0].offering_id, 'o-1');
 });
 
+test('the services that HAVE a price come first on a new pricing section', () => {
+  // Summit Lawn's first service by sort order is quoted rather than priced, so
+  // the first card on a brand-new pricing section was blank — on the one
+  // feature whose entire point is showing prices.
+  const block = starterBlock('pricing', {
+    business_name: 'Summit Lawn',
+    service_prices: [
+      { offering_id: 'o-quote', name: 'Irrigation tune-up', description: '', price: '', period: '', features: [] },
+      { offering_id: 'o-1', name: 'Weekly mow', description: '', price: '$45', period: 'per visit', features: [] },
+      { offering_id: 'o-2', name: 'Mulch', description: '', price: '$180', period: '', features: [] },
+    ],
+  });
+  assert.deepEqual(block.plans.map((p) => p.price), ['$45', '$180', '']);
+  assert.equal(block.plans[0].offering_id, 'o-1');
+  assert.equal(block.plans.length, 3, 'the quoted service is still offered, just not first');
+});
+
 test('a business with NO price list gets prompts, never an invented price', () => {
   const block = starterBlock('pricing', { business_name: 'Summit Lawn', service_prices: [] });
   assert.equal(block.plans.length, 1);

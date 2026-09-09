@@ -183,11 +183,40 @@ check('...and all three are available on EVERY tier - none of them needs the pai
   JSON.stringify((library.json?.data?.sections || [])
     .filter((k) => ['pricing', 'team', 'stats'].includes(k.kind))
     .map((k) => [k.kind, k.available])));
+let pricingPlans = null;
 for (const kind of ['pricing', 'team', 'stats']) {
   const built = await api(`${base}/sections`, { method: 'POST', body: { kind } });
   check(`a ${kind} section can be added, and comes back editable`,
     (built.status === 200 || built.status === 201) && built.json?.data?.section?.editable !== false,
     `status ${built.status} ${built.text.slice(0, 160)}`);
+  if (kind === 'pricing') pricingPlans = built.json?.data?.section?.fields?.plans || null;
+}
+
+/* THE CLAIM THIS PACK MAKES ABOUT PRICES, checked against the real rows.
+   "A price is never typed twice" is only true if a brand-new pricing section
+   already carries the business's OWN prices - the same ones the booking page
+   and the invoices read. Asserting the price is THERE, not that nothing went
+   wrong (memory: feedback_assert_presence_not_just_absence). */
+const catalogue = await api(`${base}/pricing-catalogue`);
+const catServices = catalogue.json?.data?.services || [];
+const catPriced = catServices.filter((s) => String(s.price || '').trim() !== '');
+if (catPriced.length > 0) {
+  const byId = new Map(catServices.map((s) => [s.offeringId, s]));
+  check('a brand-new pricing section already carries the business own prices',
+    Array.isArray(pricingPlans) && pricingPlans.length > 0
+      && pricingPlans.every((p) => byId.has(p.offering_id))
+      && pricingPlans.some((p) => p.price === byId.get(p.offering_id).price && p.price !== ''),
+    JSON.stringify((pricingPlans || []).map((p) => [p.name, p.price, p.offering_id])).slice(0, 260));
+  check('...and every card says WHICH service its price came from, so it is never typed twice',
+    (pricingPlans || []).every((p) => String(p.offering_id || '') !== ''),
+    JSON.stringify((pricingPlans || []).map((p) => p.offering_id)));
+  check('...with the priced services first, so the top card is not blank',
+    (pricingPlans || [])[0] && String(pricingPlans[0].price || '').trim() !== '',
+    JSON.stringify((pricingPlans || []).map((p) => p.price)));
+} else {
+  check('a business with no priced services is told so rather than shown a made-up price',
+    Array.isArray(pricingPlans) && pricingPlans.every((p) => String(p.price || '') === ''),
+    JSON.stringify(pricingPlans));
 }
 
 /* ── a website that cannot be reached fails LOUDLY ───────────────────── */

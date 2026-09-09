@@ -101,6 +101,71 @@ function mutate(m) {
   }
 }
 
+/* ══════════════ the fixture menu, captured before anything is broken ══════
+ *
+ * The sweep is deliberately destructive while it runs, and the menu is the one
+ * piece of the fixture the verifier cannot always put back on its own (a
+ * mutant that breaks the validate-before-snapshot guard leaves the Undo ring
+ * one step out). So it is captured here and written back at the end, BY VALUE.
+ * ======================================================================== */
+
+const WP_BASE = 'http://localhost:8084';
+const WP_API = `${WP_BASE}/wp-json/intelligent-analytics/v1`;
+const COMPOSE = 'C:\\dev\\iadm\\dev-stack\\wordpress\\compose.yml';
+const PLUGIN_DIR = 'C:/dev/iadm/ia-plugin-septa-arion2';
+const TOKEN = fs.readFileSync('C:\\dev\\iadm\\dev-stack\\wordpress\\.site-token', 'utf8').trim();
+
+function wp(args) {
+  return execFileSync('docker', [
+    'compose', '--progress', 'quiet', '-f', COMPOSE, 'run', '--rm', '-T', 'wpcli', 'wp', ...args,
+  ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, IA_PLUGIN_DIR: PLUGIN_DIR } }).trim();
+}
+
+async function wpCall(path, init = {}) {
+  const res = await fetch(`${WP_API}${path}${path.includes('?') ? '&' : '?'}_cb=${Date.now()}`, {
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      'X-Arion-Site-Token': TOKEN,
+      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+    },
+  });
+  const text = await res.text();
+  try { return { status: res.status, json: text ? JSON.parse(text) : null }; } catch { return { status: res.status, json: null }; }
+}
+
+let MENU_BEFORE = null;
+if (ONLY === 'all' || ONLY === 'plugin') {
+  const got = await wpCall('/menus');
+  MENU_BEFORE = (got.json?.menus || [])[0] || null;
+}
+
+async function restoreMenu() {
+  if (!MENU_BEFORE) return;
+  // Nesting is by POSITION on the way in and by item id on the way out, so it
+  // has to be translated or a restore quietly flattens the menu.
+  const indexById = new Map((MENU_BEFORE.items || []).map((i, n) => [i.item_id, n]));
+  const items = (MENU_BEFORE.items || []).map((i) => ({
+    kind: i.kind, object_id: i.object_id, title: i.title, url: i.url,
+    parent_index: i.parent_item_id && indexById.has(i.parent_item_id) ? indexById.get(i.parent_item_id) : null,
+  }));
+  await wpCall(`/menus/${MENU_BEFORE.menu_id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ items, locations: MENU_BEFORE.locations || [] }),
+  });
+  // The Undo ring is fixture state too: left as it is, the next sweep starts
+  // with somebody else's steps in it.
+  try { wp(['option', 'delete', `ia_menu_snapshot_${MENU_BEFORE.menu_id}`, '--allow-root']); } catch { /* already gone */ }
+  const now = await wpCall('/menus');
+  const back = (now.json?.menus || []).find((m) => m.menu_id === MENU_BEFORE.menu_id);
+  const same = JSON.stringify((back?.items || []).map((i) => [i.title, i.kind, i.object_id, i.url]))
+    === JSON.stringify((MENU_BEFORE.items || []).map((i) => [i.title, i.kind, i.object_id, i.url]));
+  console.log(same
+    ? '  the fixture menu is exactly as this sweep found it'
+    : `  ⚠ the fixture menu did NOT come back: ${JSON.stringify((back?.items || []).map((i) => i.title))}`);
+  if (!same) missed += 1;
+}
+
 console.log('\n=== ARION pack 2: breaking each guard on purpose ===\n');
 
 /* ══════════════ code guards ══════════════════════════════════════════ */
@@ -228,6 +293,46 @@ if (ONLY === 'all' || ONLY === 'code') {
     from: '        {livePosts.map(row)}',
     to: '        {[].map(row)}',
   });
+
+  mutate({
+    group: 'code', checker: 'portalPack2',
+    name: 'a menu row never gets tucked to a third level',
+    file: `${PORTAL}/src/arion/utils/menuListState.ts`,
+    from: '  const target = above.parentIndex === null ? index - 1 : above.parentIndex;',
+    to: '  const target = index - 1;',
+  });
+
+  mutate({
+    group: 'code', checker: 'portalPack2',
+    name: 'the tuck button is greyed on a row that already has entries under it',
+    file: `${PORTAL}/src/arion/utils/menuListState.ts`,
+    from: '  return !rows.some((r) => r.parentIndex === index);',
+    to: '  return true;',
+  });
+
+  mutate({
+    group: 'code', checker: 'portalPack2',
+    name: 'no screen sends a client into WordPress',
+    file: `${PORTAL}/src/arion/pages/hosting/HostingBackups.tsx`,
+    from: '            Putting a backup back is something we do for you — tell us the day you want and we',
+    to: '            To restore from a backup, use the WP Admin panel or contact support. We',
+  });
+
+  mutate({
+    group: 'code', checker: 'portalPack2',
+    name: 'the practice-copy page keeps its admin door shut for a client',
+    file: `${PORTAL}/src/arion/pages/website/WebsiteStaging.tsx`,
+    from: '  const stagingAdmin = isFounder && stagingFrontend ?',
+    to: '  const stagingAdmin = stagingFrontend ?',
+  });
+
+  mutate({
+    group: 'code', checker: 'arionPack2',
+    name: 'the priced services come first, so a new pricing section is not blank on top',
+    file: `${ARION}/lib/websiteBuilder/starterSections.js`,
+    from: "      ...all.filter((s) => String(s?.price || '').trim() !== ''),\n      ...all.filter((s) => String(s?.price || '').trim() === ''),",
+    to: '      ...all,',
+  });
 }
 
 /* ══════════════ plugin guards, against the real container ════════════ */
@@ -305,10 +410,37 @@ if (ONLY === 'all' || ONLY === 'plugin') {
     from: "\t\t\tif ( array_key_exists( $name, $settings ) ) return $settings[ $name ];",
     to: "\t\t\tif ( false ) return $settings[ $name ];",
   });
+
+  mutate({
+    group: 'plugin', checker: 'live',
+    name: 'a menu is refused at a third level, rather than quietly building one',
+    file: PLUGIN,
+    from: "\t\t\tif ( $p >= 0 && isset( $parent[ $p ] ) && $parent[ $p ] >= 0 ) {",
+    to: "\t\t\tif ( false ) {",
+  });
+
+  mutate({
+    group: 'plugin', checker: 'live',
+    name: 'a typed-in link carries no WordPress row id, so a menu can round-trip',
+    file: PLUGIN,
+    from: "\t\t\t\t'object_id'      => ( 'custom' === $kind ) ? 0 : (int) $item->object_id,",
+    to: "\t\t\t\t'object_id'      => (int) $item->object_id,",
+  });
 }
 
 console.log(`\n=== ${caught} caught, ${missed} missed ===\n`);
 if (ONLY === 'all' || ONLY === 'plugin') {
+  // PUT THE MENU BACK BY HAND.
+  //
+  // Several mutants above break the guard whose whole job is to stop the
+  // verifier's destructive step, so the verifier writes a menu it cannot then
+  // undo and the fixture keeps three extra entries. Re-running the verifier
+  // does NOT show this: it captures "what it was" at the START of its own run,
+  // so a fixture that has already drifted looks perfectly restored. The menu
+  // grew by three entries every sweep for exactly that reason, and a fixture
+  // that drifts a little each time is how a verifier stops meaning anything.
+  await restoreMenu();
+
   console.log('Re-running the clean verifier to prove the fixture came back...');
   const green = checkers.live();
   console.log(green ? '  the dev website is back the way it was' : '  ⚠ the dev website did NOT come back clean — re-run start-dev-wp.ps1 -Reseed');

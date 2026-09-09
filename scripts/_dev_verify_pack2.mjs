@@ -152,6 +152,10 @@ const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8B
   check('...and it is in the header position', !!after && after.locations.includes('menu-1'),
     JSON.stringify(after?.locations));
 
+  check('...and a typed-in link points at nothing, not at a WordPress row id',
+    !!after && after.items.filter((i) => i.kind === 'custom').every((i) => Number(i.object_id) === 0),
+    JSON.stringify((after?.items || []).filter((i) => i.kind === 'custom').map((i) => [i.title, i.object_id])));
+
   const home = await html(BASE);
   check('the new entry really shows on the website', home.body.includes(aPage.title),
     `page ${home.status}`);
@@ -186,6 +190,48 @@ const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8B
   check('a menu position this website does not have is refused', badLoc.status === 400,
     `status ${badLoc.status}`);
 
+  // A THIRD LEVEL is refused. The write pass would build one quite happily,
+  // and no theme on the estate draws one well, so the client's menu would come
+  // out visibly wrong on every page with nothing from us to say why.
+  const tooDeep = await call(`/menus/${menuId}`, {
+    method: 'PUT',
+    body: {
+      items: [
+        { kind: 'custom', title: 'One', url: '/' },
+        { kind: 'custom', title: 'Two', url: '/', parent_index: 0 },
+        { kind: 'custom', title: 'Three', url: '/', parent_index: 1 },
+      ],
+    },
+  });
+  check('a menu three levels deep is REFUSED', tooDeep.status === 400, `status ${tooDeep.status}`);
+  check('...in a sentence that says what to do about it',
+    tooDeep.json?.code === 'too_deep' && /one level deep/i.test(String(tooDeep.json?.error || '')),
+    String(tooDeep.json?.error).slice(0, 140));
+  const afterDeep = await call('/menus');
+  const deepSame = (afterDeep.json?.menus || []).find((m) => m.menu_id === menuId);
+  check('...and that refusal changed nothing either',
+    !!deepSame && deepSame.items.length === after.items.length,
+    `${deepSame?.items.length} vs ${after.items.length}`);
+
+  // TWO levels still work — the refusal is a depth rule, not a nesting ban.
+  const twoDeep = await call(`/menus/${menuId}`, {
+    method: 'PUT',
+    body: {
+      items: [
+        { kind: 'custom', title: 'One', url: '/' },
+        { kind: 'custom', title: 'Two', url: '/', parent_index: 0 },
+      ],
+    },
+  });
+  const twoBack = (twoDeep.json?.menus || []).find((m) => m.menu_id === menuId);
+  check('two levels are still allowed, and the nesting really lands',
+    twoDeep.status === 200
+      && (twoBack?.items || []).length === 2
+      && Number(twoBack.items[1].parent_item_id) === Number(twoBack.items[0].item_id),
+    `status ${twoDeep.status} ${JSON.stringify((twoBack?.items || []).map((i) => [i.title, i.parent_item_id]))}`);
+  // Put the menu back before Undo is exercised below.
+  await call(`/menus/${menuId}/undo`, { method: 'POST', body: {} });
+
   const undone = await call(`/menus/${menuId}/undo`, { method: 'POST', body: {} });
   const restored = (undone.json?.menus || []).find((m) => m.menu_id === menuId);
   check('Undo puts the previous menu back', undone.status === 200 && undone.json?.restored === true);
@@ -195,6 +241,17 @@ const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8B
 
   // Put the location back the way it was, since Undo covers items, not places.
   await call(`/menus/${menuId}`, { method: 'PUT', body: { locations: locationsBefore } });
+  // ...and that write left an Undo step of its own. Popping it restores the
+  // ITEMS (which are already right, so nothing moves) and leaves the places
+  // alone, which is what puts the Undo ring back where this run found it. It
+  // grew by one every run before this, and a fixture that drifts a little each
+  // time is how a verifier stops meaning anything.
+  await call(`/menus/${menuId}/undo`, { method: 'POST', body: {} });
+  const ring = await call('/menus');
+  const ringMenu = (ring.json?.menus || []).find((m) => m.menu_id === menuId);
+  check('the run left no Undo step behind on the menu',
+    Number(ringMenu?.snapshot_count || 0) === Number(menu.snapshot_count || 0),
+    `${ringMenu?.snapshot_count} vs ${menu.snapshot_count}`);
 
   /* ══════════════ 2. THE BRAND KIT ════════════════════════════════════ */
   console.log('\n-- brand colours and fonts --');
