@@ -23,6 +23,7 @@ import {
   listSupportedKinds,
 } from '../lib/websiteBuilder/elementorAdapter.js';
 import { assemblePage } from '../lib/websiteBuilder/pageAssembler.js';
+import { starterBlock } from '../lib/websiteBuilder/starterSections.js';
 import { getEmitter } from '../lib/websiteBuilder/emitterRegistry.js';
 
 const BRAND = {
@@ -41,12 +42,16 @@ const HERO_BLOCK = {
 
 test('every supported section kind carries a settings._title handle', () => {
   const kinds = listSupportedKinds();
-  assert.ok(kinds.length >= 8, 'all eight emitters are covered');
+  assert.ok(kinds.length >= 11, 'every archetype the adapter can draw is covered');
   for (const kind of kinds) {
-    // Each emitter ships a real example of its own output shape — use it so
-    // this test tracks the emitters rather than a second set of fixtures.
-    const block = getEmitter(kind)?.example;
-    assert.ok(block, `${kind} emitter ships an example block`);
+    // An emitter's own example where there is one, so this test tracks the
+    // emitters rather than a second set of fixtures. ARION pack 2's three
+    // archetypes (pricing, team, stats) are ADD-AND-EDIT rather than
+    // AI-generated — adding a section costs nothing and writing the copy for
+    // you is the paid action — so they have a starter block and no emitter,
+    // and the starter is the right fixture for them.
+    const block = getEmitter(kind)?.example || starterBlock(kind, BRAND);
+    assert.ok(block, `${kind} has an example block or a starter block`);
     const section = blockToElementorSection({ kind, block, brand: BRAND, seedId: `seed-${kind}` });
     assert.ok(section, `${kind} emits a section`);
     assert.equal(typeof section.settings?._title, 'string', `${kind} must carry settings._title`);

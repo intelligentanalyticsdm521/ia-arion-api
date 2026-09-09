@@ -53,6 +53,7 @@ import integrationsRouter from './arion/integrations.js';
 import pluginRouter from './arion/plugin.js';
 import blocksRouter from './arion/blocks.js';
 import sitePagesRouter from './arion/pages.js';
+import siteWebsiteRouter from './arion/website.js';
 import intelligenceRouter from './arion/intelligence.js';
 import contentAgentRouter from './arion/contentAgent.js';
 import arionAgentsRouter from './arion/agents.js';
@@ -103,6 +104,12 @@ router.use('/sites/:siteId/blocks', blocksRouter);
 // routes (W-2). Every ARION tier can use it (W-4); only the AI actions inside
 // it will cost credits, and those are Phase 1B.
 router.use('/sites/:siteId', sitePagesRouter);
+
+// ARION pack 2 — everything that is the same on EVERY page: the menus, the
+// brand colours and fonts, the header and footer through the theme's own
+// options, and the two site switches. Same site token, same plugin, and
+// mounted after pages.js so the two never fight over a path.
+router.use('/sites/:siteId', siteWebsiteRouter);
 
 // ARION Intelligence — 6 single-source reports + cached aggregator.
 // See lib/intelligence/ + db/migrations/031_intelligence_cache.sql.
@@ -391,6 +398,15 @@ router.get('/sites/:siteId/admin-link', async (req, res) => {
           `);
         // Plugin reads ?ia_sso=<token> on init hook (priority 1) and redeems.
         ssoUrl = adminUrl + '?ia_sso=' + encodeURIComponent(token);
+        // ARION pack 2 (P23): an optional destination, so IA support lands on
+        // the screen they were asked about rather than the dashboard. Checked
+        // against the PRESENCE of an allowed shape — a bare WordPress admin
+        // file, optionally with a query string — never the absence of a bad
+        // one (memory: reference_absence_based_guards_fail_open). The plugin
+        // validates it again and makes it absolute with admin_url(), so
+        // neither end can be talked into sending anybody off the site.
+        const dest = String(req.query.dest || '').trim();
+        if (isSafeAdminDest(dest)) ssoUrl += '&ia_dest=' + encodeURIComponent(dest);
       } catch (mintErr) {
         // Non-fatal — fall back to bare admin URL so the button still works.
         console.warn('[arion/admin-link] SSO mint failed:', mintErr.message);
@@ -8728,5 +8744,24 @@ router.post('/business-locations/sync', async (req, res) => {
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
+
+/**
+ * Is this a WordPress admin screen we are willing to send somebody to?
+ *
+ * A PRESENCE check on an allowed shape — one admin file, optionally with a
+ * query string — never the absence of a bad one
+ * (memory: reference_absence_based_guards_fail_open). Everything that is not
+ * exactly that shape (an absolute URL, a protocol, a `..`, a leading slash, a
+ * path with directories in it) simply does not match, so the caller lands on
+ * the dashboard instead of somewhere it was talked into.
+ *
+ * The plugin checks it again at redeem time and runs it through admin_url(),
+ * so neither end alone is load-bearing.
+ */
+export function isSafeAdminDest(dest) {
+  const d = String(dest == null ? '' : dest).trim();
+  if (!d || d.length > 200) return false;
+  return /^[a-z0-9_-]+\.php(\?[A-Za-z0-9_\-=&%.,+]*)?$/.test(d);
+}
 
 export default router;

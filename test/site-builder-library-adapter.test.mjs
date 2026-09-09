@@ -58,8 +58,19 @@ function featuresBlueprint() {
  * The archetype gate
  * ======================================================================== */
 
-test('five library archetypes have no editor kind, and say why', () => {
-  for (const archetype of ['pricing', 'team', 'stats', 'header', 'footer']) {
+test('pricing, team and stats DO have an editor kind now (ARION pack 2)', () => {
+  // They stranded more than thirty curated layouts and were the reason
+  // ARCHETYPES_WITHOUT_A_KIND used to name five archetypes. A blueprint is
+  // still only OFFERED when the stamp plan can make it editable afterwards —
+  // this asserts the kind exists, not that every variant maps.
+  for (const archetype of ['pricing', 'team', 'stats']) {
+    assert.equal(LIBRARY_KIND_BY_ARCHETYPE[archetype], archetype);
+    assert.equal(ARCHETYPES_WITHOUT_A_KIND[archetype], undefined);
+  }
+});
+
+test('the header and the footer are not page content, and say where they live', () => {
+  for (const archetype of ['header', 'footer']) {
     assert.equal(LIBRARY_KIND_BY_ARCHETYPE[archetype], undefined);
     const out = mapLibrarySection({ archetype, blueprintId: `${archetype}.x.v1`, sectionJson: heroBlueprint() });
     assert.equal(out.ok, false);
@@ -67,6 +78,9 @@ test('five library archetypes have no editor kind, and say why', () => {
     assert.equal(out.detail, ARCHETYPES_WITHOUT_A_KIND[archetype]);
     // The reason is written for a person, not a log file.
     assert.doesNotMatch(out.detail, /null|undefined|_ia_field|elType/);
+    // ARION pack 2 moved them out of the page editor and onto their own
+    // screen, so the sentence has to say where they went.
+    assert.match(out.detail, /Brand and layout/);
   }
 });
 
@@ -288,7 +302,14 @@ test('coverage counts what is pickable and why the rest is not', () => {
 
   assert.equal(cov.total, 3);
   assert.equal(cov.pickable, 2);
-  assert.equal(cov.refusals.no_editor_kind, 1);
+  // Pricing HAS an editor kind since ARION pack 2, so the refusal is no
+  // longer "we have no such section" — it is the honest structural one: a
+  // hero's widgets do not carry what a pricing section needs.
+  assert.equal(cov.refusals.no_editor_kind, undefined);
+  // A hero blueprint has a BUTTON the pricing plan does not name, and an
+  // unstamped button is the one thing that fails a whole blueprint - it is a
+  // reason to open WordPress, which is what this feature exists to close.
+  assert.equal(cov.refusals.unmapped_control, 1);
   assert.equal(cov.byArchetype.hero.pickable, 1);
   assert.equal(cov.byArchetype.pricing.pickable, 0);
 });

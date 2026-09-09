@@ -316,9 +316,14 @@ router.post('/pages', async (req, res) => {
   const { siteId } = req.params;
   const title = String(req.body?.title || '').trim();
   const wanted = Array.isArray(req.body?.sections) ? req.body.sections : [];
+  // D-ARION-C: a blog post is composed in the SAME section editor as a page.
+  // Everything downstream already accepts a post; the only thing that made
+  // "write a post" a wp-admin job was that nothing could create one here.
+  const type = String(req.body?.type || 'page').toLowerCase();
 
   if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
   if (!title) return bad(res, 'TITLE_REQUIRED', 'Give the page a name first.');
+  if (type !== 'page' && type !== 'post') return bad(res, 'BAD_TYPE', 'That is not something we can create.');
   if (wanted.length > MAX_SECTIONS_PER_PAGE) {
     return bad(res, 'TOO_MANY_SECTIONS', `A page can hold up to ${MAX_SECTIONS_PER_PAGE} sections.`);
   }
@@ -347,7 +352,7 @@ router.post('/pages', async (req, res) => {
       nodes.push({ handle: built.node?.settings?._title || null, node: built.node });
     }
 
-    const result = await createPage(site, { title, sections: nodes });
+    const result = await createPage(site, { title, type, sections: nodes });
     if (!result.ok) return pluginFailure(res, result, 'creating the page');
 
     const pageId = Number(result.data?.page_id) || null;
@@ -367,6 +372,7 @@ router.post('/pages', async (req, res) => {
         pageId,
         title,
         status: 'draft',
+        type: String(result.data?.type || type),
         permalink: result.data?.permalink || null,
         previewUrl: result.data?.preview_url || null,
       },
@@ -2042,6 +2048,20 @@ function publicPageSettings(data) {
     isHomePage: !!data?.is_front_page,
     homePageId: Number(data?.front_page_id || 0),
     blogPageId: Number(data?.blog_page_id || 0),
+    // A blog post's own four (D-ARION-C). `null` on a page, so the Portal
+    // shows the card only where it means something.
+    postFields: data?.post_fields
+      ? {
+          excerpt: String(data.post_fields.excerpt || ''),
+          categories: (Array.isArray(data.post_fields.categories) ? data.post_fields.categories : []).map(String),
+          tags: (Array.isArray(data.post_fields.tags) ? data.post_fields.tags : []).map(String),
+          featuredImage: {
+            id: Number(data.post_fields.featured_image?.id || 0),
+            url: String(data.post_fields.featured_image?.url || ''),
+          },
+          allCategories: (Array.isArray(data.post_fields.all_categories) ? data.post_fields.all_categories : []).map(String),
+        }
+      : null,
     ...(data?.slug_adjusted ? { slugAdjusted: true } : {}),
     ...(Array.isArray(data?.changed) ? { changed: data.changed } : {}),
   };
@@ -2101,6 +2121,21 @@ router.post('/pages/:pageId/settings', async (req, res) => {
     payload.parent_id = parent;
   }
   if (body.makeHomePage) payload.make_homepage = true;
+  // A blog post's own fields (D-ARION-C). The plugin REFUSES these on a page
+  // rather than dropping them, so a category that could not apply is an error
+  // the client sees, not a silent no-op.
+  if (body.excerpt !== undefined) payload.excerpt = String(body.excerpt || '');
+  for (const key of ['categories', 'tags']) {
+    if (body[key] === undefined) continue;
+    if (!Array.isArray(body[key])) return bad(res, 'BAD_TERMS', `${key} has to be a list of names.`);
+    if (body[key].length > 30) return bad(res, 'TOO_MANY_TERMS', 'That is more than a post needs.');
+    payload[key] = body[key].map((t) => String(t || '').trim()).filter(Boolean);
+  }
+  if (body.featuredImageId !== undefined) {
+    const att = Number(body.featuredImageId);
+    if (!Number.isInteger(att) || att < 0) return bad(res, 'BAD_IMAGE', 'That picture reference is not valid.');
+    payload.featured_image_id = att;
+  }
   if (Object.keys(payload).length === 0) {
     return bad(res, 'NOTHING_TO_CHANGE', 'Nothing was sent to change.');
   }
