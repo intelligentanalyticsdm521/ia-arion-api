@@ -1563,13 +1563,19 @@ router.get('/section-library', async (req, res) => {
         // What the site itself says it is running (D-ARION-E). The editor shows
         // a banner and stops offering Save when `active` is false, rather than
         // letting a client type into a form whose save is going to be refused.
-        elementor: {
+        //
+        // `pageEngine` and not the vendor's name, deliberately: the Portal is
+        // the one place a client reads, and no vendor's UI or vocabulary is ever
+        // shown there (feedback_no_third_party_product_surface). The plugin's
+        // /status and lib/websiteBuilder/siteCapability.js name it accurately,
+        // because nothing a client reads comes off either of them.
+        pageEngine: {
           known: !!capability.known,
           active: capability.known ? !!capability.elementorActive : null,
           version: capability.elementorVersion,
-          proActive: capability.known ? !!capability.proActive : null,
-          proVersion: capability.proVersion,
-          proSource,
+          addOnActive: capability.known ? !!capability.proActive : null,
+          addOnVersion: capability.proVersion,
+          addOnSource: proSource,
           reason: (capability.known && !capability.elementorActive) ? NO_ELEMENTOR_MESSAGE : null,
         },
         ai: { available: gate.allowed, reason: gate.message },
@@ -2019,6 +2025,9 @@ function publicPageSettings(data) {
     pageId: Number(data?.page_id) || null,
     title: String(data?.title || ''),
     slug: String(data?.slug || ''),
+    // What the address will BECOME when a draft is published, if WordPress has
+    // to make it unique. Equal to `slug` when there is nothing to change.
+    slugOnPublish: String(data?.slug_on_publish || data?.slug || ''),
     status: String(data?.status || 'draft'),
     type: String(data?.type || 'page'),
     permalink: data?.permalink || null,
