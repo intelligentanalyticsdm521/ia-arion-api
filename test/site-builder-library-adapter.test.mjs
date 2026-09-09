@@ -20,7 +20,7 @@ import {
   mapLibrarySection, stampLibrarySection, libraryCoverage, pickHeadline,
   LIBRARY_KIND_BY_ARCHETYPE, ARCHETYPES_WITHOUT_A_KIND, kindsWithoutLibraryVariants,
 } from '../lib/websiteBuilder/libraryAdapter.js';
-import { extractFields, applyFields, reduceToSectionList } from '../lib/websiteBuilder/sectionSchema.js';
+import { extractFields, applyFields, reduceToSectionList, validateFields } from '../lib/websiteBuilder/sectionSchema.js';
 import { __test__ as catalogInternals } from '../lib/websiteBuilder/libraryCatalog.js';
 import { __test__ as routeInternals } from '../routes/arion/pages.js';
 
@@ -353,6 +353,11 @@ test('the real 120-section library maps to exactly the coverage the walkthrough 
       assert.deepEqual(after[key], before[key], `${row.blueprint_id}.${key} drifted`);
     }
     assert.equal(reduceToSectionList([patched])[0].editable, true, row.blueprint_id);
+    // And it can be SAVED. A layout the client can add and then never save is
+    // worse than one that was never offered — `about.image-bullets.v1` was
+    // exactly that from Phase 1B until pack 2b (§4d).
+    const savable = validateFields(mapped.kind, before);
+    assert.equal(savable.ok, true, `${row.blueprint_id}: ${JSON.stringify(savable.errors)}`);
   }
 });
 

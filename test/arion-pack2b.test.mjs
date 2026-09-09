@@ -13,6 +13,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 
 import {
   CODECS, COMPOSED_PARTS, BINDINGS, ROLE_MARKER, ROLE_REVIEW_MARKER,
@@ -179,6 +180,17 @@ test('an intro block drawn like a card does not steal the list', () => {
   ]);
   const group = findItemGroup(node);
   assert.equal(group.items.length, 4);
+});
+
+test('with two possible lists in one layout, the longer one is the list', () => {
+  // A two-card intro row above a four-card band, drawn identically. Both are
+  // uniform groups; the four are the list and the two are decoration.
+  const pair = (n) => box(Array.from({ length: n }, () => box([heading('15+', 'h1'), editor('<p>years</p>')])));
+  const group = findItemGroup(box([heading('Numbers', 'h2'), pair(2), pair(4)]));
+  assert.equal(group.items.length, 4);
+  // and the other way round in the document, so it is the SIZE that decides
+  const other = findItemGroup(box([heading('Numbers', 'h2'), pair(4), pair(2)]));
+  assert.equal(other.items.length, 4);
 });
 
 test('a card nested two deep is still one card', () => {
@@ -535,6 +547,44 @@ test('a role whose markup we would rewrite is left unclaimed rather than stamped
   assert.deepEqual(roles, ['cta', 'features', 'name', 'price']);
 });
 
+test('a layout offered in the picker is a layout that can be SAVED', () => {
+  // A picture with no description is refused on save ("Describe the
+  // photograph"), and that refusal does not say "cannot be empty" — which is
+  // the only thing the pickability gate used to look for. So a layout like
+  // this reached the picker, the client added it, and Save would not go
+  // through. It is refused up front now, with the reason it will be refused.
+  const node = box([
+    heading('Meet the team', 'h2'),
+    box([1, 2].map(() => box([
+      image('https://a-real-photo.example.invalid/brandon.jpg'),
+      heading('Brandon', 'h5'),
+      editor('<p>Founder</p>'),
+    ]))),
+  ]);
+  const res = stamp('team', node);
+  assert.equal(res.ok, false);
+  assert.match(res.detail, /Describe the photograph/);
+});
+
+test('a list is never bound twice, so what the client edits is never a coin toss', () => {
+  // The old one-widget-per-item step is still in the plan for layouts drawn
+  // our way. Left ungated it would ALSO claim spare text-editors on a layout
+  // whose cards were already claimed, and then two bindings would both fill
+  // `plans` — the last one read wins, which is not an answer.
+  // A team layout drawn as cards, with a spare `image-box` beside them — the
+  // widget the OLD team binding claims one-per-person. Nothing else stops it:
+  // unlike the composed card bindings there is no markup round trip to fail.
+  const node = teamSection();
+  node.elements.push(w('image-box', { title_text: 'Awarded 2025', description_text: 'Best local firm' }));
+  const res = stamp('team', node);
+  assert.equal(res.ok, true, res.detail);
+  assert.equal(res.stamped.filter((b) => b.startsWith('team.member')).length, 1,
+    `one binding fills the list, got ${JSON.stringify(res.stamped)}`);
+  const members = extractFields(res.node, 'team').members;
+  assert.equal(members.length, 3);
+  assert.equal(members[0].name, 'Brandon');
+});
+
 test('a claimed card is still a section every required field can be filled on', () => {
   for (const [kind, make] of [['pricing', pricingSection], ['team', teamSection], ['stats', statsSection], ['testimonials', testimonialsSection]]) {
     const res = stamp(kind, make());
@@ -616,6 +666,17 @@ test('the four list kinds all have a card binding and it is the one the plan use
     const found = Object.entries(BINDINGS).filter(([bid, b]) => b.repeat === 'container' && bid.startsWith(`${kind}.`));
     assert.equal(found.length, 1, `${kind} has exactly one card binding`);
   }
+});
+
+test('the thing that builds a section for the client is the thing that fills the prices', () => {
+  // `fillPricingFromCatalogue` tested on its own proves the fill; this proves
+  // it is WIRED, which is the half that actually reaches a client's page.
+  const src = fs.readFileSync(new URL('../lib/websiteBuilder/libraryCatalog.js', import.meta.url), 'utf8');
+  const body = src.slice(src.indexOf('export async function buildLibrarySection'));
+  assert.match(body, /mapped\.kind === 'pricing'/);
+  assert.match(body, /fillPricingFromCatalogue\(mapped\.node, brand\)/);
+  assert.match(body, /return \{ ok: true, node, kind: mapped\.kind \}/,
+    'and the filled node is the one handed back, not the unfilled one');
 });
 
 test('mapLibrarySection carries the kind and the review through to the caller', () => {
