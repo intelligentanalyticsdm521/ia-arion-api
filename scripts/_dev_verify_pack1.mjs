@@ -16,6 +16,18 @@
  *
  * ⚠ Dev only. It refuses to run against anything but a loopback host.
  *
+ * ⚠ It needs the PACK 1 PLUGIN mounted (>= 1.7.3):
+ *     dev-stack\start-dev-wp.ps1 -PluginDir C:\dev\iadm\ia-plugin-septa-arion1
+ *   ...or the release-line checkout once this branch has merged. Against an
+ *   older plugin every new route 404s and the run is meaningless rather than
+ *   informative.
+ *
+ * ⚠ A MUTATION SWEEP over the plugin guards is destructive to the fixture: each
+ *   mutant breaks the guard whose job is to stop this script's destructive step,
+ *   so the fixture drifts and later runs abort on a draft an earlier one
+ *   trashed. Repair with `-Reseed` and delete any leftover `Pack 1 …` /
+ *   `ia-preview-…` pages before reading the result.
+ *
  *   node scripts/_dev_verify_pack1.mjs [--base http://localhost:8084]
  */
 
