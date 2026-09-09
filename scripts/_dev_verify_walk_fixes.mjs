@@ -21,6 +21,7 @@
  */
 
 import fs from 'node:fs';
+import 'dotenv/config';
 import { setElementorGlobals } from '../lib/elementorGlobals.js';
 import { composePostFromHtml } from '../lib/websiteBuilder/postComposer.js';
 import { fetchKit, writeKit } from '../lib/websiteBuilder/pageClient.js';
@@ -44,9 +45,20 @@ const SITE = { domain: HOST, site_token_raw: fs.readFileSync(TOKEN_FILE, 'utf8')
 
 let pass = 0;
 let fail = 0;
+const gaps = [];
 function check(name, ok, detail = '') {
   if (ok) { pass++; console.log(`  PASS  ${name}`); }
   else { fail++; console.log(`  FAIL  ${name}${detail ? ` — ${detail}` : ''}`); }
+}
+/**
+ * A thing that does not work and is NOT this pack's to fix. Reported loudly and
+ * separately: rolling it into `fail` would make the verifier red forever and
+ * teach everyone to ignore it, and calling it a pass would be a lie.
+ */
+function gap(name, ok, why) {
+  if (ok) { pass++; console.log(`  PASS  ${name}`); return; }
+  gaps.push(`${name} — ${why}`);
+  console.log(`  GAP   ${name} — ${why}`);
 }
 
 /** The page as a visitor gets it, cache defeated. */
@@ -213,6 +225,86 @@ const api = async (path, init) => {
   check('a site that does not know us cannot be published to',
     noAuth.ok === false, JSON.stringify(noAuth).slice(0, 200));
 
+  /* ══════════ 3. D-83 — the curated library, from the local export ══════════ */
+  console.log('\n-- D-83: the curated section library on dev --');
+
+  // The reader's own guards decide whether the local export is allowed. This
+  // asks it the same way the running API does, with this repo's .env loaded.
+  const { localLibraryFile, listAvailable, fetchSection } = await import('../lib/websiteBuilder/sectionLibrary.js');
+  const { libraryPickerRows, buildLibrarySection } = await import('../lib/websiteBuilder/libraryCatalog.js');
+
+  const exportFile = localLibraryFile();
+  check('SECTION_LIBRARY_LOCAL_FILE is set and accepted by its own guards',
+    !!exportFile, 'not set, or NODE_ENV/the database is not local');
+
+  if (exportFile) {
+    const manifest = await listAvailable({ archetype: 'pricing' });
+    check('the MANIFEST comes from the file, with no SQL row anywhere',
+      manifest.length === 10, `${manifest.length} pricing variants`);
+    const blueprint = await fetchSection('pricing.3col-cards.v1');
+    check('the BLUEPRINT comes from the file, with no blob anywhere',
+      blueprint?.sectionJson?.elType === 'container', String(blueprint?.sectionJson?.elType));
+
+    const offered = await libraryPickerRows({ brand: { email: 'owner@example.invalid' }, allowPro: true });
+    const counts = Object.fromEntries(Object.entries(offered).map(([k, v]) => [k, v.length]));
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    check('the picker offers curated layouts on dev', total > 0, JSON.stringify(counts));
+    console.log(`        offered: ${JSON.stringify(counts)} (${total} of 120)`);
+
+    // THE THREE BRANDON WANTS TO WALK. They are not offered, and the reason is
+    // NOT the empty dev database — it is that the pack 2 stamp plans name
+    // widgets these blueprints were never drawn with.
+    for (const kind of ['pricing', 'team', 'stats']) {
+      gap(`${kind} layouts are offered`, (counts[kind] || 0) > 0,
+        'not the empty dev database: the pack 2 stamp plan names widgets these blueprints were never drawn with (walk doc, D-83)');
+    }
+    const refusedPricing = await buildLibrarySection({
+      blueprintId: 'pricing.3col-cards.v1', brand: { email: 'owner@example.invalid' },
+    });
+    console.log(`        pricing refusal: ${refusedPricing.code} — ${refusedPricing.message}`);
+
+    // …and one that IS offered goes all the way onto the dev site.
+    const heroRows = offered.hero || [];
+    check('there is a curated hero to place', heroRows.length > 0);
+    if (heroRows.length) {
+      const built = await buildLibrarySection({
+        blueprintId: heroRows[0].blueprintId, brand: { email: 'owner@example.invalid' },
+      });
+      check('a curated layout builds into an editor section', built.ok === true,
+        JSON.stringify(built).slice(0, 200));
+      if (built.ok) {
+        const libMarker = `libfix-${Date.now()}`;
+        const created = await api('/pages', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: `Library proof ${libMarker}`, type: 'page', status: 'draft', sections: [] }),
+        });
+        const libPageId = Number(created.json?.page_id) || null;
+        check('a page to place it on', !!libPageId, `status ${created.status} ${created.text.slice(0, 120)}`);
+        if (libPageId) {
+          const saved = await api(`/pages/${libPageId}/sections`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sections: [{ handle: null, node: built.node }], status: 'publish' }),
+          });
+          check('the curated layout is saved onto the page', saved.status === 200,
+            `status ${saved.status} ${saved.text.slice(0, 150)}`);
+          const permalink = saved.json?.permalink || created.json?.permalink;
+          const page = await html(permalink);
+          check('THE CURATED LAYOUT RENDERS ON THE DEV SITE', page.status === 200 && page.body.includes('elementor'),
+            `status ${page.status}`);
+          const back = await api(`/pages/${libPageId}/sections`);
+          const libList = back.json?.sections || [];
+          check('...and the editor can still edit it afterwards',
+            libList.length === 1 && libList[0].editable === true,
+            JSON.stringify(libList.map((s) => [s.kind, s.editable])));
+          const gone = await api(`/pages/${libPageId}/trash`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+          });
+          check('the proof page is cleared away', gone.status === 200, `status ${gone.status}`);
+        }
+      }
+    }
+  }
+
   /* ══════════ PUT IT ALL BACK ══════════ */
   console.log('\n-- putting the dev site back --');
 
@@ -242,7 +334,17 @@ const api = async (path, init) => {
       `${noAuth.postId} / ${empty.postId}`);
   }
 
-  console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILURES'} — ${pass} pass, ${fail} fail\n`);
+  console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILURES'} — ${pass} pass, ${fail} fail`);
+  console.log('\nCLEAR THE BIN BEFORE ANYBODY WALKS THE SITE. A trashed page is still');
+  console.log('listed in the Portal\'s "Deleted pages" card, by design. From the dev stack:');
+  console.log('  docker compose -f C:\\dev\\iadm\\dev-stack\\wordpress\\compose.yml run --rm -T wpcli \\');
+  console.log('    wp post delete $(wp post list --post_status=trash --format=ids) --force');
+  console.log('…or empty those rows from the Deleted pages card itself.');
+  if (gaps.length) {
+    console.log(`\nKNOWN GAPS (not this pack's to fix, and not fixed):`);
+    for (const g of gaps) console.log(`  - ${g}`);
+  }
+  console.log('');
   process.exit(fail === 0 ? 0 : 1);
 })().catch((err) => {
   console.error('\nverifier threw:', err);
