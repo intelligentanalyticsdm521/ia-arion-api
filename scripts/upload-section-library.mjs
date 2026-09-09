@@ -76,6 +76,13 @@ const STORAGE_SCOPE = 'https://storage.azure.com/.default';
 
 const MODE_DRY_RUN = process.argv.includes('--dry-run') || (!process.argv.includes('--apply'));
 const MODE_APPLY = process.argv.includes('--apply');
+// 2026-09-09 guard (D-83): --apply against the production storage account is refused unless the
+// caller says so in words. The SQL target follows .env (localhost on dev) but the blob half
+// defaulted to stiadmprod, so a dev seed would have written thirty blobs into production.
+if (MODE_APPLY && STORAGE_ACCOUNT === 'stiadmprod' && !process.argv.includes('--allow-prod-blob')) {
+  console.error('[upload-section-library] refused: --apply would write blobs to the PRODUCTION storage account stiadmprod. Set SECTION_LIBRARY_ACCOUNT to a dev account, or pass --allow-prod-blob in a release window.');
+  process.exit(2);
+}
 
 const sourceArg = process.argv.find((a) => a.startsWith('--source='));
 const SOURCE = sourceArg ? sourceArg.slice('--source='.length) : SOURCE_DEFAULT;
