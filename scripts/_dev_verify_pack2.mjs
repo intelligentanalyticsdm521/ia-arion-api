@@ -232,6 +232,20 @@ const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8B
   // Put the menu back before Undo is exercised below.
   await call(`/menus/${menuId}/undo`, { method: 'POST', body: {} });
 
+  // UNDO HAS TO PUT A DROP-DOWN BACK AS A DROP-DOWN. A snapshot records
+  // nesting by id and a write takes it by position, so an untranslated restore
+  // flattens the menu and reports success - which is the whole thing Undo is
+  // for. The menu still on the site here is the nested one written above.
+  const flatten = await call(`/menus/${menuId}`, {
+    method: 'PUT', body: { items: [{ kind: 'custom', title: 'Flat', url: '/' }] },
+  });
+  const undoNest = await call(`/menus/${menuId}/undo`, { method: 'POST', body: {} });
+  const nestBack = (undoNest.json?.menus || []).find((m) => m.menu_id === menuId);
+  check('Undo puts a drop-down back as a drop-down, not flattened',
+    flatten.status === 200 && undoNest.status === 200
+      && (nestBack?.items || []).some((i) => /^tel:/.test(i.url) && Number(i.parent_item_id) > 0),
+    JSON.stringify((nestBack?.items || []).map((i) => [i.title, i.parent_item_id])));
+
   const undone = await call(`/menus/${menuId}/undo`, { method: 'POST', body: {} });
   const restored = (undone.json?.menus || []).find((m) => m.menu_id === menuId);
   check('Undo puts the previous menu back', undone.status === 200 && undone.json?.restored === true);

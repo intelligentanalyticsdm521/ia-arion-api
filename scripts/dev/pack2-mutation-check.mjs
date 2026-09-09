@@ -426,6 +426,18 @@ if (ONLY === 'all' || ONLY === 'plugin') {
     from: "\t\t\t\t'object_id'      => ( 'custom' === $kind ) ? 0 : (int) $item->object_id,",
     to: "\t\t\t\t'object_id'      => (int) $item->object_id,",
   });
+
+  mutate({
+    group: 'plugin', checker: 'live',
+    name: 'Undo puts a drop-down back as a drop-down (nesting is translated, not dropped)',
+    file: PLUGIN,
+    // ONE LINE, and one that stands on its own so the mutant is still VALID
+    // PHP - a syntax error would take the whole plugin down and every live
+    // check would go red for the wrong reason. The plugin file is also CRLF,
+    // so a multi-line `from` written with \n matches nothing and reports SKIP.
+    from: "\t\t\t$pid = isset( $row['parent_item_id'] ) ? (int) $row['parent_item_id'] : 0;",
+    to: "\t\t\t$pid = 0;",
+  });
 }
 
 console.log(`\n=== ${caught} caught, ${missed} missed ===\n`);
