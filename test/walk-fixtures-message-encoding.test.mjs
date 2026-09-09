@@ -50,10 +50,13 @@ const EM_DASH_UTF8 = Buffer.from([0xE2, 0x80, 0x94]);
  * `Ã` (C3 83) and `â` (C3 A2) as the FIRST byte of a two-byte pair are what a
  * double-encode looks like once it is stored back as UTF-8.
  */
+// The names are built from escapes rather than typed, so THIS FILE does not
+// contain the byte sequences it is hunting for. (It did, and it failed its own
+// sweep the moment it was committed — which is the guard working.)
 const MOJIBAKE = [
-  { name: 'â€ (UTF-8 E2 80 xx read as cp1252)', bytes: Buffer.from([0xC3, 0xA2, 0xE2, 0x82, 0xAC]) },
-  { name: 'Ã© (UTF-8 C3 xx read as cp1252)', bytes: Buffer.from([0xC3, 0x83, 0xC2]) },
-  { name: 'Â  (a stray cp1252 nbsp lead)', bytes: Buffer.from([0xC3, 0x82, 0xC2, 0xA0]) },
+  { name: `${String.fromCharCode(0xE2, 0x20AC)} (UTF-8 E2 80 xx read as cp1252)`, bytes: Buffer.from([0xC3, 0xA2, 0xE2, 0x82, 0xAC]) },
+  { name: `${String.fromCharCode(0xC3)} (UTF-8 C3 xx read as cp1252)`, bytes: Buffer.from([0xC3, 0x83, 0xC2]) },
+  { name: `${String.fromCharCode(0xC2)} (a stray cp1252 nbsp lead)`, bytes: Buffer.from([0xC3, 0x82, 0xC2, 0xA0]) },
 ];
 
 test('the margin sentence the walk quoted survives the round trip it actually makes', async () => {
@@ -91,8 +94,17 @@ test('no tracked source file in this repo carries a Windows-1252 double-encoding
   const interesting = listed.filter((f) => /\.(js|mjs|cjs|ts|tsx|json|sql|md|html)$/i.test(f));
   assert.ok(interesting.length > 200, `expected a real file list, got ${interesting.length}`);
 
+  // This file is the ONE exception, and it is exempt because it is the file that
+  // documents the fault: the header quotes the sequence the walk reported, and
+  // two assertions below match on it. Exempting it by path rather than by
+  // pattern keeps the exemption to exactly one file — a "skip anything under
+  // test/" rule would hide the next real one.
+  const SELF = 'test/walk-fixtures-message-encoding.test.mjs';
+  assert.ok(interesting.includes(SELF), 'the exemption names a file that is not tracked — rename it or fix the path');
+
   const bad = [];
   for (const rel of interesting) {
+    if (rel === SELF) continue;
     const abs = path.join(REPO, rel);
     let buf;
     try { buf = fs.readFileSync(abs); } catch { continue; }   // a deleted-but-tracked path
