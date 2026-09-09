@@ -25,10 +25,14 @@
  * ⚠ A MUTATION SWEEP over the plugin guards is destructive to the fixture: each
  *   mutant breaks the guard whose job is to stop this script's destructive step,
  *   so the fixture drifts and later runs abort on a draft an earlier one
- *   trashed. Repair with `-Reseed` and delete any leftover `Pack 1 …` /
- *   `ia-preview-…` pages before reading the result.
+ *   trashed. That used to be a note asking the reader to remember; it is a FLAG
+ *   now. Run a sweep with `--reseed` and the fixture is rebuilt at the end,
+ *   through the ONE seeder (`dev-stack\start-dev-wp.ps1 -Reseed`) rather than a
+ *   second copy of it here. Either way this script now NAMES every leftover
+ *   `Pack 1 …` / `ia-preview-…` / `Verification scratch` page it can still see,
+ *   so drift is never silent.
  *
- *   node scripts/_dev_verify_pack1.mjs [--base http://localhost:8084]
+ *   node scripts/_dev_verify_pack1.mjs [--base http://localhost:8084] [--reseed]
  */
 
 import fs from 'node:fs';
@@ -48,6 +52,8 @@ const COMPOSE = arg('compose', 'C:\\dev\\iadm\\dev-stack\\wordpress\\compose.yml
 // recreates the WordPress container mid-request — which reads as an ECONNRESET
 // halfway through a verification run. Found exactly that way.
 const PLUGIN_DIR = arg('plugin-dir', 'C:\\dev\\iadm\\ia-plugin-septa-arion1');
+const RESEED = argv.includes('--reseed');
+const RESEED_SCRIPT = arg('reseed-script', 'C:\\dev\\iadm\\dev-stack\\start-dev-wp.ps1');
 const API = `${BASE}/wp-json/intelligent-analytics/v1`;
 
 if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(BASE)) {
@@ -102,6 +108,56 @@ async function call(path, { method = 'GET', body, token = TOKEN } = {}) {
 }
 
 /** wp-cli in the dev container. Used only to break things and put them back. */
+/**
+ * Leave the fixture in a state the next reader can trust, and SAY what state
+ * that is.
+ *
+ * §4d, arion pack 1: the header used to ask whoever ran a mutation sweep to
+ * remember to repair the fixture afterwards, and to go and delete the leftovers
+ * by hand. A cleanup somebody has to remember is a cleanup that does not
+ * happen — twelve scratch drafts had piled up on this fixture before anybody
+ * looked. So:
+ *
+ *   always     name every leftover page still on the fixture, so drift shows up
+ *              in the run's own output rather than on the next walk;
+ *   --reseed   rebuild the fixture pages afterwards, through the ONE seeder
+ *              (start-dev-wp.ps1 -Reseed). A second copy of the seeding logic
+ *              here would be a second answer to "what is the fixture", and the
+ *              two would drift.
+ */
+async function settleFixture() {
+  const LEFTOVER = /^(Pack 1 |ia-preview-|Verification scratch)/i;
+  const leftovers = ((await call('/pages')).json?.pages || []).filter((p) => LEFTOVER.test(p.title || ''));
+  if (leftovers.length) {
+    console.log(`
+  ! ${leftovers.length} leftover fixture page(s):`);
+    for (const p of leftovers) console.log(`      #${p.page_id}  ${p.status}  ${p.title}`);
+  } else {
+    console.log(`
+  fixture clean: no Pack 1 / preview / scratch pages left behind`);
+  }
+
+  if (!RESEED) {
+    if (leftovers.length) console.log('  -> re-run with --reseed to rebuild the fixture');
+    return;
+  }
+
+  console.log('  reseeding the fixture through start-dev-wp.ps1 -Reseed ...');
+  try {
+    execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', RESEED_SCRIPT, '-Reseed'], {
+      encoding: 'utf8', stdio: ['ignore', 'inherit', 'inherit'],
+    });
+  } catch (err) {
+    // A failed reseed must be LOUD: a fixture somebody believes was rebuilt and
+    // was not is worse than one nobody touched.
+    check('the fixture was reseeded', false, String(err.message).split('\n')[0]);
+    return;
+  }
+  const after = ((await call('/pages')).json?.pages || []).filter((p) => LEFTOVER.test(p.title || ''));
+  check('the fixture was reseeded and holds no leftover pages', after.length === 0,
+    after.map((p) => `#${p.page_id} ${p.title}`).join(', '));
+}
+
 function wp(args) {
   return execFileSync('docker', [
     'compose', '--progress', 'quiet', '-f', COMPOSE,
@@ -559,6 +615,8 @@ const PNG_3x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAMAAAABCAYAAAAKI8wLAAAAEUlEQVR42mNk+M/
   check('the draft\'s SEO fields are back',
     String(finalSeo.json?.seo?.title || '') === String(seoBefore.title || '')
     && String(finalSeo.json?.seo?.description || '') === String(seoBefore.description || ''));
+
+  await settleFixture();
 
   console.log(`\n=== ${pass} passed, ${fail} failed ===\n`);
   process.exit(fail === 0 ? 0 : 1);

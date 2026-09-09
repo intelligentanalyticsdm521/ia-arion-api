@@ -10,12 +10,17 @@
  * things on purpose at the end (memory: feedback_mutation_test_your_guards).
  *
  * ⚠ Dev only. It refuses to run against anything but a loopback host, and it
- * puts every page it touched back the way it found it.
+ * puts every page it touched back the way it found it — INCLUDING the scratch
+ * draft it creates. It used to leave one behind per run; twelve had piled up on
+ * the fixture before anyone noticed and the pages-list walk rows were unreadable
+ * (§4d, arion pack 1). The cleanup sweeps every scratch page on the fixture, not
+ * only this run's, and ASSERTS that none is left.
  *
  *   node scripts/_dev_verify_site_builder.mjs [--base http://localhost:8084]
  */
 
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { reduceToSectionList, applyFields, extractFields } from '../lib/websiteBuilder/sectionSchema.js';
 
 const argv = process.argv.slice(2);
@@ -26,6 +31,7 @@ const arg = (name, fallback) => {
 
 const BASE = arg('base', 'http://localhost:8084');
 const TOKEN_FILE = arg('token-file', 'C:\\dev\\iadm\\dev-stack\\wordpress\\.site-token');
+const COMPOSE = arg('compose', 'C:\\dev\\iadm\\dev-stack\\wordpress\\compose.yml');
 const API = `${BASE}/wp-json/intelligent-analytics/v1`;
 
 if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(BASE)) {
@@ -64,6 +70,75 @@ async function call(path, { method = 'GET', body, token = TOKEN } = {}) {
 /** A 1x1 PNG, built here so the script needs no fixture file and no network. */
 const PNG_1PX_B64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+/** Every scratch page this run made. Trashed before the report. */
+const scratchPageIds = [];
+const SCRATCH_TITLE = 'Verification scratch (safe to delete)';
+
+/**
+ * Put the fixture back. It leaves NOTHING behind, and it SAYS SO — a script
+ * that tidies up silently is one you cannot tell from a script that does not.
+ *
+ * It sweeps EVERY scratch page, not only this run's: twelve had accumulated
+ * from earlier runs before anybody looked (§4d, arion pack 1), and a cleanup
+ * that only knew about its own run would have left all twelve behind.
+ */
+async function cleanUpScratch() {
+  const isScratch = (p) => p.title === SCRATCH_TITLE || scratchPageIds.includes(p.page_id);
+  const before = ((await call('/pages')).json?.pages || []).filter(isScratch);
+
+  // TWO STEPS, because the plugin deliberately has only the first. Trash is a
+  // site-token route; permanently destroying a page is not, and should not be —
+  // a site token must never be able to obliterate a client's work. So the API
+  // puts it in the bin, and wp-cli (the same helper _dev_verify_pack1.mjs uses
+  // for its own scratch pages) empties the bin of OUR pages and nothing else.
+  for (const page of before) {
+    if (page.status !== 'trash') await call(`/pages/${page.page_id}/trash`, { method: 'POST' });
+  }
+  for (const page of before) {
+    try {
+      wp(['post', 'delete', String(page.page_id), '--force']);
+    } catch {
+      // Named by the assertion below rather than swallowed here.
+    }
+  }
+
+  // `docker compose run` can knock the container's open connections over, so the
+  // read that PROVES the cleanup is retried. A cleanup that cannot be verified
+  // is a cleanup nobody can trust.
+  const left = (await pagesWithRetry()).filter(isScratch);
+  check(`the ${before.length} scratch page(s) this fixture held are gone`,
+    left.length === 0,
+    `still there: ${left.map((p) => `#${p.page_id} (${p.status})`).join(', ')}`
+    + ' — if wp-cli is unavailable they are in the bin and `start-dev-wp.ps1 -Destroy` clears them');
+}
+
+/** GET /pages, retried: a wp-cli container start can reset an open socket. */
+async function pagesWithRetry(attempts = 4) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      const r = await call('/pages');
+      if (r.status === 200) return r.json?.pages || [];
+      lastErr = new Error(`status ${r.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+  }
+  throw lastErr || new Error('could not read the page list');
+}
+
+/**
+ * wp-cli inside the dev container. The same shape `_dev_verify_pack1.mjs` uses,
+ * and only ever pointed at pages THIS script made.
+ */
+function wp(args) {
+  return execFileSync('docker', [
+    'compose', '--progress', 'quiet', '-f', COMPOSE,
+    'run', '--rm', '-T', 'wpcli', 'wp', ...args,
+  ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+}
 
 (async () => {
   console.log(`\n=== site builder verification against ${BASE} ===\n`);
@@ -173,13 +248,17 @@ const PNG_1PX_B64 =
   check('a new page reports a real last-changed time, not "never"',
     (await call('/pages')).json?.pages?.find((p) => p.page_id === created.json?.page_id)?.modified != null,
     'drafts carry a zero post_modified_gmt in WordPress; the read must fall back');
-  // Name the page it leaves behind so the next reader knows what it is. The
-  // plugin has no delete route (deleting a client's page is not something this
-  // scope should be able to do); `start-dev-wp.ps1 -Destroy` resets the lot.
+  // Name the page so a half-finished run leaves something a reader can identify,
+  // and remember it so the cleanup at the end can take it away again. Until
+  // 2026-09-09 this script left ONE of these behind per run: twelve had piled up
+  // on the fixture and the pages-list walk rows were unreadable (§4d, arion pack
+  // 1). The plugin grew POST /pages/<id>/trash in 1.7.3, so there is now
+  // something to clean up WITH.
   if (created.json?.page_id) {
+    scratchPageIds.push(created.json.page_id);
     await call(`/pages/${created.json.page_id}/sections`, {
       method: 'POST',
-      body: { sections: [], status: 'draft', title: 'Verification scratch (safe to delete)' },
+      body: { sections: [], status: 'draft', title: SCRATCH_TITLE },
     });
   }
 
@@ -236,6 +315,8 @@ const PNG_1PX_B64 =
   const stillOriginal = await call(`/pages/${home.page_id}/sections`);
   check('the page is untouched after the refused save',
     stillOriginal.json?.sections?.[0]?.fields?.headline === originalHeadline);
+
+  await cleanUpScratch();
 
   report();
 })().catch((err) => {
