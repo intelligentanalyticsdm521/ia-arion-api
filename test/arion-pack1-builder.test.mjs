@@ -74,8 +74,12 @@ test('a site that says it has no Elementor is REFUSED with a sentence, not a 200
   assert.ok(refusal, 'a site with no Elementor must be refused');
   assert.equal(refusal.status, 409);
   assert.equal(refusal.code, 'ELEMENTOR_NOT_ACTIVE');
-  assert.match(refusal.message, /Elementor/);
+  // A2-52: the refusal is a sentence a client can act on, and it names NOBODY.
+  assert.doesNotMatch(refusal.message, /Elementor|WordPress|Hello|Astra|Rank Math/i,
+    'no vendor name reaches the client');
+  assert.match(refusal.message, /your website/i, 'it is addressed to their website');
   assert.match(refusal.message, /blank/, 'the client is told what would happen, not given a code');
+  assert.match(refusal.message, /tell us/i, 'and what to do about it');
   assert.equal(refusal.message, NO_ELEMENTOR_MESSAGE);
 });
 
