@@ -55,6 +55,7 @@ import blocksRouter from './arion/blocks.js';
 import sitePagesRouter from './arion/pages.js';
 import intelligenceRouter from './arion/intelligence.js';
 import contentAgentRouter from './arion/contentAgent.js';
+import arionAgentsRouter from './arion/agents.js';
 import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } from '../lib/websiteBuilder/costGuard.js';
 import { signOAuthState } from '../lib/oauthState.js';
 import { attachAgencyContext, isAgencyCaller } from '../lib/agency.js';
@@ -74,6 +75,11 @@ router.use('/bing', requireArionTenantAdmin);
 router.use('/seo/project/reconfigure', requireArionTenantAdmin);
 router.use('/sites/:siteId/gbp', requireArionTenantAdmin);
 router.use('/sites/:siteId/plugin', requireArionTenantAdmin);
+// ARGUS pack 1 — switching an agent on for a business, setting what that business
+// pays for it and how many posts a week it writes are tenant-admin acts. The
+// middleware lets every GET through untouched (reads are always allowed), so an
+// ordinary member can still SEE what the agent did on their own website.
+router.use('/agents', requireArionTenantAdmin);
 
 // SE Ranking cost gate (Brandon 2026-08-21): no SE Ranking API call for a site
 // without an active paid SEO add-on. Every /seo/* surface that reaches SE
@@ -109,6 +115,12 @@ router.use('/sites/:siteId/intelligence', intelligenceRouter);
 // propose-only code queue. See lib/contentAgent/ + db/migrations/063_content_agent.sql.
 // Tenant-scoped from req.tenant.tenantId only; never from a route param.
 router.use('/content-agent', contentAgentRouter);
+
+// ARGUS pack 1 — Settings -> ARION -> Agents. The activity/runs/settings read
+// models and, crucially, the PUT that can switch the agent on for a business:
+// arion.content_agent_tenant_config IS the product and nothing in the codebase
+// could create a row in it. See routes/arion/agents.js.
+router.use('/agents', arionAgentsRouter);
 
 // Cross-product plugin proxy — used by LUMEN-API for newsletter publishing.
 router.use('/plugin', pluginRouter);

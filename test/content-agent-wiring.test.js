@@ -82,7 +82,11 @@ test('the two migrations are 063 and 064 and the old numbers are gone', () => {
 test('both migrations name their new number inside the file, not just in the filename', () => {
   for (const f of AGENT_MIGRATIONS) {
     const src = fs.readFileSync(`${MIGRATIONS}/${f}`, 'utf8');
-    assert.match(src.split('\n')[0], new RegExp(`^-- ${f}$`), `${f} header does not match its name`);
+    // .trim() because git checks these files out with CRLF on Windows, and the
+    // trailing \r made this assertion fail in a FRESH worktree while passing in
+    // the one the file was authored in. A test whose result depends on which
+    // checkout it runs from is a test nobody can trust.
+    assert.match(src.split('\n')[0].trim(), new RegExp(`^-- ${f}$`), `${f} header does not match its name`);
     assert.match(src, /RENUMBERED 05[34] -> 06[34]/, `${f} must carry the reason it was renumbered`);
   }
 });
