@@ -297,6 +297,22 @@ test('D-82: the composer only ever speaks to the plugin client', () => {
   assert.match(src, /pageClient\.js/);
 });
 
+test('D-82: whose fault it was decides the status, and a stranded draft is named', () => {
+  const src = read('routes/arion/plugin.js');
+  const route = src.slice(src.indexOf("router.post('/posts'"));
+  assert.ok(route.length > 200, 'found the create route');
+  // OUR refusal (an empty article, no title) is a 400 the caller can act on;
+  // the WEBSITE refusing is a 502. A body refused AFTER the post was made is
+  // the website's, and must not be dressed up as a bad request.
+  assert.match(route, /result\.step === 'body' && !result\.postId/);
+  assert.match(route, /result\.step === 'site' \? 404/);
+  assert.match(route, /ourFault \? 400 : 502/);
+  // The draft left behind is named, so somebody can go and tidy it up.
+  assert.match(route, /post_id: result\.postId \|\| null/);
+  // A 201 never carries an error, and an error never rides on a 2xx.
+  assert.match(route, /return res\.status\(201\)\.json\(\{/);
+});
+
 test('D-82: the dead proxy is not resurrected, and nothing still calls it', () => {
   const plugin = read('routes/arion/plugin.js');
   assert.ok(!/publish-newsletter/.test(plugin.replace(/\/\*[\s\S]*?\*\//g, '')),

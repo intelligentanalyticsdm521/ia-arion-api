@@ -319,11 +319,14 @@ router.post('/posts', async (req, res) => {
 
     const result = await composePostFromHtml({ site, title, contentHtml, excerpt, categories });
     if (!result.ok) {
-      // The step tells the caller whether the post exists at all, which is the
-      // difference between "try again" and "go and delete a draft".
-      const status = result.step === 'body' && !result.postId ? 400
-        : result.step === 'body' || result.step === 'title' ? 400
-        : 502;
+      // 400 when WE refused it (an empty article, no title) — the caller can
+      // fix that. 502 when the WEBSITE refused it, including a body refused
+      // after the post was made: a `post_id` in that answer is the draft left
+      // behind, which is the difference between "try again" and "go and tidy
+      // up first".
+      const ourFault = (result.step === 'body' && !result.postId)
+        || result.step === 'title' || result.step === 'site';
+      const status = result.step === 'site' ? 404 : (ourFault ? 400 : 502);
       return res.status(status).json({
         error: 'publish_failed',
         step: result.step,
