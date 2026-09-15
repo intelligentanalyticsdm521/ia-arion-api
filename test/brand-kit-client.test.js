@@ -121,3 +121,25 @@ describe("loadBrandContext prefers the kit over arion.site", () => {
     }
   });
 });
+
+describe("what a client's PAGE ships with is not our brand", () => {
+  // Both of these wrote Intelligent Analytics' navy and gold into a CLIENT's
+  // website when the business had recorded no colour: the adapter into the
+  // Elementor JSON we publish, the preview into what they see before they
+  // publish it. Neither is reached in the normal case any more (the kit always
+  // answers with a complete palette) — which is exactly why the last resort
+  // must not be ours: it only fires when we cannot tell.
+  const files = [
+    ["lib/websiteBuilder/elementorAdapter.js", "the Elementor JSON we publish"],
+    ["lib/websiteBuilder/sectionPreview.js", "the preview of an adopted section"],
+  ];
+
+  for (const [rel, what] of files) {
+    test(`${rel} falls back to the platform neutral (${what})`, () => {
+      const src = readFileSync(path.join(process.cwd(), ...rel.split("/")), "utf8");
+      const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+      assert.doesNotMatch(code, /#1A3A4A|#FEC82C/i, `${rel} still hardcodes an IA brand colour`);
+      assert.match(code, /NEUTRAL_BRAND_COLOURS/, `${rel} must use the one neutral`);
+    });
+  }
+});
