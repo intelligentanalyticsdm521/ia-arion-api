@@ -5,6 +5,7 @@ import {
   ManagedIdentityCredential,
 } from "@azure/identity";
 import dotenv from "dotenv";
+import { createPoolRecovery, isLoginFailure } from "./poolRecovery.js";
 
 dotenv.config();
 
@@ -45,6 +46,20 @@ function withTimeout(promise, ms, label) {
   });
 }
 
+/**
+ * A FACTORY, not a cache — and that is load-bearing, not an accident.
+ *
+ * Both pools call this on every rebuild. An @azure/identity credential keeps
+ * its token cache inside the instance, so a NEW instance means a genuinely new
+ * token request; that is exactly what an ELOGIN recovery needs, because the
+ * whole point of the retry is a token that did NOT come out of the cache Azure
+ * SQL has already refused. oliver-api caches its credential and therefore has
+ * to call `resetCredential()` from every discard; this repo gets the same
+ * property from construction and has nothing to reset.
+ *
+ * Memoising this for performance would silently make every recovery retry with
+ * the refused token. test/pool-recovery.test.mjs holds that line.
+ */
 export function getCredential() {
   if (authMode === "MANAGED_IDENTITY") return new ManagedIdentityCredential();
   if (authMode === "AZURE_CLI") return new AzureCliCredential();
@@ -124,7 +139,16 @@ export async function getPlatformPool() {
   poolPromise = withTimeout(
     new sql.ConnectionPool(config)
       .connect()
-      .then((pool) => pool)
+      .then((pool) => {
+        // mssql emits 'error' on the pool whenever a connection cannot be
+        // ACQUIRED — which is precisely what a refused token looks like to the
+        // call sites that hold the pool directly and never see a connect
+        // error. Without this listener those queries fail forever against a
+        // pool nothing ever rebuilds. An unhandled 'error' on an EventEmitter
+        // also throws, so this is load-bearing twice over.
+        pool.on("error", (err) => recovery.onPoolError(err));
+        return pool;
+      })
       .catch((err) => {
         poolPromise = null;
         poolTokenExpiresAt = 0;
@@ -239,7 +263,14 @@ export async function updateSharedProfile(tenantId, fields) {
 }
 
 /**
- * Force the next getPlatformPool() call to rebuild from scratch.
+ * THE discard for this pool: drop the cached pool promise, zero the token
+ * expiry, and close the old pool in the background. Takes effect SYNCHRONOUSLY
+ * (the close finishes later) so a concurrent caller cannot pick the poisoned
+ * pool back up, and the next getPlatformPool() takes its token from a NEW
+ * credential instance (getCredential is a factory — see its comment).
+ *
+ * Was a dead export until 2026-09-16; it is now the primitive the ELOGIN
+ * recovery below is built on.
  */
 export function invalidatePlatformPool() {
   if (poolPromise) {
@@ -248,3 +279,27 @@ export function invalidatePlatformPool() {
   poolPromise = null;
   poolTokenExpiresAt = 0;
 }
+
+// ── ELOGIN recovery ──────────────────────────────────────────────────────────
+// One shared helper (db/poolRecovery.js); this module only supplies the four
+// things that differ per pool. See that file for the incident this exists for.
+const recovery = createPoolRecovery({
+  label: "platform",
+  connect: () => getPlatformPool(),
+  discard: () => invalidatePlatformPool(),
+  tokenExpiresAt: () => poolTokenExpiresAt,
+});
+
+/**
+ * Run `fn(pool)` against the platform database, recovering ONCE from a refused
+ * login (a managed-identity token Azure SQL will not accept) by discarding the
+ * pool, taking a new token from a new credential and retrying. A second failure
+ * throws the ORIGINAL error; a non-login error is never retried.
+ */
+export function withPlatformPool(fn) {
+  return recovery.withPool(fn);
+}
+
+/** Test hooks — no production path reads these. */
+export const _platformRecovery = recovery;
+export { isLoginFailure };
