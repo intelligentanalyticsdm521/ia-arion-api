@@ -1,8 +1,23 @@
 import express from "express";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { withPlatformPool } from "../db/platformPool.js";
 import { withServicesPool } from "../db/servicesPool.js";
 
 const router = express.Router();
+
+// Build identity stamped by the pipeline (build-info.json) so /health reports
+// exactly which commit is deployed — no more "is it deployed?" guessing. Read
+// once at boot; a missing file is normal locally and must never throw. Stated
+// on EVERY path, healthy or not: on 2026-09-16 oliver-api's /health dropped the
+// build identity the moment SQL stopped answering, so the only way to confirm
+// what was live during the incident was to read wwwroot through Kudu.
+let BUILD = { commit: "unknown", builtAt: "unknown", buildId: "unknown" };
+try {
+  const dir = path.dirname(fileURLToPath(import.meta.url));
+  BUILD = { ...BUILD, ...JSON.parse(fs.readFileSync(path.join(dir, "..", "build-info.json"), "utf8")) };
+} catch { /* not present in local/dev */ }
 
 /**
  * Probe one database. NEVER throws: it returns the verdict, so one dead pool
@@ -46,6 +61,9 @@ export function buildHealthBody(platform, services, now = new Date()) {
     servicesDb: services.ok ? "ok" : "error",
     ...(platform.ok ? {} : { platformDbCode: platform.code, platformDbError: platform.message }),
     ...(services.ok ? {} : { servicesDbCode: services.code, servicesDbError: services.message }),
+    // Deployed build identity — so we can curl /health and KNOW exactly which
+    // commit is live instead of guessing. Stated whether or not SQL answers.
+    ...BUILD,
     timestampUtc: now.toISOString(),
   };
   // `details` kept for readers pinned to the old error shape, now alongside the

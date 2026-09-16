@@ -20,7 +20,7 @@
 // ConnectionError shape, so a test goes red the way production went red.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -432,6 +432,59 @@ test("the route hands the real withXPool to probe and answers with buildHealthBo
   assert.match(src, /probe\(withServicesPool\)/);
   assert.match(src, /res\.status\(status\)\.json\(body\)/);
   assert.match(src, /Promise\.all/, "both databases are probed even when the first one is dead");
+});
+
+/* ── 7b. /health states WHICH COMMIT is deployed ──────────────────────────── */
+// Same mechanism, same file and the same three key names as oliver-api and
+// LUMEN-API: the pipeline writes build-info.json into the zip, the route reads
+// it once at boot, and the body carries it on every path.
+
+test("a healthy body carries the deployed build identity", () => {
+  const up = health.buildHealthBody({ ok: true }, { ok: true });
+  for (const k of ["commit", "builtAt", "buildId"]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(up.body, k),
+      `${k} must be present — a curl of /health is how a release is confirmed`);
+  }
+});
+
+test("the build identity is stated even while both databases are down", () => {
+  const down = health.buildHealthBody(
+    { ok: false, code: "ELOGIN", message: "Login failed" },
+    { ok: false, code: "ELOGIN", message: "Login failed" },
+  );
+  for (const k of ["commit", "builtAt", "buildId"]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(down.body, k),
+      `${k} must be present on the error path — on 2026-09-16 /health could not be used to confirm a deploy `
+      + "because it dropped the build identity the moment SQL stopped answering");
+  }
+  assert.equal(down.body.servicesDbCode, "ELOGIN");
+  assert.equal(down.body.status, "error");
+});
+
+test("a missing build-info.json reads as \"unknown\" — the loader never throws", () => {
+  const stamp = path.join(ROOT, "build-info.json");
+  const { body } = health.buildHealthBody({ ok: true }, { ok: true });
+  if (existsSync(stamp)) {
+    // If a stamp IS on disk it must be REPORTED, not quietly ignored.
+    const onDisk = JSON.parse(readFileSync(stamp, "utf8"));
+    assert.equal(body.commit, onDisk.commit, "the stamped commit is what /health states");
+    assert.equal(body.buildId, String(onDisk.buildId));
+  } else {
+    // Local/dev: no stamp, so the body says so instead of blowing up at import.
+    assert.deepEqual(
+      { commit: body.commit, builtAt: body.builtAt, buildId: body.buildId },
+      { commit: "unknown", builtAt: "unknown", buildId: "unknown" },
+    );
+  }
+});
+
+test("the pipeline actually writes the file the route reads", () => {
+  // The route reading build-info.json is worth nothing if nothing stamps it —
+  // that is the whole defect this fixes [feedback_assert_presence_not_just_absence].
+  const yml = readFileSync(path.join(ROOT, "azure-pipelines.yml"), "utf8");
+  assert.match(yml, /build-info\.json/, "azure-pipelines.yml must stamp build-info.json");
+  assert.match(yml, /Build\.SourceVersion/, "…with the commit the build was made from");
+  assert.match(yml, /Build\.BuildId/, "…and the build id");
 });
 
 /* ── 8. nothing may CACHE a pool across ticks, or build its own ───────────── */

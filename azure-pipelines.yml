@@ -67,6 +67,13 @@ steps:
   - script: |
       set -e
       cd "$(System.DefaultWorkingDirectory)"
+      echo "{\"commit\":\"$(Build.SourceVersion)\",\"builtAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"buildId\":\"$(Build.BuildId)\"}" > build-info.json
+      cat build-info.json
+    displayName: "Stamp build-info.json (commit -> /health)"
+
+  - script: |
+      set -e
+      cd "$(System.DefaultWorkingDirectory)"
       echo "Creating deployment zip..."
       zip -r "$(Build.ArtifactStagingDirectory)/drop.zip" . \
         -x ".git/*" \
