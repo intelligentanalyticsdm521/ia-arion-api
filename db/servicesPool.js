@@ -1,5 +1,6 @@
 import sql from "mssql";
 import { getCredential, SQL_SCOPE } from "./platformPool.js";
+import { createPoolRecovery, isLoginFailure } from "./poolRecovery.js";
 
 const sqlServer = process.env.SERVICES_SQL_SERVER || process.env.SQL_SERVER;
 const sqlDatabase = process.env.SERVICES_SQL_DATABASE || "iadm_services";
@@ -97,7 +98,16 @@ export async function getServicesPool() {
   poolPromise = withTimeout(
     new sql.ConnectionPool(config)
       .connect()
-      .then((pool) => pool)
+      .then((pool) => {
+        // mssql emits 'error' on the pool whenever a connection cannot be
+        // ACQUIRED — precisely what a refused token looks like to the call
+        // sites that hold the pool directly and never see a connect error.
+        // Without this listener those queries fail forever against a pool
+        // nothing ever rebuilds. An unhandled 'error' on an EventEmitter also
+        // throws, so this is load-bearing twice over.
+        pool.on("error", (err) => recovery.onPoolError(err));
+        return pool;
+      })
       .catch((err) => {
         poolPromise = null;
         poolTokenExpiresAt = 0;
@@ -111,9 +121,12 @@ export async function getServicesPool() {
 }
 
 /**
- * Force the next getServicesPool() call to rebuild from scratch.
- * Used by the request-level retry path when a query fails with a
- * token-expired error mid-flight.
+ * THE discard for this pool: drop the cached pool promise, zero the token
+ * expiry, and close the old pool in the background. Takes effect SYNCHRONOUSLY
+ * (the close finishes later) so a concurrent caller cannot pick the poisoned
+ * pool back up, and the next getServicesPool() takes its token from a NEW
+ * credential instance (getCredential is a factory — see its comment in
+ * db/platformPool.js).
  */
 export function invalidateServicesPool() {
   if (poolPromise) {
@@ -122,3 +135,27 @@ export function invalidateServicesPool() {
   poolPromise = null;
   poolTokenExpiresAt = 0;
 }
+
+// ── ELOGIN recovery ──────────────────────────────────────────────────────────
+// One shared helper (db/poolRecovery.js); this module only supplies the four
+// things that differ per pool. See that file for the incident this exists for.
+const recovery = createPoolRecovery({
+  label: "services",
+  connect: () => getServicesPool(),
+  discard: () => invalidateServicesPool(),
+  tokenExpiresAt: () => poolTokenExpiresAt,
+});
+
+/**
+ * Run `fn(pool)` against the services database, recovering ONCE from a refused
+ * login by discarding the pool, taking a new token from a new credential and
+ * retrying. A second failure throws the ORIGINAL error; a non-login error is
+ * never retried.
+ */
+export function withServicesPool(fn) {
+  return recovery.withPool(fn);
+}
+
+/** Test hooks — no production path reads these. */
+export const _servicesRecovery = recovery;
+export { isLoginFailure };
