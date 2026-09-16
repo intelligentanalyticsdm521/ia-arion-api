@@ -1,0 +1,88 @@
+{
+  "_note": "SEAM FIXTURE - byte-identical in arion-api and the Portal. The ARION section kinds the website builder offers, with the words a client reads. Source of truth: arion-api lib/websiteBuilder/sectionSchema.js SECTION_KINDS. A test in EACH repo reads this file; drift fails both.",
+  "kinds": [
+    {
+      "kind": "hero",
+      "label": "Hero banner",
+      "blurb": "The big banner at the top of a page — one headline, one line of support, one button.",
+      "requiresElementorPro": false
+    },
+    {
+      "kind": "services",
+      "label": "What you do",
+      "blurb": "A row of cards, one per service, each with a short description.",
+      "requiresElementorPro": false
+    },
+    {
+      "kind": "testimonials",
+      "label": "What customers say",
+      "blurb": "Quotes from real customers, with who said them.",
+      "requiresElementorPro": false
+    },
+    {
+      "kind": "cta",
+      "label": "Call to action",
+      "blurb": "A wide band with a headline and one or two buttons.",
+      "requiresElementorPro": false
+    },
+    {
+      "kind": "about",
+      "label": "About the business",
+      "blurb": "Your story beside a picture, then the things you stand for.",
+      "requiresElementorPro": false
+    },
+    {
+      "kind": "faq",
+      "label": "Questions and answers",
+      "blurb": "The questions customers keep asking, with your answers.",
+      "requiresElementorPro": false
+    },
+    {
+      "kind": "gallery",
+      "label": "Picture gallery",
+      "blurb": "A grid of photographs of your work.",
+      "requiresElementorPro": false
+    },
+    {
+      "kind": "pricing",
+      "label": "What it costs",
+      "blurb": "Your prices, one card per package, with what each one includes.",
+      "requiresElementorPro": false
+    },
+    {
+      "kind": "team",
+      "label": "The people",
+      "blurb": "Who works here, with a photograph and what they do.",
+      "requiresElementorPro": false
+    },
+    {
+      "kind": "stats",
+      "label": "Numbers that matter",
+      "blurb": "A band of figures — years in business, jobs done, how fast you answer.",
+      "requiresElementorPro": false
+    },
+    {
+      "kind": "contact",
+      "label": "Contact and form",
+      "blurb": "How to reach you, next to a form that sends straight to your inbox.",
+      "requiresElementorPro": true
+    },
+    {
+      "kind": "content",
+      "label": "Words and pictures",
+      "blurb": "A free section: headings, paragraphs, pictures, buttons and video, in one to three columns.",
+      "requiresElementorPro": false
+    }
+  ],
+  "contentBlockKinds": [
+    "heading",
+    "paragraph",
+    "list",
+    "image",
+    "button",
+    "video",
+    "map",
+    "divider",
+    "spacer"
+  ]
+}

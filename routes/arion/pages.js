@@ -88,6 +88,8 @@ import {
   listMedia, setMediaAlt, pushBookingConfig,
   // ARION pack 1 — the wp-admin-only jobs, all on the same site token.
   fetchPageSettings, writePageSettings, fetchPageSeo, writePageSeo,
+  // The site's own header menu, for the builder's page chrome.
+  fetchMenus,
   previewPage, trashPage, restorePage,
   fetchMediaUsage, deleteMedia, replaceMedia,
 } from '../../lib/websiteBuilder/pageClient.js';
@@ -1605,6 +1607,22 @@ router.get('/section-library', async (req, res) => {
           ? String(brand.business_name || '')
           : BUSINESS_NAME_NOT_SET,
         businessNameStatus: brand.business_name_status || 'not_set',
+        // THE SITE'S OWN HEADER AND FOOTER (2026-09-16, the website builder).
+        //
+        // The builder draws them above and below the page as CHROME, so a page
+        // never opens looking like it starts at the hero — §7's "the header is
+        // pre-placed and already shows the business's information". They are
+        // theme-level: the same on every page, edited under Website → Menus,
+        // and NOT part of what a publish writes.
+        //
+        // Best effort by design: a website that will not answer /menus gets an
+        // empty menu and a builder that still works. It is chrome.
+        chrome: {
+          businessName: brand.business_name_status === 'set' ? String(brand.business_name || '') : '',
+          logoUrl: String(brand.logo_url || ''),
+          contactLine: [brand.email, brand.location].filter(Boolean).join(' · '),
+          menu: await primaryMenuItems(site),
+        },
       },
       meta: { site_id: siteId, tier: site.arion_tier || null },
     });
@@ -1612,6 +1630,29 @@ router.get('/section-library', async (req, res) => {
     return boom(res, err, 'arion/pages:section-library');
   }
 });
+
+/**
+ * The labels on the site's own primary menu, for the builder's header chrome.
+ *
+ * Labels only — this draws a picture of the header, it does not edit it, and
+ * shipping the URLs would invite somebody to try. Never throws: a menu we
+ * cannot read is an empty header band, not a page that will not open.
+ */
+async function primaryMenuItems(site) {
+  try {
+    const res = await fetchMenus(site);
+    if (!res.ok) return [];
+    const menus = Array.isArray(res.data?.menus) ? res.data.menus : [];
+    const primary = menus.find((m) => (m.locations || []).includes('primary')) || menus[0];
+    return (Array.isArray(primary?.items) ? primary.items : [])
+      .filter((i) => Number(i?.parent || 0) === 0)
+      .slice(0, 8)
+      .map((i) => ({ label: String(i?.title || i?.label || '').trim() }))
+      .filter((i) => i.label);
+  } catch {
+    return [];
+  }
+}
 
 /* --------------------------------------------------------------------------
  * Booking button sync (Ops B6).
