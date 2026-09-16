@@ -85,7 +85,10 @@ test('the header and the footer are not page content, and say where they live', 
 });
 
 test('the editor kind with no library behind it is named, not hidden', () => {
-  assert.deepEqual(kindsWithoutLibraryVariants(), ['gallery']);
+  // `content` is the free section: it is composed on the canvas, so there is
+  // nothing for a curated LAYOUT to be a variant of. Named here rather than
+  // filtered out, because a missing option is indistinguishable from a bug.
+  assert.deepEqual(kindsWithoutLibraryVariants(), ['gallery', 'content']);
 });
 
 /* ==========================================================================

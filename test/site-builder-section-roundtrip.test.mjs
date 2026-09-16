@@ -33,6 +33,20 @@ function build(kind, overrides = {}) {
   return blockToElementorSection({ kind, block, brand: BRAND, seedId: `t-${kind}`, blockId: `blk-${kind}` });
 }
 
+/** Every widget on a section, whatever dialect the section is drawn in.
+ *  The structural assertions below used to index into `elements[0].elements[1]`,
+ *  which pinned the LEGACY section/column dialect rather than the behaviour.
+ *  Containers are the one dialect now (BUILDER_PLATFORM_SCOPE §2), so they ask
+ *  the tree what is on it instead. */
+function widgetsOf(node, out = []) {
+  if (!node || typeof node !== 'object') return out;
+  if (node.elType === 'widget') out.push(node);
+  (node.elements || []).forEach((c) => widgetsOf(c, out));
+  return out;
+}
+const widgetBound = (node, binding) =>
+  widgetsOf(node).find((w) => w.settings?._ia_field === binding) || null;
+
 /** A section a human built in Elementor: no `ia:` handle, no field markers. */
 const HAND_BUILT = Object.freeze({
   id: 'hand001',
@@ -148,7 +162,7 @@ test('editing a headline changes that setting and nothing else', () => {
   // Same ids, same structure, same everything else.
   assert.equal(patched.id, hero.id);
   assert.equal(patched.settings._title, hero.settings._title);
-  assert.equal(patched.settings.custom_height.size, hero.settings.custom_height.size);
+  assert.equal(patched.settings.min_height.size, hero.settings.min_height.size);
   assert.equal(
     JSON.stringify(extractFields(patched, 'hero').subheadline),
     JSON.stringify(extractFields(hero, 'hero').subheadline),
@@ -212,7 +226,7 @@ test('an FAQ question can be added and removed inside the one accordion widget',
   assert.equal(out[out.length - 1].question, 'Do you take card?');
   assert.equal(out[out.length - 1].answer, 'Yes, and bank transfer.');
   // Every repeater row keeps an _id, which Elementor needs.
-  const rows = grown.elements[0].elements.find((w) => w.widgetType === 'accordion').settings.tabs;
+  const rows = widgetBound(grown, 'faq.items').settings.tabs;
   assert.ok(rows.every((r) => typeof r._id === 'string' && r._id.length > 0));
 });
 
@@ -221,7 +235,7 @@ test('changing the form purpose rewrites the CSS class the interceptor routes on
   // Getting it wrong means a booking lands in the inbox as a plain contact.
   const contact = build('contact');
   const patched = applyFields(contact, 'contact', { form_purpose: 'booking', email_to: 'bookings@fernbrook.invalid' });
-  const form = patched.elements[0].elements[1].elements[1].elements[0];
+  const form = widgetBound(patched, 'contact.form');
   assert.equal(form.widgetType, 'form');
   assert.equal(form.settings.form_css_class, 'ia-booking');
   assert.equal(form.settings.email_to, 'bookings@fernbrook.invalid');
@@ -338,6 +352,7 @@ test('Lite is told WHY the form section is unavailable, not just denied it', () 
 
   const pro = sectionCatalog({ allowPro: true });
   assert.equal(pro.every((c) => c.available), true);
-  // Eight archetypes, plus pricing, team and stats from ARION pack 2.
-  assert.equal(pro.length, 11);
+  // Eight archetypes, plus pricing, team and stats from ARION pack 2, plus
+  // `content` — the free section the website builder adds (2026-09-16).
+  assert.equal(pro.length, 12);
 });
