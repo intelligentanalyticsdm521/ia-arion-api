@@ -11,7 +11,7 @@
 // goes red.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import {
   getBrandKit,
@@ -129,8 +129,14 @@ describe("what a client's PAGE ships with is not our brand", () => {
   // publish it. Neither is reached in the normal case any more (the kit always
   // answers with a complete palette) — which is exactly why the last resort
   // must not be ours: it only fires when we cannot tell.
+  //
+  // The emitters moved on 2026-09-17 (D-156): `elementorAdapter.js` is now the
+  // dispatch and `containerEmitters.js` draws every section, so the fallback
+  // colour is asserted where the colour is actually chosen. The sweep below
+  // then says the rule holds for the WHOLE builder, not only the two files
+  // somebody remembered to list — which is what stops the next move hiding it.
   const files = [
-    ["lib/websiteBuilder/elementorAdapter.js", "the Elementor JSON we publish"],
+    ["lib/websiteBuilder/containerEmitters.js", "the Elementor JSON we publish"],
     ["lib/websiteBuilder/sectionPreview.js", "the preview of an adopted section"],
   ];
 
@@ -142,4 +148,21 @@ describe("what a client's PAGE ships with is not our brand", () => {
       assert.match(code, /NEUTRAL_BRAND_COLOURS/, `${rel} must use the one neutral`);
     });
   }
+
+  test("NO file in the website builder hardcodes an IA brand colour", () => {
+    const dir = path.join(process.cwd(), "lib", "websiteBuilder");
+    const seen = [];
+    const sweep = (d) => {
+      for (const entry of readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, entry.name);
+        if (entry.isDirectory()) { sweep(full); continue; }
+        if (!entry.name.endsWith(".js")) continue;
+        const code = readFileSync(full, "utf8")
+          .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ 	]*\/\/.*$/gm, "");
+        if (/#1A3A4A|#FEC82C|#EF6C33/i.test(code)) seen.push(entry.name);
+      }
+    };
+    sweep(dir);
+    assert.deepEqual(seen, [], `IA brand colours reached a client page from: ${seen.join(", ")}`);
+  });
 });

@@ -23,7 +23,7 @@
  *   · make cardWidth() always return 100                    → "goldens" red
  *   · drop `_ia_field` from the services icon-box            → "round trip" red
  *   · make buildContentWidget ignore `previous`              → "keeps ids" red
- *   · point blockToElementorSection back at LEGACY_ADAPTERS  → "containers" red
+ *   · re-add a legacy `elType: 'section'` emitter to the adapter → "GONE" red
  */
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -31,7 +31,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
-  blockToElementorSection, legacyBlockToElementorSection, listSupportedKinds, __test__ as adapterTest,
+  blockToElementorSection, listSupportedKinds,
 } from '../lib/websiteBuilder/elementorAdapter.js';
 import { CONTAINER_EMITTERS, cardWidth, listContainerKinds } from '../lib/websiteBuilder/containerEmitters.js';
 import {
@@ -45,6 +45,21 @@ import { GOLDEN_BRAND, GOLDEN_BLOCKS } from './fixtures/container-golden-inputs.
 const GOLDENS = JSON.parse(
   readFileSync(path.join(process.cwd(), 'test', 'fixtures', 'container-goldens.json'), 'utf8'),
 );
+
+/**
+ * A page of each OLD shape, frozen as data.
+ *
+ * D-156 deleted the legacy `section` -> `column` -> `widget` emitters: nothing
+ * had called them since 2026-09-16 and a rebuild deletes the old system in the
+ * same pass. What the five live client sites need is not the emitters — it is
+ * that their pages still read, still patch and still re-publish untouched, and
+ * a page is DATA. `scripts/dev/capture-legacy-pages.mjs` wrote this file from
+ * the emitters on the last commit that had them.
+ */
+const LEGACY = JSON.parse(
+  readFileSync(path.join(process.cwd(), 'test', 'fixtures', 'legacy-page-goldens.json'), 'utf8'),
+);
+const clone = (v) => JSON.parse(JSON.stringify(v));
 
 const KINDS = listContainerKinds();
 
@@ -96,16 +111,17 @@ describe('containers are the only dialect we emit', () => {
     }
   });
 
-  test('the legacy emitters are still there, and nothing calls them', () => {
-    // Five live client sites carry pages built in the old dialect. The
-    // emitters stay as read-only import so those pages can be reproduced; the
-    // live path is containers, which is what the assertion above proves.
-    assert.equal(typeof legacyBlockToElementorSection, 'function');
-    assert.ok(Object.keys(adapterTest.LEGACY_ADAPTERS).length >= 11);
-    const legacy = legacyBlockToElementorSection({
-      kind: 'hero', block: GOLDEN_BLOCKS.hero, brand: GOLDEN_BRAND, seedId: 'legacy', blockId: 'x',
-    });
-    assert.deepEqual(elTypesOn(legacy), ['column', 'section', 'widget']);
+  test('the legacy emitters are GONE — one dialect means one way to draw a page', async () => {
+    const adapter = await import('../lib/websiteBuilder/elementorAdapter.js');
+    assert.equal(adapter.legacyBlockToElementorSection, undefined);
+    assert.equal(adapter.__test__.LEGACY_ADAPTERS, undefined);
+    const src = readFileSync(
+      path.join(process.cwd(), 'lib', 'websiteBuilder', 'elementorAdapter.js'), 'utf8');
+    assert.ok(!/elType: 'section'/.test(src), 'a legacy section emitter came back');
+    assert.ok(!/elType: 'column'/.test(src), 'a legacy column emitter came back');
+    // And the old pages are still here, as data, still in the old shape.
+    assert.ok(Object.keys(LEGACY).length >= 11);
+    assert.deepEqual(elTypesOn(LEGACY.hero), ['column', 'section', 'widget']);
   });
 
   test('a row of cards gets a width that lets four sit on one line', () => {
@@ -254,12 +270,11 @@ describe('model → Elementor → model', () => {
    ══════════════════════════════════════════════════════════════════════════ */
 
 describe('a page built in the old dialect is still readable and still editable', () => {
-  const legacyKinds = Object.keys(adapterTest.LEGACY_ADAPTERS);
+  const legacyKinds = Object.keys(LEGACY);
 
   for (const kind of legacyKinds) {
     test(`${kind}: the legacy node reads back through the ordinary path`, () => {
-      const block = GOLDEN_BLOCKS[kind] || starterBlock(kind, GOLDEN_BRAND);
-      const node = legacyBlockToElementorSection({ kind, block, brand: GOLDEN_BRAND, seedId: `l-${kind}`, blockId: 'l' });
+      const node = clone(LEGACY[kind]);
       const fields = extractFields(node, kind);
       const again = extractFields(applyFields(node, kind, fields), kind);
       assert.deepEqual(again, fields, kind);
@@ -267,9 +282,7 @@ describe('a page built in the old dialect is still readable and still editable',
   }
 
   test('editing a legacy page keeps it in the legacy dialect — we never silently rewrite a live page', () => {
-    const node = legacyBlockToElementorSection({
-      kind: 'services', block: GOLDEN_BLOCKS.services, brand: GOLDEN_BRAND, seedId: 'ls', blockId: 'l',
-    });
+    const node = clone(LEGACY.services);
     const fields = extractFields(node, 'services');
     const patched = applyFields(node, 'services', { ...fields, headline: 'Changed' });
     assert.equal(patched.elType, 'section');

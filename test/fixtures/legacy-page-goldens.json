@@ -1,0 +1,1055 @@
+{
+  "hero": {
+    "id": "c6fe5d7",
+    "elType": "section",
+    "settings": {
+      "_ia_field_section": "hero.background",
+      "structure": "10",
+      "layout": "full_width",
+      "height": "min-height",
+      "custom_height": {
+        "unit": "vh",
+        "size": 60
+      },
+      "content_position": "middle",
+      "background_background": "classic",
+      "background_color": "#1E4E57",
+      "background_image": {
+        "url": "",
+        "id": ""
+      },
+      "_title": "ia:hero:scratch:l"
+    },
+    "elements": [
+      {
+        "id": "df40657",
+        "elType": "column",
+        "settings": {
+          "_column_size": 100
+        },
+        "elements": [
+          {
+            "id": "e34d6d3",
+            "elType": "widget",
+            "widgetType": "heading",
+            "settings": {
+              "_ia_field": "hero.headline",
+              "title": "Commercial snow and ice, done before opening",
+              "size": "xl",
+              "header_size": "h1",
+              "align": "center"
+            }
+          },
+          {
+            "id": "8bacd75",
+            "elType": "widget",
+            "widgetType": "text-editor",
+            "settings": {
+              "_ia_field": "hero.subheadline",
+              "editor": "<p>Contracted plowing, salting and sidewalk clearing across the metro.</p>",
+              "align": "center"
+            }
+          },
+          {
+            "id": "fcc2abd",
+            "elType": "widget",
+            "widgetType": "button",
+            "settings": {
+              "_ia_field": "hero.cta",
+              "text": "Get a quote",
+              "link": {
+                "url": "#contact",
+                "is_external": "",
+                "nofollow": ""
+              },
+              "align": "center",
+              "size": "lg"
+            }
+          }
+        ]
+      }
+    ],
+    "isInner": false
+  },
+  "pricing": {
+    "id": "a0373bb",
+    "elType": "section",
+    "settings": {
+      "structure": "20",
+      "gap": "extended",
+      "_title": "ia:pricing:scratch:l"
+    },
+    "elements": [
+      {
+        "id": "6e007af",
+        "elType": "column",
+        "settings": {
+          "_column_size": 100
+        },
+        "elements": [
+          {
+            "id": "9d4e702",
+            "elType": "widget",
+            "widgetType": "heading",
+            "settings": {
+              "_ia_field": "pricing.headline",
+              "title": "What it costs",
+              "header_size": "h2",
+              "align": "center"
+            }
+          }
+        ]
+      },
+      {
+        "id": "cd39a5d",
+        "elType": "column",
+        "settings": {
+          "_column_size": 50
+        },
+        "elements": [
+          {
+            "id": "42521fc",
+            "elType": "widget",
+            "widgetType": "text-editor",
+            "settings": {
+              "_ia_field": "pricing.plans",
+              "editor": "<div class=\"ia-plan\" data-ia-offering=\"svc-push\">\n<h3 class=\"ia-plan-name\">Per push</h3>\n<p class=\"ia-plan-amount\">$185<span class=\"ia-plan-period\">per push</span></p>\n<p class=\"ia-plan-summary\">Charged each time we clear.</p>\n<ul class=\"ia-plan-features\"><li>Two-inch trigger</li><li>Lot and approach</li></ul>\n<p class=\"ia-plan-cta\"><a href=\"#contact\">Get a quote</a></p>\n</div>",
+              "align": "center"
+            }
+          }
+        ]
+      },
+      {
+        "id": "86bd4f4",
+        "elType": "column",
+        "settings": {
+          "_column_size": 50
+        },
+        "elements": [
+          {
+            "id": "888192a",
+            "elType": "widget",
+            "widgetType": "text-editor",
+            "settings": {
+              "_ia_field": "pricing.plans",
+              "editor": "<div class=\"ia-plan\" data-ia-offering=\"svc-seasonal\">\n<h3 class=\"ia-plan-name\">Seasonal</h3>\n<p class=\"ia-plan-amount\">$4,200<span class=\"ia-plan-period\">per season</span></p>\n<p class=\"ia-plan-summary\">One price, whatever the winter does.</p>\n<ul class=\"ia-plan-features\"><li>Unlimited pushes</li><li>Ice control included</li></ul>\n<p class=\"ia-plan-cta\"><a href=\"#contact\">Get a quote</a></p>\n</div>",
+              "align": "center"
+            }
+          }
+        ]
+      }
+    ],
+    "isInner": false
+  },
+  "team": {
+    "id": "b65cf98",
+    "elType": "section",
+    "settings": {
+      "structure": "20",
+      "gap": "extended",
+      "_title": "ia:team:scratch:l"
+    },
+    "elements": [
+      {
+        "id": "641cc03",
+        "elType": "column",
+        "settings": {
+          "_column_size": 100
+        },
+        "elements": [
+          {
+            "id": "46cdced",
+            "elType": "widget",
+            "widgetType": "heading",
+            "settings": {
+              "_ia_field": "team.headline",
+              "title": "The people at Northfield Snow & Ice",
+              "header_size": "h2",
+              "align": "center"
+            }
+          }
+        ]
+      },
+      {
+        "id": "a9d5cc7",
+        "elType": "column",
+        "settings": {
+          "_column_size": 50
+        },
+        "elements": [
+          {
+            "id": "cc77a04",
+            "elType": "widget",
+            "widgetType": "image-box",
+            "settings": {
+              "_ia_field": "team.members",
+              "image": {
+                "url": "https://example.invalid/wp-content/uploads/ray.jpg",
+                "id": 201,
+                "alt": "Ray Ostlund"
+              },
+              "title_text": "Ray Ostlund",
+              "description_text": "Owner and operations",
+              "position": "top",
+              "title_size": "h3"
+            }
+          }
+        ]
+      },
+      {
+        "id": "f47b4ce",
+        "elType": "column",
+        "settings": {
+          "_column_size": 50
+        },
+        "elements": [
+          {
+            "id": "4561ec9",
+            "elType": "widget",
+            "widgetType": "image-box",
+            "settings": {
+              "_ia_field": "team.members",
+              "image": {
+                "url": "",
+                "id": "",
+                "alt": ""
+              },
+              "title_text": "Jo Marek",
+              "description_text": "Dispatch",
+              "position": "top",
+              "title_size": "h3"
+            }
+          }
+        ]
+      }
+    ],
+    "isInner": false
+  },
+  "stats": {
+    "id": "336052a",
+    "elType": "section",
+    "settings": {
+      "structure": "20",
+      "gap": "extended",
+      "_title": "ia:stats:scratch:l"
+    },
+    "elements": [
+      {
+        "id": "06071ea",
+        "elType": "column",
+        "settings": {
+          "_column_size": 100
+        },
+        "elements": [
+          {
+            "id": "226f85d",
+            "elType": "widget",
+            "widgetType": "heading",
+            "settings": {
+              "_ia_field": "stats.headline",
+              "title": "By the numbers",
+              "header_size": "h2",
+              "align": "center"
+            }
+          }
+        ]
+      },
+      {
+        "id": "9299ec3",
+        "elType": "column",
+        "settings": {
+          "_column_size": 50
+        },
+        "elements": [
+          {
+            "id": "57b5a49",
+            "elType": "widget",
+            "widgetType": "counter",
+            "settings": {
+              "_ia_field": "stats.items",
+              "starting_number": 0,
+              "ending_number": "14",
+              "prefix": "",
+              "suffix": "",
+              "title": "Winters running"
+            }
+          }
+        ]
+      },
+      {
+        "id": "26286ca",
+        "elType": "column",
+        "settings": {
+          "_column_size": 50
+        },
+        "elements": [
+          {
+            "id": "5ad8057",
+            "elType": "widget",
+            "widgetType": "counter",
+            "settings": {
+              "_ia_field": "stats.items",
+              "starting_number": 0,
+              "ending_number": "50",
+              "prefix": "",
+              "suffix": "+",
+              "title": "Commercial sites"
+            }
+          }
+        ]
+      }
+    ],
+    "isInner": false
+  },
+  "services": {
+    "id": "38290aa",
+    "elType": "section",
+    "settings": {
+      "structure": "30",
+      "gap": "extended",
+      "_title": "ia:services:scratch:l"
+    },
+    "elements": [
+      {
+        "id": "b8c16d4",
+        "elType": "column",
+        "settings": {
+          "_column_size": 100
+        },
+        "elements": [
+          {
+            "id": "ce51ed9",
+            "elType": "widget",
+            "widgetType": "heading",
+            "settings": {
+              "_ia_field": "services.headline",
+              "title": "What we do",
+              "header_size": "h2",
+              "align": "center"
+            }
+          },
+          {
+            "id": "909bd90",
+            "elType": "widget",
+            "widgetType": "text-editor",
+            "settings": {
+              "_ia_field": "services.subheadline",
+              "editor": "<p>Three contracted services, priced per push or per season.</p>",
+              "align": "center"
+            }
+          }
+        ]
+      },
+      {
+        "id": "7b233d2",
+        "elType": "column",
+        "settings": {
+          "_column_size": 33
+        },
+        "elements": [
+          {
+            "id": "4205b6d",
+            "elType": "widget",
+            "widgetType": "icon-box",
+            "settings": {
+              "_ia_field": "services.items",
+              "selected_icon": {
+                "value": "fas fa-truck",
+                "library": "fa-solid"
+              },
+              "title_text": "Lot plowing",
+              "description_text": "Every push at a two-inch trigger.",
+              "position": "top",
+              "title_size": "h3"
+            }
+          }
+        ]
+      },
+      {
+        "id": "e4d6690",
+        "elType": "column",
+        "settings": {
+          "_column_size": 33
+        },
+        "elements": [
+          {
+            "id": "ae93b86",
+            "elType": "widget",
+            "widgetType": "icon-box",
+            "settings": {
+              "_ia_field": "services.items",
+              "selected_icon": {
+                "value": "fas fa-snowflake",
+                "library": "fa-solid"
+              },
+              "title_text": "Ice control",
+              "description_text": "Granular salt on every visit.",
+              "position": "top",
+              "title_size": "h3"
+            }
+          }
+        ]
+      },
+      {
+        "id": "f725de0",
+        "elType": "column",
+        "settings": {
+          "_column_size": 33
+        },
+        "elements": [
+          {
+            "id": "c5f3170",
+            "elType": "widget",
+            "widgetType": "icon-box",
+            "settings": {
+              "_ia_field": "services.items",
+              "selected_icon": {
+                "value": "fas fa-person-walking",
+                "library": "fa-solid"
+              },
+              "title_text": "Sidewalks",
+              "description_text": "Hand-cleared entrances and walks.",
+              "position": "top",
+              "title_size": "h3"
+            }
+          }
+        ]
+      }
+    ],
+    "isInner": false
+  },
+  "testimonials": {
+    "id": "7ea5b95",
+    "elType": "section",
+    "settings": {
+      "structure": "20",
+      "gap": "extended",
+      "_title": "ia:testimonials:scratch:l"
+    },
+    "elements": [
+      {
+        "id": "9d5a67c",
+        "elType": "column",
+        "settings": {
+          "_column_size": 100
+        },
+        "elements": [
+          {
+            "id": "092c7a2",
+            "elType": "widget",
+            "widgetType": "heading",
+            "settings": {
+              "_ia_field": "testimonials.headline",
+              "title": "What our customers say",
+              "header_size": "h2",
+              "align": "center"
+            }
+          }
+        ]
+      },
+      {
+        "id": "ccfc9f0",
+        "elType": "column",
+        "settings": {
+          "_column_size": 50
+        },
+        "elements": [
+          {
+            "id": "a818074",
+            "elType": "widget",
+            "widgetType": "text-editor",
+            "settings": {
+              "_ia_field": "testimonials.items",
+              "editor": "<p class=\"ia-rating\" aria-label=\"5 out of 5\">★★★★★</p>\n<blockquote><p>Lot was clear at 5am every single storm.</p></blockquote>\n<p class=\"ia-attribution\"><strong>Dana Whitfield</strong><br>Facilities, Brookline Dental</p>",
+              "align": "left"
+            }
+          }
+        ]
+      },
+      {
+        "id": "f0b43e8",
+        "elType": "column",
+        "settings": {
+          "_column_size": 50
+        },
+        "elements": [
+          {
+            "id": "f06c3f4",
+            "elType": "widget",
+            "widgetType": "text-editor",
+            "settings": {
+              "_ia_field": "testimonials.items",
+              "editor": "<p class=\"ia-rating\" aria-label=\"5 out of 5\">★★★★★</p>\n<blockquote><p>They text us when they are on site.</p></blockquote>\n<p class=\"ia-attribution\"><strong>Marco Reyes</strong><br>Owner, Reyes Auto</p>",
+              "align": "left"
+            }
+          }
+        ]
+      }
+    ],
+    "isInner": false
+  },
+  "cta": {
+    "id": "5baba99",
+    "elType": "section",
+    "settings": {
+      "structure": "10",
+      "layout": "full_width",
+      "height": "min-height",
+      "custom_height": {
+        "unit": "vh",
+        "size": 40
+      },
+      "content_position": "middle",
+      "background_background": "gradient",
+      "background_color": "#1E4E57",
+      "background_color_b": "#C9822A",
+      "_title": "ia:cta:scratch:l"
+    },
+    "elements": [
+      {
+        "id": "b7a60c9",
+        "elType": "column",
+        "settings": {
+          "_column_size": 100
+        },
+        "elements": [
+          {
+            "id": "f3aec29",
+            "elType": "widget",
+            "widgetType": "heading",
+            "settings": {
+              "_ia_field": "cta.headline",
+              "title": "Booking for the coming season now",
+              "header_size": "h2",
+              "align": "center"
+            }
+          },
+          {
+            "id": "bd9dd4b",
+            "elType": "widget",
+            "widgetType": "text-editor",
+            "settings": {
+              "_ia_field": "cta.subheadline",
+              "editor": "<p>Seasonal contracts close on 1 November.</p>",
+              "align": "center"
+            }
+          },
+          {
+            "id": "2b4103f",
+            "elType": "widget",
+            "widgetType": "button",
+            "settings": {
+              "_ia_field": "cta.primary",
+              "text": "Request a quote",
+              "link": {
+                "url": "#contact",
+                "is_external": "",
+                "nofollow": ""
+              },
+              "align": "center",
+              "size": "lg",
+              "button_type": "primary"
+            }
+          },
+          {
+            "id": "a36c120",
+            "elType": "widget",
+            "widgetType": "button",
+            "settings": {
+              "_ia_field": "cta.secondary",
+              "text": "Call the office",
+              "link": {
+                "url": "tel:+15155550142",
+                "is_external": "",
+                "nofollow": ""
+              },
+              "align": "center",
+              "size": "lg",
+              "button_type": "default"
+            }
+          }
+        ]
+      }
+    ],
+    "isInner": false
+  },
+  "about": {
+    "id": "b8995ec",
+    "elType": "section",
+    "settings": {
+      "structure": "10",
+      "gap": "extended",
+      "_title": "ia:about:scratch:l"
+    },
+    "elements": [
+      {
+        "id": "545c7bb",
+        "elType": "column",
+        "settings": {
+          "_column_size": 100
+        },
+        "elements": [
+          {
+            "id": "c43e14b",
+            "elType": "section",
+            "settings": {
+              "structure": "20",
+              "gap": "extended"
+            },
+            "elements": [
+              {
+                "id": "9a9e795",
+                "elType": "column",
+                "settings": {
+                  "_column_size": 50
+                },
+                "elements": [
+                  {
+                    "id": "4d09e25",
+                    "elType": "widget",
+                    "widgetType": "image",
+                    "settings": {
+                      "_ia_field": "about.image",
+                      "image": {
+                        "url": "",
+                        "id": "",
+                        "alt": "A plow truck clearing a car park at dawn"
+                      },
+                      "image_size": "large"
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "3ee5710",
+                "elType": "column",
+                "settings": {
+                  "_column_size": 50
+                },
+                "elements": [
+                  {
+                    "id": "dc34752",
+                    "elType": "widget",
+                    "widgetType": "heading",
+                    "settings": {
+                      "_ia_field": "about.headline",
+                      "title": "About Northfield Snow & Ice",
+                      "header_size": "h2",
+                      "align": "left"
+                    }
+                  },
+                  {
+                    "id": "9f8a810",
+                    "elType": "widget",
+                    "widgetType": "text-editor",
+                    "settings": {
+                      "_ia_field": "about.subheadline",
+                      "editor": "<p><em>Family run since 2011.</em></p>",
+                      "align": "left"
+                    }
+                  },
+                  {
+                    "id": "2d0f9fa",
+                    "elType": "widget",
+                    "widgetType": "text-editor",
+                    "settings": {
+                      "_ia_field": "about.story",
+                      "editor": "<p>We started with one truck and four accounts.</p>\n<p>Today we hold contracts on fifty commercial sites across the metro.</p>",
+                      "align": "left"
+                    }
+                  }
+                ]
+              }
+            ],
+            "isInner": false
+          },
+          {
+            "id": "cf98799",
+            "elType": "section",
+            "settings": {
+              "structure": "20",
+              "gap": "extended"
+            },
+            "elements": [
+              {
+                "id": "e95c873",
+                "elType": "column",
+                "settings": {
+                  "_column_size": 50
+                },
+                "elements": [
+                  {
+                    "id": "fcf8a12",
+                    "elType": "widget",
+                    "widgetType": "icon-box",
+                    "settings": {
+                      "_ia_field": "about.values",
+                      "selected_icon": {
+                        "value": "fas fa-star",
+                        "library": "fa-solid"
+                      },
+                      "title_text": "On site before open",
+                      "description_text": "Every trigger event, every account.",
+                      "position": "top",
+                      "title_size": "h4"
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "e8a9c8e",
+                "elType": "column",
+                "settings": {
+                  "_column_size": 50
+                },
+                "elements": [
+                  {
+                    "id": "54c29b7",
+                    "elType": "widget",
+                    "widgetType": "icon-box",
+                    "settings": {
+                      "_ia_field": "about.values",
+                      "selected_icon": {
+                        "value": "fas fa-star",
+                        "library": "fa-solid"
+                      },
+                      "title_text": "One price, written down",
+                      "description_text": "No storm-day surcharges.",
+                      "position": "top",
+                      "title_size": "h4"
+                    }
+                  }
+                ]
+              }
+            ],
+            "isInner": true
+          }
+        ]
+      }
+    ],
+    "isInner": false
+  },
+  "faq": {
+    "id": "fc201e3",
+    "elType": "section",
+    "settings": {
+      "structure": "10",
+      "gap": "extended",
+      "_title": "ia:faq:scratch:l"
+    },
+    "elements": [
+      {
+        "id": "ff396dd",
+        "elType": "column",
+        "settings": {
+          "_column_size": 100
+        },
+        "elements": [
+          {
+            "id": "ab86072",
+            "elType": "widget",
+            "widgetType": "heading",
+            "settings": {
+              "_ia_field": "faq.headline",
+              "title": "Questions we get asked",
+              "header_size": "h2",
+              "align": "center"
+            }
+          },
+          {
+            "id": "116c8b3",
+            "elType": "widget",
+            "widgetType": "accordion",
+            "settings": {
+              "_ia_field": "faq.items",
+              "tabs": [
+                {
+                  "_id": "8195c94",
+                  "tab_title": "What is a trigger depth?",
+                  "tab_content": "<p>The snowfall at which we come out without being called.</p>"
+                },
+                {
+                  "_id": "720d665",
+                  "tab_title": "Do you salt every visit?",
+                  "tab_content": "<p>On ice-control contracts, yes.</p>"
+                }
+              ],
+              "title_html_tag": "h3"
+            }
+          }
+        ]
+      }
+    ],
+    "isInner": false
+  },
+  "gallery": {
+    "id": "328b6ac",
+    "elType": "section",
+    "settings": {
+      "structure": "10",
+      "gap": "extended",
+      "_title": "ia:gallery:scratch:l"
+    },
+    "elements": [
+      {
+        "id": "5fa9603",
+        "elType": "column",
+        "settings": {
+          "_column_size": 100
+        },
+        "elements": [
+          {
+            "id": "f13dc32",
+            "elType": "widget",
+            "widgetType": "heading",
+            "settings": {
+              "_ia_field": "gallery.headline",
+              "title": "Our work",
+              "header_size": "h2",
+              "align": "center"
+            }
+          }
+        ]
+      },
+      {
+        "id": "e403901",
+        "elType": "column",
+        "settings": {
+          "_column_size": 100
+        },
+        "elements": [
+          {
+            "id": "4b800f5",
+            "elType": "widget",
+            "widgetType": "image-gallery",
+            "settings": {
+              "_ia_field": "gallery.items",
+              "gallery": [
+                {
+                  "id": "",
+                  "url": "https://example.invalid/wp-content/uploads/lot-1.jpg",
+                  "_meta_idx": 0
+                },
+                {
+                  "id": "",
+                  "url": "https://example.invalid/wp-content/uploads/walk-1.jpg",
+                  "_meta_idx": 1
+                }
+              ],
+              "gallery_columns": 3,
+              "gallery_link": "file",
+              "image_size": "medium_large",
+              "ia_gallery_meta": [
+                {
+                  "alt": "A cleared car park",
+                  "caption": "Brookline Dental",
+                  "category": "Lots"
+                },
+                {
+                  "alt": "A cleared footpath",
+                  "caption": "Reyes Auto",
+                  "category": "Walks"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "isInner": false
+  },
+  "contact": {
+    "id": "a6f2e7c",
+    "elType": "section",
+    "settings": {
+      "structure": "10",
+      "gap": "extended",
+      "_title": "ia:contact:scratch:l"
+    },
+    "elements": [
+      {
+        "id": "de11107",
+        "elType": "column",
+        "settings": {
+          "_column_size": 100
+        },
+        "elements": [
+          {
+            "id": "f65ea77",
+            "elType": "section",
+            "settings": {
+              "structure": "10",
+              "gap": "default"
+            },
+            "elements": [
+              {
+                "id": "bc727cb",
+                "elType": "column",
+                "settings": {
+                  "_column_size": 100
+                },
+                "elements": [
+                  {
+                    "id": "557d96d",
+                    "elType": "widget",
+                    "widgetType": "heading",
+                    "settings": {
+                      "_ia_field": "contact.headline",
+                      "title": "Get in touch",
+                      "header_size": "h2",
+                      "align": "center"
+                    }
+                  },
+                  {
+                    "id": "9cbf970",
+                    "elType": "widget",
+                    "widgetType": "text-editor",
+                    "settings": {
+                      "_ia_field": "contact.subheadline",
+                      "editor": "<p>Tell us the address and we will price it.</p>",
+                      "align": "center"
+                    }
+                  }
+                ]
+              }
+            ],
+            "isInner": true
+          },
+          {
+            "id": "bd000b1",
+            "elType": "section",
+            "settings": {
+              "structure": "20",
+              "gap": "extended"
+            },
+            "elements": [
+              {
+                "id": "f6f387c",
+                "elType": "column",
+                "settings": {
+                  "_column_size": 50
+                },
+                "elements": [
+                  {
+                    "id": "a5b3432",
+                    "elType": "widget",
+                    "widgetType": "icon-list",
+                    "settings": {
+                      "_ia_field": "contact.methods",
+                      "icon_list": [
+                        {
+                          "_id": "4b2a49d",
+                          "text": "Office: (515) 555-0142",
+                          "selected_icon": {
+                            "value": "fas fa-phone",
+                            "library": "fa-solid"
+                          },
+                          "link": {
+                            "url": "tel:+15155550142",
+                            "is_external": "",
+                            "nofollow": ""
+                          }
+                        },
+                        {
+                          "_id": "2851c0c",
+                          "text": "Email: office@northfield.invalid",
+                          "selected_icon": {
+                            "value": "fas fa-envelope",
+                            "library": "fa-solid"
+                          },
+                          "link": {
+                            "url": "mailto:office@northfield.invalid",
+                            "is_external": "",
+                            "nofollow": ""
+                          }
+                        }
+                      ],
+                      "view": "traditional",
+                      "space_between": {
+                        "unit": "px",
+                        "size": 16
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "bde19b0",
+                "elType": "column",
+                "settings": {
+                  "_column_size": 50
+                },
+                "elements": [
+                  {
+                    "id": "d12bcb4",
+                    "elType": "widget",
+                    "widgetType": "form",
+                    "settings": {
+                      "_ia_field": "contact.form",
+                      "form_name": "Contact",
+                      "form_css_class": "ia-quote",
+                      "form_fields": [
+                        {
+                          "_id": "49e814d",
+                          "custom_id": "name",
+                          "field_type": "text",
+                          "field_label": "Name",
+                          "placeholder": "",
+                          "required": "true",
+                          "width": "100"
+                        },
+                        {
+                          "_id": "824ceb4",
+                          "custom_id": "email",
+                          "field_type": "email",
+                          "field_label": "Email",
+                          "placeholder": "",
+                          "required": "true",
+                          "width": "100"
+                        },
+                        {
+                          "_id": "04a5d83",
+                          "custom_id": "phone",
+                          "field_type": "tel",
+                          "field_label": "Phone",
+                          "placeholder": "",
+                          "required": "true",
+                          "width": "100"
+                        },
+                        {
+                          "_id": "f584251",
+                          "custom_id": "square_footage",
+                          "field_type": "number",
+                          "field_label": "Square Footage",
+                          "placeholder": "",
+                          "required": "true",
+                          "width": "100"
+                        },
+                        {
+                          "_id": "96782f0",
+                          "custom_id": "message",
+                          "field_type": "textarea",
+                          "field_label": "Message",
+                          "placeholder": "",
+                          "required": "",
+                          "width": "100"
+                        }
+                      ],
+                      "button_text": "Send",
+                      "button_size": "md",
+                      "button_align": "left",
+                      "email_to": "office@northfield.invalid",
+                      "email_subject": "New message from Northfield Snow & Ice"
+                    }
+                  }
+                ]
+              }
+            ],
+            "isInner": true
+          }
+        ]
+      }
+    ],
+    "isInner": false
+  }
+}
