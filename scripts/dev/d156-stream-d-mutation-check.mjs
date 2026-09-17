@@ -58,12 +58,19 @@ const MUTATIONS = [
 let holes = 0;
 for (const m of MUTATIONS) {
   const original = readFileSync(m.file, 'utf8');
-  if (!original.includes(m.from)) {
+  /* THE FILE'S OWN LINE ENDINGS. These repos are CRLF on disk and the
+     mutations above are written with \n, so comparing them literally
+     SKIPPED a check and reported a guard as stale when the guard was fine.
+     Found by running this harness after the integration. */
+  const eol = original.indexOf('\r\n') >= 0 ? '\r\n' : '\n';
+  const from = m.from.split('\n').join(eol);
+  const to = m.to.split('\n').join(eol);
+  if (!original.includes(from)) {
     console.log(`SKIP  ${m.name} — the line it mutates has moved, so this check is stale`);
     holes += 1;
     continue;
   }
-  writeFileSync(m.file, original.replace(m.from, m.to), 'utf8');
+  writeFileSync(m.file, original.replace(from, to), 'utf8');
   let output = '';
   let failed = false;
   try {

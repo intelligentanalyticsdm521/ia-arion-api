@@ -72,7 +72,7 @@ const TREE = [{
           children: [{
             id: 'drive-card-b',
             type: 'widget',
-            kind: 'product_card',
+            kind: 'catalog_card',
             props: { itemId: 'svc-441', title: 'Full maintenance', ctaText: 'Choose this' },
           }],
         },

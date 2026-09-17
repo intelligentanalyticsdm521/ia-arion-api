@@ -70,7 +70,7 @@ const CHOOSE_YOUR_PLAN = {
         {
           id: 'c2',
           type: 'widget',
-          kind: 'product_card',
+          kind: 'catalog_card',
           props: { itemId: 'svc-441', title: 'Full maintenance', ctaText: 'Choose this' },
         },
       ],
@@ -218,7 +218,7 @@ describe('what we publish reads back as the tree we sent', () => {
     const node = treeToElementor(CHOOSE_YOUR_PLAN, PRO);
     const kinds = [];
     walk(node, (n) => { if (n.settings?.[WIDGET_MARKER]) kinds.push(n.settings[WIDGET_MARKER]); });
-    assert.deepEqual(kinds, ['heading', 'paragraph', 'card', 'product_card']);
+    assert.deepEqual(kinds, ['heading', 'paragraph', 'card', 'catalog_card']);
   });
 
   test('the outline of the page we read back is the outline of the page we sent', () => {
@@ -264,7 +264,7 @@ describe('every widget declares what plan it needs', () => {
   test('the paid ones are the paid ones, and ours are ours', () => {
     assert.deepEqual(proWidgetKinds(), ['card', 'form']);
     assert.deepEqual(iaWidgetKinds(), [
-      { kind: 'product_card', product: 'oliver', widgetType: 'ia_product_cards' },
+      { kind: 'catalog_card', product: 'oliver', widgetType: 'ia_product_cards' },
     ]);
   });
 
@@ -329,7 +329,7 @@ describe('every widget declares what plan it needs', () => {
 
   test('a product card whose widget the website has not got falls back with the same words', () => {
     const ctx = { allowPro: true, iaWidgets: [], seed: 'x' };
-    const { node, swapped } = resolveWidget('product_card', { itemId: 'svc-1', title: 'Full maintenance' }, ctx);
+    const { node, swapped } = resolveWidget('catalog_card', { itemId: 'svc-1', title: 'Full maintenance' }, ctx);
     assert.equal(node.elType, 'container');
     assert.ok(JSON.stringify(node).includes('Full maintenance'));
     assert.equal(swapped.reason, 'ia:oliver');
@@ -399,7 +399,7 @@ describe("Brandon's sentence, as a tree", () => {
       '  widget(paragraph)',
       '  container(row)',
       '    widget(card)',
-      '    widget(product_card)',
+      '    widget(catalog_card)',
     ]);
   });
 
@@ -473,6 +473,62 @@ describe('the builder\'s own document reads as a tree', () => {
       '    container(column)',
       '      widget(paragraph)',
     ]);
+  });
+
+  test('A CONTAINER WIDGET AT DEPTH becomes a nested Elementor container', () => {
+    /* INTEGRATION, 2026-09-17. The Portal's engine puts a box INSIDE a column,
+       as a widget whose kind is `container` with its children on the node and
+       its layout in `style` — Brandon's sentence: "Header, drag that into this
+       box and it's now its own section inside the box, then a text field under
+       it, then cards". `documentToTree` has to read that, or a page published
+       from the new builder would come out as a flat list.
+
+       The layout is translated HERE and only here: `style.direction` becomes
+       Elementor's `flex_direction`, which is why the Portal never has to speak
+       Elementor at all. */
+    const doc = {
+      v: 2,
+      settings: {},
+      sections: [{
+        id: 's1', label: 'Choose your plan', layout: 1, width: 'wide', padding: 24, theme: 'paper',
+        columns: [{
+          id: 'col1',
+          widgets: [{
+            id: 'b1', kind: 'container', props: {},
+            style: { direction: 'column', gap: 20 },
+            children: [
+              { id: 'h1', kind: 'heading', props: { text: 'Choose your plan' } },
+              { id: 'p1', kind: 'paragraph', props: { text: 'Pick one' } },
+              {
+                id: 'r1', kind: 'container', props: {},
+                style: { direction: 'row', gap: 16, justify: 'between' },
+                children: [
+                  { id: 'c1', kind: 'card', props: { title: 'Garden tidy', price: '120' } },
+                  { id: 'c2', kind: 'card', props: { title: 'Full maintenance', price: '240' } },
+                ],
+              },
+            ],
+          }],
+        }],
+      }],
+    };
+    const tree = documentToTree(doc);
+    assert.deepEqual(outline(tree[0]), [
+      'container(column)',
+      '  container(column)',
+      '    widget(heading)',
+      '    widget(paragraph)',
+      '    container(row)',
+      '      widget(card)',
+      '      widget(card)',
+    ]);
+    // …and the row's layout reached Elementor's own settings, once.
+    const row = tree[0].children[0].children[2];
+    assert.equal(row.layout, 'row');
+    assert.equal(row.justify, 'space-between');
+    const settings = layoutToSettings(row, 2);
+    assert.equal(settings.flex_direction, 'row');
+    assert.equal(settings.flex_justify_content, 'space-between');
   });
 
   test('a section that already nests is taken as it is — ONE reader, before and after', () => {
