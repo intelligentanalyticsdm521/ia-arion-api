@@ -104,6 +104,10 @@ import {
 import {
   saveProposal, markProposalsApplied, resolveProposal, listProposals,
 } from '../../lib/websiteBuilder/proposalStore.js';
+// D-05: an unpublished change has somewhere to live that is NOT the live page.
+import {
+  saveDraft, getDraft, clearDraft, draftPageIds, wouldUnpublish, UNPUBLISH_REFUSAL,
+} from '../../lib/websiteBuilder/pageDraftStore.js';
 import {
   libraryPickerRows, buildLibrarySection, neutraliseSampleWords,
 } from '../../lib/websiteBuilder/libraryCatalog.js';
@@ -280,9 +284,15 @@ router.get('/pages', async (req, res) => {
     if (!result.ok) return pluginFailure(res, result, 'reading your pages');
 
     const pages = Array.isArray(result.data?.pages) ? result.data.pages : [];
+    // D-05: which live pages have work saved but not published. One query for
+    // the whole list — a row per page would be a round trip per row, and the
+    // Pages screen is the first thing a client opens.
+    const withDrafts = await draftPageIds(pool, { tenantId, siteId });
     return res.json({
       data: {
         pages: pages.map((p) => ({
+          /** Work saved in the builder that the public has not seen (D-05). */
+          hasUnpublishedDraft: withDrafts.has(Number(p.page_id)),
           pageId: Number(p.page_id),
           title: String(p.title || '(no title)'),
           slug: String(p.slug || ''),
@@ -436,9 +446,17 @@ router.get('/pages/:pageId/sections', async (req, res) => {
       if (!byHandle.has(row.handle)) byHandle.set(row.handle, row);
     }
 
+    /* D-05: the unpublished draft, if the author left one. `sections` below is
+     * still WHAT IS LIVE — the two are sent side by side rather than one
+     * overwriting the other, because "Live · draft saved, not published" is
+     * two facts and a screen that can only hold one of them is how the walk
+     * ended up looking at a 404. */
+    const draft = await getDraft(pool, { tenantId, siteId, pageId });
+
     return res.json({
       data: {
         pageId: Number(data.page_id) || pageId,
+        draft: draft ? { savedAt: draft.savedAt, savedBy: draft.savedBy, title: draft.title, sections: draft.sections } : null,
         title: String(data.title || ''),
         slug: String(data.slug || ''),
         status: String(data.status || 'draft'),
@@ -610,6 +628,27 @@ router.put('/pages/:pageId/sections', async (req, res) => {
     const site = await loadSite(pool, tenantId, siteId);
     if (!site) return notFound(res, 'That website is not on your account.');
 
+    /* ── D-05: A SAVE NEVER TAKES A PAGE OFF THE INTERNET ────────────────
+     * "Save draft" on a live page used to send status:'draft', which is the
+     * same wire as Unpublish — the public URL started returning 404 and the
+     * only clue was the page moving into a list headed "Nobody can see these".
+     * An unpublished change now lives in arion.site_page_draft (PUT
+     * /pages/:pageId/draft); the one way to make a live page a draft is to say
+     * so, which the Portal only does behind the Unpublish confirm.
+     *
+     * The page's CURRENT status is read from the website, not taken from the
+     * caller: a client that got it wrong would otherwise talk its way past the
+     * guard. */
+    if (status === 'draft' && req.body?.unpublish !== true) {
+      const current = await fetchPageSections(site, pageId);
+      const currentStatus = current.ok ? String(current.data?.status || '') : '';
+      if (wouldUnpublish({ currentStatus, requestedStatus: status, unpublish: req.body?.unpublish })) {
+        return res.status(409).json({
+          error: { code: 'WOULD_UNPUBLISH', message: UNPUBLISH_REFUSAL, status: 409 },
+        });
+      }
+    }
+
     // Ahead of everything: a site with no Elementor cannot render what we are
     // about to write, and writing it anyway is the blank page this pack exists
     // to stop. The plugin refuses too — two ends, on purpose.
@@ -660,9 +699,16 @@ router.put('/pages/:pageId/sections', async (req, res) => {
       ? await markProposalsApplied(pool, { tenantId, siteId, proposalIds })
       : { applied: 0, ids: [] };
 
+    /* The write reached the website, so whatever was being held back is now on
+     * it: the draft has been consumed and the row goes. Cleared AFTER the
+     * write, never alongside it — the same ordering as the proposal stamp
+     * above, and for the same reason. */
+    const draftCleared = await clearDraft(pool, { tenantId, siteId, pageId });
+
     return res.json({
       data: {
         pageId,
+        draftCleared: draftCleared.removed > 0,
         status: result.data?.status || status || null,
         permalink: result.data?.permalink || null,
         previewUrl: result.data?.preview_url || null,
@@ -676,6 +722,116 @@ router.put('/pages/:pageId/sections', async (req, res) => {
     });
   } catch (err) {
     return boom(res, err, 'arion/pages:save');
+  }
+});
+
+/* ==========================================================================
+ * PUT /pages/:pageId/draft — hold this work beside the live page (D-05).
+ * DELETE /pages/:pageId/draft — throw it away.
+ * --------------------------------------------------------------------------
+ * Body: { sections: [...], title? }
+ *
+ * This is what "Save draft" means on a page that is already on the internet.
+ * Nothing is sent to the website: the visitor keeps seeing what they were
+ * seeing, and the author's work is here when they come back. Publishing is the
+ * ordinary PUT /sections with status=publish, which consumes the row.
+ *
+ * The sections are validated the same way a save validates them — a draft you
+ * cannot publish is a trap, and finding out at Publish time is exactly the
+ * "I pressed the button and nothing happened" the walk wrote up.
+ * ======================================================================== */
+router.put('/pages/:pageId/draft', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const pageId = readPageId(req.params.pageId);
+  const incoming = Array.isArray(req.body?.sections) ? req.body.sections : null;
+  const title = req.body?.title == null ? null : String(req.body.title).trim();
+
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
+  if (!incoming || incoming.length === 0) return bad(res, 'NO_SECTIONS', 'There is nothing to save yet.');
+  if (incoming.length > MAX_SECTIONS_PER_PAGE) {
+    return bad(res, 'TOO_MANY_SECTIONS', `A page can hold up to ${MAX_SECTIONS_PER_PAGE} sections.`);
+  }
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+
+    const brand = await loadBrandContext(pool, { tenantId, siteId });
+    const { nodes, errors } = buildNodes(incoming, brand);
+    if (errors.length > 0) {
+      return res.status(422).json({
+        error: {
+          code: 'CONTENT_NOT_VALID',
+          message: 'Some of what you typed needs another look. Nothing was saved.',
+          status: 422,
+        },
+        errors,
+      });
+    }
+    if (nodes.length !== incoming.length) {
+      return res.status(500).json({
+        error: {
+          code: 'SECTION_COUNT_MISMATCH',
+          message: 'We could not hold that draft safely, so nothing was saved.',
+          status: 500,
+        },
+      });
+    }
+
+    const stored = await saveDraft(pool, {
+      tenantId, siteId, pageId, sections: incoming, title,
+      savedBy: req.user?.email || null,
+    });
+    // NEVER a green answer on a write that did not land
+    // (reference_catch_swallow_report_success).
+    if (!stored.ok) {
+      return res.status(503).json({
+        error: { code: 'DRAFT_NOT_HELD', message: stored.reason, status: 503 },
+      });
+    }
+
+    return res.json({
+      data: {
+        pageId,
+        savedAt: stored.savedAt,
+        sectionsHeld: incoming.length,
+        /** Said out loud, because it is the whole point of this route. */
+        published: false,
+      },
+      meta: { site_id: siteId },
+    });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:draft-save');
+  }
+});
+
+router.delete('/pages/:pageId/draft', async (req, res) => {
+  const tenantId = req.tenant?.tenantId;
+  const { siteId } = req.params;
+  const pageId = readPageId(req.params.pageId);
+  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
+  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
+
+  try {
+    const pool = await getServicesPool();
+    const site = await loadSite(pool, tenantId, siteId);
+    if (!site) return notFound(res, 'That website is not on your account.');
+    const cleared = await clearDraft(pool, { tenantId, siteId, pageId });
+    if (!cleared.ok) {
+      return res.status(503).json({
+        error: {
+          code: 'DRAFT_NOT_CLEARED',
+          message: 'We could not throw that draft away. Nothing on your website changed.',
+          status: 503,
+        },
+      });
+    }
+    return res.json({ data: { pageId, removed: cleared.removed }, meta: { site_id: siteId } });
+  } catch (err) {
+    return boom(res, err, 'arion/pages:draft-clear');
   }
 });
 
