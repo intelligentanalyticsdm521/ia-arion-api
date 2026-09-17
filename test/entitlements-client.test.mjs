@@ -5,17 +5,37 @@
 // tier from arion.site.arion_tier / arion.tenant.plan and nothing else, so a
 // business that bought ARION Pro in Stripe but whose site row still said
 // "standard" was Pro in the Portal, Pro in LUMEN and Standard here.
+//
+// No .env, no pool. resolveArionTier genuinely reaches db/servicesPool.js for
+// the site row, so a developer with a .env and the dev container up had this
+// file opening a REAL connection to read a fixture tenant that is not in that
+// database — the gate's own catch already answers with the purchased tier when
+// the row is unreadable, so the assertions are identical either way. Blanking it
+// stopped being optional on 2026-09-17: the production keep-alive holds a pooled
+// connection for TEN MINUTES (min 2 / SQL_POOL_IDLE_MS 600000, db/poolRecovery.js)
+// instead of the 30 seconds it used to, so one accidental connection stops this
+// process exiting at all.
+//
+// The three app modules are therefore imported DYNAMICALLY, below the
+// assignments: a static `import` is hoisted above every statement in this file,
+// so db/servicesPool.js would read the real env at load and the blanking would
+// arrive too late to mean anything.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
+process.env.SQL_SERVER = "";
+process.env.SERVICES_SQL_SERVER = "";
+process.env.PLATFORM_SQL_SERVER = "";
+
+const {
   getEntitlements, clearEntitlementCache, productOf, addonOf, mayUseFeature, maySpend,
-} from "../lib/entitlements.js";
-import { RANK, rankOf, tierMeets } from "../lib/entitlementsRule.js";
-import { higherTier, resolveArionTier, requireArionTier } from "../middleware/requireArionTier.js";
+} = await import("../lib/entitlements.js");
+const { RANK, rankOf, tierMeets } = await import("../lib/entitlementsRule.js");
+const { higherTier, resolveArionTier, requireArionTier } =
+  await import("../middleware/requireArionTier.js");
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CASES = JSON.parse(fs.readFileSync(path.join(ROOT, "test", "fixtures", "entitlement-rule-cases.json"), "utf8"));

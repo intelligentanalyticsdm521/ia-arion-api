@@ -43,14 +43,19 @@ const MUTATIONS = [
     id: "M3",
     what: "swallow the second failure and answer success",
     file: "db/poolRecovery.js",
-    find: 'loud("retry-failed-after-rebuild", secondError);',
-    replace: 'loud("retry-failed-after-rebuild", secondError); return undefined;',
+    // MERGE 2026-09-17 — the per-recovery `loud()` became `say()`, a thin wrapper
+    // over the one `loud()` this file shares with the connect retry and the swap.
+    find: 'say("retry-failed-after-rebuild", secondError);',
+    replace: 'say("retry-failed-after-rebuild", secondError); return undefined;',
   },
   {
     id: "M4",
     what: "remove the 30-second bound — a broken identity becomes a token storm",
     file: "db/poolRecovery.js",
-    find: 'if (lastRebuildAt && at - lastRebuildAt < rebuildMinIntervalMs()) return "refused";',
+    // MERGE 2026-09-17 — the bound is now the shared createFreshCredentialBound()
+    // the connect retry and the holder also draw on, instead of this file's own
+    // rebuildMinIntervalMs()/lastRebuildAt pair.
+    find: 'if (!budget.may()) return "refused";',
     replace: 'if (false) return "refused";',
   },
   {
@@ -83,10 +88,23 @@ const MUTATIONS = [
   },
   {
     id: "M9",
-    what: "the services pool stops rebuilding before its token expires",
-    file: "db/servicesPool.js",
-    find: "if (poolPromise && Date.now() < poolTokenExpiresAt - TOKEN_REFRESH_BUFFER_MS) {",
-    replace: "if (poolPromise) {",
+    what: "the pool stops replacing itself before its token expires",
+    // MERGE 2026-09-17 — this used to mutate a `poolPromise && Date.now() <
+    // poolTokenExpiresAt - TOKEN_REFRESH_BUFFER_MS` line in each pool module.
+    // The production hotfix moved that decision into createPoolHolder, so the
+    // module has no copy of it to break any more and the mutation aims where the
+    // decision actually lives. The behaviour pinned is the same one: a pool whose
+    // token is about to die must be replaced.
+    file: "db/poolRecovery.js",
+    find: "    if (current && now() < currentExpiresAt - refreshBufferMs) return current;",
+    replace: "    if (current) return current; // MUTANT M9",
+  },
+  {
+    id: "M9b",
+    what: "a refused login DRAINS the pool instead of marking it stale",
+    file: "db/platformPool.js",
+    find: "export function invalidatePlatformPool() {\n  holder.markStale();\n}",
+    replace: "export function invalidatePlatformPool() {\n  holder.invalidate(); // MUTANT M9b\n}",
   },
   {
     id: "M10",

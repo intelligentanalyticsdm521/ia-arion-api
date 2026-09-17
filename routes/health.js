@@ -1,3 +1,14 @@
+// routes/health.js — /health has to say WHICH database is unhappy and WHY, and
+// WHICH build is answering.
+//
+// OUT OF THE 2026-09-16 AND 2026-09-17 PRODUCTION INCIDENTS: the SQL server
+// refused ~85% of NEW managed-identity logins to iadm_services while
+// iadm_platform kept answering. The old route awaited both pools inside ONE try,
+// so a single failure reported nothing about the other database and the error
+// body named neither — which is how a multi-hour P0 was read for hours as "both
+// databases are down" when only one was refusing logins. It also dropped the
+// build identity the moment SQL stopped answering, so the only way to confirm
+// what was deployed during the incident was to read wwwroot through Kudu.
 import express from "express";
 import fs from "node:fs";
 import path from "node:path";

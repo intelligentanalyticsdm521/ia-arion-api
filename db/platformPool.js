@@ -1,3 +1,19 @@
+// db/platformPool.js — the iadm_platform pool (and the shared credential).
+//
+// RESILIENCE ADDED 2026-09-17 (production incidents 2026-09-16 00:05–06:15Z and
+// 2026-09-17 06:20–12:10Z): the SQL server refused ~85% of NEW managed-identity
+// logins to iadm_services with "Login failed for user '<token-identified
+// principal>'" (tedious ELOGIN / SQL 18456), while connections ALREADY OPEN in a
+// pool kept serving. oliver-api went down because its pool was max 10 / min 0 /
+// idle 30s — every quiet minute forced a fresh login. This pool was built the
+// same way, and on top of that it closed the whole live pool every hour on a
+// token-expiry timer BEFORE trying to build the replacement.
+//
+// The fix is in the POOL, not in authentication — no SQL passwords, no auth-mode
+// change, no new identity. All four parts live in ONE place, db/poolRecovery.js:
+// the bounded login retry, the tarn options that give a connection created for a
+// query the same tickets, the keep-alive sizing (min 2 / idle 10 min), and the
+// lazy swap that keeps the live pool serving until its replacement is connected.
 import sql from "mssql";
 import {
   DefaultAzureCredential,
@@ -5,7 +21,15 @@ import {
   ManagedIdentityCredential,
 } from "@azure/identity";
 import dotenv from "dotenv";
-import { createPoolRecovery, isLoginFailure } from "./poolRecovery.js";
+import {
+  connectWithLoginRetry,
+  createFreshCredentialBound,
+  createPoolHolder,
+  createPoolRecovery,
+  poolSizingOptions,
+  tarnLoginRetryOptions,
+  isLoginFailure,
+} from "./poolRecovery.js";
 
 dotenv.config();
 
@@ -47,18 +71,12 @@ function withTimeout(promise, ms, label) {
 }
 
 /**
- * A FACTORY, not a cache — and that is load-bearing, not an accident.
- *
- * Both pools call this on every rebuild. An @azure/identity credential keeps
- * its token cache inside the instance, so a NEW instance means a genuinely new
- * token request; that is exactly what an ELOGIN recovery needs, because the
- * whole point of the retry is a token that did NOT come out of the cache Azure
- * SQL has already refused. oliver-api caches its credential and therefore has
- * to call `resetCredential()` from every discard; this repo gets the same
- * property from construction and has nothing to reset.
- *
- * Memoising this for performance would silently make every recovery retry with
- * the refused token. test/pool-recovery.test.mjs holds that line.
+ * A FACTORY, deliberately: a NEW @azure/identity credential on every call, each
+ * with its own empty token cache, so every login-retry attempt presents a
+ * genuinely new token rather than the one Azure SQL has already refused.
+ * oliver-api caches this and has to call resetCredential() on its 3rd attempt to
+ * buy the same property; this repo has it structurally. Do NOT memoise it —
+ * test/pool-login-retry.test.js pins it for exactly that reason.
  */
 export function getCredential() {
   if (authMode === "MANAGED_IDENTITY") return new ManagedIdentityCredential();
@@ -66,35 +84,20 @@ export function getCredential() {
   return new DefaultAzureCredential();
 }
 
-let poolPromise = null;
-// Unix-ms timestamp when the cached pool's auth token expires.
-// Managed Identity SQL tokens last ~1 hour; we proactively rebuild 5 min
-// before expiry so we never serve a request with an expired token.
-let poolTokenExpiresAt = 0;
-const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+// At most one forced fresh-credential build per pool per 30s, so a genuinely
+// broken identity cannot become a token-fetch storm against IMDS.
+const freshBound = createFreshCredentialBound();
+
+// Expiry of the token the build currently in flight is presenting. Promoted to
+// the holder's own expiry only when that build SUCCEEDS — a failed rebuild must
+// never leave the app believing the pool it is still serving from was reissued.
+let pendingTokenExpiresAt = 0;
 
 /**
- * Returns a connected mssql ConnectionPool for the iadm_platform database.
- *
- * Token-expiry handling: the cached pool is reused only while its auth
- * token still has >5min of life. Otherwise we tear down the old pool and
- * build a fresh one. This fixes the long-standing "token is expired" 500s
- * that would surface after the App Service had been running for 1+ hour.
+ * ONE attempt at building the pool. Called up to 4 times, 400ms apart, by
+ * connectWithLoginRetry. See getCredential() on why no credential is dropped.
  */
-export async function getPlatformPool() {
-  if (poolPromise && Date.now() < poolTokenExpiresAt - TOKEN_REFRESH_BUFFER_MS) {
-    return poolPromise;
-  }
-
-  if (poolPromise) {
-    try {
-      const oldPool = await poolPromise;
-      oldPool.close().catch(() => {});
-    } catch { /* ignore */ }
-    poolPromise = null;
-    poolTokenExpiresAt = 0;
-  }
-
+const attemptBuild = async (attempt) => {
   if (!sqlServer) throw new Error("PLATFORM_SQL_SERVER (or SQL_SERVER) env var is required for arion-api");
 
   const connectTimeoutMs = Number(process.env.SQL_CONNECT_TIMEOUT_MS || "12000");
@@ -109,11 +112,11 @@ export async function getPlatformPool() {
   if (!useSqlAuth) {
     const credential = getCredential();
     token = await withTimeout(credential.getToken(SQL_SCOPE), connectTimeoutMs, "ManagedIdentity getToken");
-    poolTokenExpiresAt = token.expiresOnTimestamp || (Date.now() + 50 * 60 * 1000);
+    pendingTokenExpiresAt = token.expiresOnTimestamp || (Date.now() + 50 * 60 * 1000);
   } else {
     // SQL auth does not expire the way a bearer token does; keep the pool for
     // a day so the refresh path stays a single code path.
-    poolTokenExpiresAt = Date.now() + 24 * 60 * 60 * 1000;
+    pendingTokenExpiresAt = Date.now() + 24 * 60 * 60 * 1000;
   }
 
   const { host: sqlHost, port: sqlPort } = parseServer(sqlServer);
@@ -131,34 +134,59 @@ export async function getPlatformPool() {
       : { type: "azure-active-directory-access-token", options: { token: token.token } },
     pool: {
       max: 10,
-      min: 0,
-      idleTimeoutMillis: 30000,
+      // KEEP-ALIVE: min 2 / idle 10 min, replacing min 0 / idle 30s. Holding
+      // connections is the defence — the ones that survived both incidents were
+      // the ones already open. No timer: a keepalive that opens connections is
+      // a keepalive that opens LOGINS, which is the thing that was failing.
+      ...poolSizingOptions(),
+      // The same four tickets, one layer down — the layer live traffic fails at.
+      // mssql's own default is propagateCreateError:true, so the FIRST refused
+      // login on a connection created for a query goes straight back to that
+      // query, turning an 85% login failure rate into an 85% REQUEST failure
+      // rate. Bounded by acquireTimeoutMillis so a dead database still fails.
+      ...tarnLoginRetryOptions(),
     },
   };
 
-  poolPromise = withTimeout(
-    new sql.ConnectionPool(config)
-      .connect()
-      .then((pool) => {
-        // mssql emits 'error' on the pool whenever a connection cannot be
-        // ACQUIRED — which is precisely what a refused token looks like to the
-        // call sites that hold the pool directly and never see a connect
-        // error. Without this listener those queries fail forever against a
-        // pool nothing ever rebuilds. An unhandled 'error' on an EventEmitter
-        // also throws, so this is load-bearing twice over.
-        pool.on("error", (err) => recovery.onPoolError(err));
-        return pool;
-      })
-      .catch((err) => {
-        poolPromise = null;
-        poolTokenExpiresAt = 0;
-        throw err;
-      }),
+  const pool = await withTimeout(
+    new sql.ConnectionPool(config).connect(),
     connectTimeoutMs,
-    "SQL ConnectionPool.connect"
+    `SQL ConnectionPool.connect (attempt ${attempt})`,
   );
+  // mssql emits 'error' on the pool whenever a connection cannot be ACQUIRED —
+  // exactly what a refused login produces for a NEW connection while the pooled
+  // ones keep working. Hand it to the recovery, which MARKS THE POOL STALE and
+  // says so in one loud line — it never closes it, so the live connections this
+  // fix exists to protect keep serving while the lazy swap builds a replacement.
+  // Without a listener Node re-throws from inside emit() and the line never
+  // reaches the log at all, so this is load-bearing twice over.
+  pool.on("error", (err) => recovery.onPoolError(err));
+  return pool;
+};
 
-  return poolPromise;
+const holder = createPoolHolder({
+  label: "platform",
+  connect: async () => {
+    const pool = await connectWithLoginRetry({
+      label: "platform",
+      build: attemptBuild,
+      tokenExpiresAt: () => pendingTokenExpiresAt,
+      mayTakeFreshCredential: () => freshBound.may(),
+    });
+    return { pool, tokenExpiresAt: pendingTokenExpiresAt };
+  },
+});
+
+/**
+ * Returns a connected mssql ConnectionPool for the iadm_platform database.
+ *
+ * The pool is reused while its auth token still has >5min of life. Past that it
+ * is replaced LAZILY — see createPoolHolder: the live pool keeps serving until
+ * the replacement is connected, and if the replacement cannot be built (a
+ * refused login) the live pool is handed back rather than drained.
+ */
+export async function getPlatformPool() {
+  return holder.get();
 }
 
 /**
@@ -263,38 +291,39 @@ export async function updateSharedProfile(tenantId, fields) {
 }
 
 /**
- * THE discard for this pool: drop the cached pool promise, zero the token
- * expiry, and close the old pool in the background. Takes effect SYNCHRONOUSLY
- * (the close finishes later) so a concurrent caller cannot pick the poisoned
- * pool back up, and the next getPlatformPool() takes its token from a NEW
- * credential instance (getCredential is a factory — see its comment).
+ * THE discard for this pool: mark the held pool stale so the very next
+ * getPlatformPool() builds a replacement from a new token.
  *
- * Was a dead export until 2026-09-16; it is now the primitive the ELOGIN
- * recovery below is built on.
+ * IT DOES NOT CLOSE THE POOL. Azure SQL checks a token at LOGIN and never again,
+ * so the connections already in this pool keep serving right through a refusal
+ * window — tearing them down to chase a login that is being refused is what took
+ * oliver-api down on 2026-09-16 and 2026-09-17. `holder.markStale()` hands the
+ * replacement job to the LAZY SWAP, which closes the old pool only once the new
+ * one is connected and hands the old one back if the new login is refused.
+ *
+ * Takes effect SYNCHRONOUSLY so a concurrent caller cannot keep treating the
+ * refused token as good.
  */
 export function invalidatePlatformPool() {
-  if (poolPromise) {
-    poolPromise.then((p) => p.close().catch(() => {})).catch(() => {});
-  }
-  poolPromise = null;
-  poolTokenExpiresAt = 0;
+  holder.markStale();
 }
 
-// ── ELOGIN recovery ──────────────────────────────────────────────────────────
-// One shared helper (db/poolRecovery.js); this module only supplies the four
-// things that differ per pool. See that file for the incident this exists for.
+// ── ELOGIN recovery for a pool that is ALREADY UP ──────────────────────────
+// One shared helper (db/poolRecovery.js); this module only supplies the things
+// that differ per pool, including the ONE 30s bound it shares with the connect
+// retry above. See that file for the incidents this exists for.
 const recovery = createPoolRecovery({
   label: "platform",
   connect: () => getPlatformPool(),
   discard: () => invalidatePlatformPool(),
-  tokenExpiresAt: () => poolTokenExpiresAt,
+  tokenExpiresAt: () => holder._expiresAt(),
+  bound: freshBound,
 });
 
 /**
  * Run `fn(pool)` against the platform database, recovering ONCE from a refused
- * login (a managed-identity token Azure SQL will not accept) by discarding the
- * pool, taking a new token from a new credential and retrying. A second failure
- * throws the ORIGINAL error; a non-login error is never retried.
+ * login by marking the pool stale, rebuilding from a new token and retrying. A
+ * second failure throws the ORIGINAL error; a non-login error is never retried.
  */
 export function withPlatformPool(fn) {
   return recovery.withPool(fn);
@@ -302,4 +331,6 @@ export function withPlatformPool(fn) {
 
 /** Test hooks — no production path reads these. */
 export const _platformRecovery = recovery;
+export const _platformFreshBound = freshBound;
+export const _platformHolder = holder;
 export { isLoginFailure };

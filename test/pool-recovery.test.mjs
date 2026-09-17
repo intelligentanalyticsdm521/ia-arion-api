@@ -34,7 +34,7 @@ process.env.SERVICES_SQL_SERVER = "";
 process.env.PLATFORM_SQL_SERVER = "";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const { isLoginFailure, createPoolRecovery, rebuildMinIntervalMs } = await import("../db/poolRecovery.js");
+const { isLoginFailure, createPoolRecovery, freshCredentialMinIntervalMs } = await import("../db/poolRecovery.js");
 
 /* ── the errors production actually throws ────────────────────────────────── */
 
@@ -195,7 +195,7 @@ test("a non-login failure is NOT retried and reaches the caller unchanged", asyn
 /* ── 3. the bound: a broken identity must not become a token storm ────────── */
 
 test("at most one rebuild per 30s per pool; inside the window the error is thrown at once", async () => {
-  assert.equal(rebuildMinIntervalMs(), 30_000, "the bound is 30 seconds");
+  assert.equal(freshCredentialMinIntervalMs(), 30_000, "the bound is 30 seconds");
   const clock = { t: 1_700_000_000_000 };
   const h = harness({ connectResults: [eloginError(), { id: "fresh" }], clock });
 
@@ -313,6 +313,18 @@ test("both pool modules use the ONE shared helper and hand the pool's error even
       `${file} must hand the mssql pool's own 'error' event to the recovery — without it every call site `
       + "that holds the pool directly never poisons it and never recovers");
     assert.match(src, new RegExp(`discard: \\(\\) => ${invalidate}\\(\\)`), `${file} discards through the one primitive`);
+    // MERGE 2026-09-17 — and that primitive MARKS THE POOL STALE, it does not
+    // drain it. This recovery was written on 2026-09-16, when the discard closed
+    // the pool; the 2026-09-17 outage proved that closing is the outage, because
+    // Azure SQL checks a token AT LOGIN and never again, so the connections
+    // already in the pool keep working while every NEW login is refused.
+    // holder.markStale() hands the replacing to the lazy swap, which closes the
+    // old pool only once a replacement has connected and hands it straight back
+    // if that replacement is refused.
+    assert.match(src, /holder\.markStale\(\);/,
+      `${file}: the discard must MARK the pool stale, not close it`);
+    assert.equal(/holder\.invalidate\(\)/.test(src), false,
+      `${file}: draining on a refused login throws away the only connections still working`);
     // No second copy of the mechanism.
     assert.equal(/function isLoginFailure/.test(src), false, `${file} must not define its own classifier`);
     assert.equal(/["']ELOGIN["']/.test(src), false,
@@ -320,16 +332,32 @@ test("both pool modules use the ONE shared helper and hand the pool's error even
   }
 });
 
-test("the pool still rebuilds itself 5 minutes before the token expires", () => {
+test("the pool still replaces itself 5 minutes before the token expires", () => {
   // The routine half of the fix, which arion already had and must keep: the
   // recovery above is for a token that is refused EARLY, not for one that ages
   // out. Losing this would put the hourly 'token is expired' 500s back.
+  //
+  // MERGE 2026-09-17 — the buffer used to be a module-level
+  // TOKEN_REFRESH_BUFFER_MS beside a `poolPromise` in each pool module. The
+  // production hotfix moved the whole hold-and-replace decision into ONE place,
+  // createPoolHolder() in db/poolRecovery.js, so that the replacement is LAZY:
+  // the live pool keeps serving until the new one has connected. Same 5-minute
+  // buffer, same expiry, decided once instead of twice.
+  const helper = readFileSync(path.join(ROOT, "db", "poolRecovery.js"), "utf8");
+  assert.match(helper, /refreshBufferMs = 5 \* 60 \* 1000/,
+    "db/poolRecovery.js keeps the 5-minute buffer");
+  assert.match(helper, /now\(\) < currentExpiresAt - refreshBufferMs/,
+    "and reuses the held pool only while its token has life left");
+
   for (const file of ["db/servicesPool.js", "db/platformPool.js"]) {
     const src = readFileSync(path.join(ROOT, file), "utf8");
-    assert.match(src, /TOKEN_REFRESH_BUFFER_MS = 5 \* 60 \* 1000/, `${file} keeps the 5-minute buffer`);
-    assert.match(src, /Date\.now\(\) < poolTokenExpiresAt - TOKEN_REFRESH_BUFFER_MS/,
-      `${file} reuses the cached pool only while the token has life left`);
-    assert.match(src, /poolTokenExpiresAt = token\.expiresOnTimestamp/, `${file} records the real expiry`);
+    assert.match(src, /createPoolHolder\(\{/, `${file} holds its pool through the one helper`);
+    assert.match(src, /(pending|)[tT]okenExpiresAt = token\.expiresOnTimestamp/,
+      `${file} records the real expiry`);
+    assert.match(src, /tokenExpiresAt: (pendingTokenExpiresAt|\(\) =>)/,
+      `${file} hands that expiry to the holder, or the buffer is measured against nothing`);
+    assert.equal(/TOKEN_REFRESH_BUFFER_MS/.test(src), false,
+      `${file} must not keep a second copy of the buffer — that is how two pools drift apart`);
   }
 });
 
