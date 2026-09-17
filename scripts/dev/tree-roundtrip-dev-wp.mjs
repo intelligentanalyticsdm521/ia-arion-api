@@ -22,7 +22,9 @@ import assert from 'node:assert/strict';
 import {
   writePageSections, fetchPages, fetchPageSections, createPage,
 } from '../../lib/websiteBuilder/pageClient.js';
-import { pageToElementor, elementorToPage, outline } from '../../lib/websiteBuilder/elementorTree.js';
+import {
+  pageToElementor, elementorToPage, outline, documentToTree,
+} from '../../lib/websiteBuilder/elementorTree.js';
 
 const DEV = 'C:/dev/iadm/dev-stack/wordpress';
 const site = {
@@ -34,52 +36,81 @@ const site = {
 const lite = process.argv.includes('--lite');
 const ctx = { allowPro: !lite, iaWidgets: [], seed: 'drive-2026-09-17' };
 
-/* THE PAGE — Brandon's sentence, three containers deep.
- * box( heading, text, row( box(card), box(product card) ) )                  */
-const TREE = [{
-  id: 'drive-sec',
-  type: 'container',
-  layout: 'column',
-  label: 'Choose your plan',
-  style: { padding: { top: 64, right: 20, bottom: 64, left: 20 }, background: '#F4F7F8' },
-  children: [
-    { id: 'drive-h', type: 'widget', kind: 'heading', props: { text: 'Choose your plan', level: 'h2', align: 'center' } },
-    { id: 'drive-p', type: 'widget', kind: 'paragraph', props: { text: 'Pick one', align: 'center' } },
-    {
-      id: 'drive-row',
-      type: 'container',
-      layout: 'row',
-      children: [
+/* THE PAGE - Brandon's sentence, three containers deep, and it starts as the
+ * PORTAL'S OWN DOCUMENT.
+ *
+ * D-156 conformance (audit point 1). The drive used to start from a tree typed
+ * by hand, which skipped `documentToTree` - the very reader that was dropping
+ * `alignItems`, `wrap` and `props.html_tag` on the way to a website. So the
+ * page now starts where a real publish starts: a `BuilderDocument` whose box
+ * keeps its layout in `style`, exactly as the builder saves it.
+ *
+ * The row says three things the author can set and the website never used to
+ * hear: line them up in the MIDDLE across the row, let them WRAP onto a second
+ * line, and draw the box as a `section`.                                      */
+const DOC = {
+  v: 2,
+  settings: {},
+  sections: [{
+    id: 'drive-sec',
+    label: 'Choose your plan',
+    layout: 1,
+    style: { padding: { top: 64, right: 20, bottom: 64, left: 20 }, background: '#F4F7F8' },
+    columns: [{
+      id: 'drive-col',
+      widgets: [
+        { id: 'drive-h', kind: 'heading', props: { text: 'Choose your plan', level: 'h2', align: 'center' } },
+        { id: 'drive-p', kind: 'paragraph', props: { text: 'Pick one', align: 'center' } },
         {
-          id: 'drive-boxa',
-          type: 'container',
-          layout: 'column',
-          children: [{
-            id: 'drive-card-a',
-            type: 'widget',
-            kind: 'card',
-            props: {
-              title: 'Garden tidy', price: '120', per: 'month',
-              description: 'Every fortnight, April to October.',
-              bullets: ['Lawn cut', 'Edges done'], ctaText: 'Choose this', recommended: true,
+          id: 'drive-row',
+          kind: 'container',
+          props: { html_tag: 'section' },
+          style: { direction: 'row', alignItems: 'center', wrap: true, gap: 24 },
+          children: [
+            {
+              id: 'drive-boxa',
+              kind: 'container',
+              props: {},
+              style: { direction: 'column' },
+              children: [{
+                id: 'drive-card-a',
+                kind: 'card',
+                props: {
+                  heading: 'Garden tidy', price: '120', period: 'month',
+                  currency_symbol: 'pound',
+                  description: 'Every fortnight, April to October.',
+                  features_list: [{ item_text: 'Lawn cut' }, { item_text: 'Edges done' }],
+                  button_text: 'Choose this',
+                  show_ribbon: true, ribbon_preset: 'recommended',
+                },
+              }],
             },
-          }],
-        },
-        {
-          id: 'drive-boxb',
-          type: 'container',
-          layout: 'column',
-          children: [{
-            id: 'drive-card-b',
-            type: 'widget',
-            kind: 'catalog_card',
-            props: { itemId: 'svc-441', title: 'Full maintenance', ctaText: 'Choose this' },
-          }],
+            {
+              id: 'drive-boxb',
+              kind: 'container',
+              props: {},
+              style: { direction: 'column' },
+              children: [{
+                id: 'drive-card-b',
+                kind: 'catalog_card',
+                props: {
+                  _ia_source: 'oliver:catalogue',
+                  _ia_selection: { offering_id: 'svc-441', price_id: 'pr-441' },
+                  refresh: 'live',
+                  on_empty: 'placeholder',
+                  overrides: { heading: 'Full maintenance', button_text: 'Choose this' },
+                  _ia_snapshot: { heading: 'Full maintenance', price: '240', period: 'month' },
+                },
+              }],
+            },
+          ],
         },
       ],
-    },
-  ],
-}];
+    }],
+  }],
+};
+
+const TREE = documentToTree(DOC);
 
 function depthOf(node, d = 0) {
   const kids = node.elements || [];
@@ -133,6 +164,43 @@ console.log('read back:');
 console.log(mine.map((n) => outline(n).join('\n')).join('\n'));
 
 assert.equal(mine.length, 1, 'our section came back exactly once');
+
+/* THE THREE THINGS THE WEBSITE USED TO NEVER HEAR (audit point 1).
+ * Read off what the SITE gave back, not off what we sent: the plugin, the page
+ * engine's own writer and its sanitiser are all in between. */
+const liveRow = (function findRow(nodes) {
+  for (const n of nodes || []) {
+    if (n?.settings?._ia_node === 'drive-row') return n;
+    const deeper = findRow(n?.elements);
+    if (deeper) return deeper;
+  }
+  return null;
+}(live));
+assert.ok(liveRow, 'the row never came back off the site');
+console.log('the row came back as:', JSON.stringify({
+  flex_direction: liveRow.settings.flex_direction,
+  flex_align_items: liveRow.settings.flex_align_items,
+  flex_wrap: liveRow.settings.flex_wrap,
+  html_tag: liveRow.settings.html_tag,
+  flex_direction_mobile: liveRow.settings.flex_direction_mobile,
+}));
+assert.equal(liveRow.settings.flex_align_items, 'center', 'the Align items the author set did not survive');
+assert.equal(liveRow.settings.flex_wrap, 'wrap', 'the Wrap the author set did not survive');
+assert.equal(liveRow.settings.html_tag, 'section', 'the tag the box is drawn as did not survive');
+assert.equal(liveRow.settings.flex_direction_mobile, 'column', 'the row does not stack on a phone');
+// ...and the tree reader says the same thing back in our own words.
+const readRow = (function findOurs(nodes) {
+  for (const n of nodes || []) {
+    if (n?.id === 'drive-row') return n;
+    const deeper = findOurs(n?.children);
+    if (deeper) return deeper;
+  }
+  return null;
+}(mine));
+assert.equal(readRow?.align, 'center');
+assert.equal(readRow?.wrap, 'wrap');
+assert.equal(readRow?.htmlTag, 'section');
+console.log('align items, wrap and the tag all survived the round trip.');
 assert.ok(depthOf(live.find((n) => n.settings?._ia_node === 'drive-sec')) >= 3,
   'the page came back flatter than it went in');
 assert.deepEqual(outline(mine[0]).map((l) => l.replace(/\(.*\)/, '')).slice(0, 4),
@@ -155,7 +223,7 @@ console.log(`live page: ${permalink} — ${containers} container wrappers`);
 assert.ok(containers >= 4, 'the live page is not drawn with containers');
 assert.match(pageHtml, /Choose your plan/, 'the heading never reached the visitor');
 if (lite) {
-  for (const word of ['Garden tidy', '120', 'Lawn cut', 'Edges done', 'Full maintenance']) {
+  for (const word of ['Garden tidy', '120', 'Lawn cut', 'Edges done', 'Full maintenance', 'Recommended']) {
     assert.ok(pageHtml.includes(word), `"${word}" never reached the visitor`);
   }
   console.log('every word of both cards is on the live page.');

@@ -32,8 +32,12 @@ const MUTATIONS = [
   {
     name: 'M3 the lock says nothing',
     file: 'lib/websiteBuilder/elementorWidgets.js',
-    from: "  if (row.tier === PRO && !allowPro) {\n    return row.fallback ? PRO_LOCK_SENTENCE : PRO_LOCK_SENTENCE_NO_FALLBACK;\n  }",
-    to: '  if (row.tier === PRO && !allowPro) {\n    return null;\n  }',
+    /* The line moved in the D-156 conformance pass: the sentence now asks
+       whether the swap will ACTUALLY fire on THIS site, so a Lite client is
+       not promised a form the publish would refuse. Same guard, re-pointed
+       rather than dropped. */
+    from: "    return swapWillFire(row, ctx)\n      ? (row.swapSentence || PRO_LOCK_SENTENCE)\n      : PRO_LOCK_SENTENCE_NO_FALLBACK;",
+    to: '    return null;',
     test: 'test/website-elementor-tree.test.mjs',
     expects: 'the lock says what the business gets instead',
   },

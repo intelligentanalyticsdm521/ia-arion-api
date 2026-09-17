@@ -1,0 +1,470 @@
+{
+  "_comment": [
+    "EXTRACTED from BUILDER_WIDGET_CATALOG_2026-09-17.pro.json — the Elementor",
+    "editor's own registry, read live off intelligentanalyticsdm.com (Elementor",
+    "4.1.4 free + Pro 4.1.1) on 2026-09-17. Element `container`.",
+    "",
+    "Every key here is one `lib/websiteBuilder/elementorTree.js` can publish for",
+    "a container. The keys are not typed in: they come from running the emitter",
+    "over `test/fixtures/container-controls-input.mjs`, so this file is the",
+    "answer to \"is every key we publish real, with a value it accepts?\".",
+    "",
+    "Regenerate only when the emitter changes or the page engine itself does:",
+    "  node scripts/dev/extract-container-controls.mjs",
+    "and read the diff — a key appearing here is a key appearing on every",
+    "client website we publish."
+  ],
+  "elementor_version": "4.1.4",
+  "pro": true,
+  "element": "container",
+  "extracted_from": "BUILDER_WIDGET_CATALOG_2026-09-17.pro.json",
+  "controls": {
+    "_flex_align_self": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "flex-start",
+        "center",
+        "flex-end",
+        "stretch"
+      ],
+      "default": ""
+    },
+    "_flex_grow": {
+      "type": "number",
+      "responsive": true,
+      "default": 1
+    },
+    "_flex_order": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "start",
+        "end",
+        "custom"
+      ],
+      "default": ""
+    },
+    "_flex_shrink": {
+      "type": "number",
+      "responsive": true,
+      "default": 1
+    },
+    "_flex_size": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "none",
+        "grow",
+        "shrink",
+        "custom"
+      ],
+      "default": ""
+    },
+    "background_background": {
+      "type": "choose",
+      "options": [
+        "classic",
+        "gradient",
+        "video",
+        "slideshow"
+      ],
+      "default": ""
+    },
+    "background_color": {
+      "type": "color",
+      "default": ""
+    },
+    "border_border": {
+      "type": "select",
+      "options": [
+        "",
+        "none",
+        "solid",
+        "double",
+        "dotted",
+        "dashed",
+        "groove"
+      ],
+      "default": ""
+    },
+    "border_color": {
+      "type": "color",
+      "default": ""
+    },
+    "border_radius": {
+      "type": "dimensions",
+      "responsive": true,
+      "default": {
+        "unit": "px",
+        "top": "",
+        "right": "",
+        "bottom": "",
+        "left": "",
+        "isLinked": true
+      }
+    },
+    "border_width": {
+      "type": "dimensions",
+      "responsive": true,
+      "default": {
+        "unit": "px",
+        "top": "",
+        "right": "",
+        "bottom": "",
+        "left": "",
+        "isLinked": true
+      }
+    },
+    "box_shadow_box_shadow": {
+      "type": "box_shadow",
+      "default": {
+        "horizontal": 0,
+        "vertical": 0,
+        "blur": 10,
+        "spread": 0,
+        "color": "rgba(0,0,0,0.5)"
+      }
+    },
+    "box_shadow_box_shadow_type": {
+      "type": "popover_toggle",
+      "default": ""
+    },
+    "container_type": {
+      "type": "select",
+      "options": [
+        "flex",
+        "grid"
+      ],
+      "default": "flex"
+    },
+    "content_width": {
+      "type": "select",
+      "options": [
+        "boxed",
+        "full"
+      ],
+      "default": "boxed"
+    },
+    "flex_align_items": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "flex-start",
+        "center",
+        "flex-end",
+        "stretch"
+      ],
+      "default": ""
+    },
+    "flex_align_items_mobile": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "flex-start",
+        "center",
+        "flex-end",
+        "stretch"
+      ],
+      "default": ""
+    },
+    "flex_align_items_tablet": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "flex-start",
+        "center",
+        "flex-end",
+        "stretch"
+      ],
+      "default": ""
+    },
+    "flex_direction": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "row",
+        "column",
+        "row-reverse",
+        "column-reverse"
+      ],
+      "default": ""
+    },
+    "flex_direction_mobile": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "row",
+        "column",
+        "row-reverse",
+        "column-reverse"
+      ],
+      "default": ""
+    },
+    "flex_direction_tablet": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "row",
+        "column",
+        "row-reverse",
+        "column-reverse"
+      ],
+      "default": ""
+    },
+    "flex_gap": {
+      "type": "gaps",
+      "responsive": true,
+      "default": {
+        "column": "",
+        "row": "",
+        "isLinked": true,
+        "unit": "px"
+      }
+    },
+    "flex_gap_mobile": {
+      "type": "gaps",
+      "responsive": true,
+      "default": {
+        "column": "",
+        "row": "",
+        "isLinked": true,
+        "unit": "px"
+      }
+    },
+    "flex_gap_tablet": {
+      "type": "gaps",
+      "responsive": true,
+      "default": {
+        "column": "",
+        "row": "",
+        "isLinked": true,
+        "unit": "px"
+      }
+    },
+    "flex_justify_content": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "flex-start",
+        "center",
+        "flex-end",
+        "space-between",
+        "space-around",
+        "space-evenly"
+      ],
+      "default": ""
+    },
+    "flex_justify_content_mobile": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "flex-start",
+        "center",
+        "flex-end",
+        "space-between",
+        "space-around",
+        "space-evenly"
+      ],
+      "default": ""
+    },
+    "flex_justify_content_tablet": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "flex-start",
+        "center",
+        "flex-end",
+        "space-between",
+        "space-around",
+        "space-evenly"
+      ],
+      "default": ""
+    },
+    "flex_wrap": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "nowrap",
+        "wrap"
+      ],
+      "default": ""
+    },
+    "flex_wrap_mobile": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "nowrap",
+        "wrap"
+      ],
+      "default": ""
+    },
+    "flex_wrap_tablet": {
+      "type": "choose",
+      "responsive": true,
+      "options": [
+        "nowrap",
+        "wrap"
+      ],
+      "default": ""
+    },
+    "grid_auto_flow": {
+      "type": "select",
+      "responsive": true,
+      "options": [
+        "row",
+        "column"
+      ],
+      "default": "row"
+    },
+    "grid_columns_grid": {
+      "type": "slider",
+      "responsive": true,
+      "default": {
+        "unit": "fr",
+        "size": 3,
+        "sizes": []
+      }
+    },
+    "grid_columns_grid_mobile": {
+      "type": "slider",
+      "responsive": true,
+      "default": {
+        "unit": "fr",
+        "size": 1,
+        "sizes": []
+      }
+    },
+    "grid_gaps": {
+      "type": "gaps",
+      "responsive": true,
+      "default": {
+        "column": "",
+        "row": "",
+        "isLinked": true,
+        "unit": "px"
+      }
+    },
+    "grid_rows_grid": {
+      "type": "slider",
+      "responsive": true,
+      "default": {
+        "unit": "fr",
+        "size": 2,
+        "sizes": []
+      }
+    },
+    "hide_desktop": {
+      "type": "switcher",
+      "default": ""
+    },
+    "hide_mobile": {
+      "type": "switcher",
+      "default": ""
+    },
+    "hide_tablet": {
+      "type": "switcher",
+      "default": ""
+    },
+    "html_tag": {
+      "type": "select",
+      "options": [
+        "",
+        "div",
+        "header",
+        "footer",
+        "main",
+        "article",
+        "section",
+        "aside",
+        "nav",
+        "a"
+      ],
+      "default": ""
+    },
+    "margin": {
+      "type": "dimensions",
+      "responsive": true,
+      "default": {
+        "unit": "px",
+        "top": "",
+        "right": "",
+        "bottom": "",
+        "left": "",
+        "isLinked": true
+      }
+    },
+    "min_height": {
+      "type": "slider",
+      "responsive": true,
+      "default": {
+        "unit": "px",
+        "size": "",
+        "sizes": []
+      }
+    },
+    "min_height_mobile": {
+      "type": "slider",
+      "responsive": true,
+      "default": {
+        "unit": "px",
+        "size": "",
+        "sizes": []
+      }
+    },
+    "min_height_tablet": {
+      "type": "slider",
+      "responsive": true,
+      "default": {
+        "unit": "px",
+        "size": "",
+        "sizes": []
+      }
+    },
+    "padding": {
+      "type": "dimensions",
+      "responsive": true,
+      "default": {
+        "unit": "px",
+        "top": "",
+        "right": "",
+        "bottom": "",
+        "left": "",
+        "isLinked": true
+      }
+    },
+    "padding_mobile": {
+      "type": "dimensions",
+      "responsive": true,
+      "default": {
+        "unit": "px",
+        "top": "",
+        "right": "",
+        "bottom": "",
+        "left": "",
+        "isLinked": true
+      }
+    },
+    "padding_tablet": {
+      "type": "dimensions",
+      "responsive": true,
+      "default": {
+        "unit": "px",
+        "top": "",
+        "right": "",
+        "bottom": "",
+        "left": "",
+        "isLinked": true
+      }
+    },
+    "width": {
+      "type": "slider",
+      "responsive": true,
+      "default": {
+        "unit": "%",
+        "size": "",
+        "sizes": []
+      }
+    }
+  }
+}

@@ -97,6 +97,14 @@ import {
   getSiteCapability, elementorRefusal, allowProFor, NO_ELEMENTOR_MESSAGE,
 } from '../../lib/websiteBuilder/siteCapability.js';
 import { pluginPost } from '../../lib/pluginClient.js';
+// THE WIDGET PANE'S THREE STATES (D-156 conformance, audit point 7). What a
+// widget NEEDS lives beside the widget; what this business HAS is asked here,
+// through the seams that already answer it — the site (`siteCapability`) and
+// `core.tenant_services` (`coreTenants`). No third copy of a tier table.
+import {
+  widgetCatalog, productsNeeded, ownedProductsFrom,
+} from '../../lib/websiteBuilder/elementorWidgets.js';
+import { tenantServiceOwnership } from '../../lib/coreTenants.js';
 import {
   proposeSectionEdit, proposePageEdit, aiTierGate,
   ACTION_SECTION_EDIT, ACTION_PAGE_EDIT, MAX_INSTRUCTION_CHARS,
@@ -227,7 +235,7 @@ function readPageId(raw) {
  *
  * A form section carries three things that are ROUTING, not copy:
  *   form_css_class  — the plugin's interceptor types every submission from it
- *                     (class-ia-form-interceptor.php:127)
+ *                     (intelligent-analytics.php process_submission())
  *   email_to        — whose inbox the enquiry lands in
  *   the visitor id  — read from the __ia_vid COOKIE at submit time, server
  *                     side, so it is not in the markup at all and no edit can
@@ -1712,11 +1720,27 @@ router.get('/section-library', async (req, res) => {
     // The FULL field spec goes to the Portal — labels, types, limits, choices,
     // and the sub-fields of every list. The edit sheet renders from this, so
     // there is one description of a section and it lives in sectionSchema.js.
-    const catalog = sectionCatalog({ allowPro }).map((entry) => ({
+    const ownership = await tenantServiceOwnership(tenantId, productsNeeded());
+    const ownedProducts = ownedProductsFrom(ownership);
+    const catalog = sectionCatalog({ allowPro, ownedProducts }).map((entry) => ({
       ...entry,
       fields: sectionKindMeta(entry.kind).fields,
       variants: variants[entry.kind] || [],
     }));
+
+    /* THE WIDGETS, with the same three words a section carries.
+     *
+     * One question per product, asked once, on the reply the builder already
+     * makes on open (convention_data_fetching). `known:false` — a query we
+     * could not run — locks NOTHING: telling a client they do not own a
+     * product because a database call failed is worse than offering a widget
+     * whose publish would refuse with a reason. */
+    const widgets = widgetCatalog({
+      allowPro,
+      iaWidgets: capability.iaWidgets ?? null,
+      iaShortcodes: capability.iaShortcodes ?? null,
+      ownedProducts,
+    });
 
     const gate = aiTierGate(site);
     const bookingHref = String(brand.booking_href || '');
@@ -1730,6 +1754,11 @@ router.get('/section-library', async (req, res) => {
     return res.json({
       data: {
         sections: catalog,
+        // One row per widget: `tier` ('free' | 'pro' | 'ia:<product>'),
+        // `available`, `reason` ('tier' | 'ownership') and the sentence the
+        // client reads. Three states, three sentences, never the bare word
+        // "locked" (`reference_nav_visibility_semantics`).
+        widgets,
         elementorProAvailable: allowPro,
         // What the site itself says it is running (D-ARION-E). The editor shows
         // a banner and stops offering Save when `active` is false, rather than
