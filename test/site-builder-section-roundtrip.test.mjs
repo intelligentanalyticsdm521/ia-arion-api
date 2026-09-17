@@ -231,7 +231,7 @@ test('an FAQ question can be added and removed inside the one accordion widget',
 });
 
 test('changing the form purpose rewrites the CSS class the interceptor routes on', () => {
-  // class-ia-form-interceptor.php:127 types every submission from this class.
+  // intelligent-analytics.php process_submission() types every submission from this class.
   // Getting it wrong means a booking lands in the inbox as a plain contact.
   const contact = build('contact');
   const patched = applyFields(contact, 'contact', { form_purpose: 'booking', email_to: 'bookings@fernbrook.invalid' });

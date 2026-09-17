@@ -82,7 +82,7 @@ function formSettings(section) {
 /**
  * The three attributes a form submission is routed by. `form_name` rides
  * along because the plugin's interceptor falls back to it when no class
- * matches (class-ia-form-interceptor.php:127) — losing it would change the
+ * matches (intelligent-analytics.php process_submission()) — losing it would change the
  * type of every submission on a site running an older plugin.
  */
 function formWire(section) {

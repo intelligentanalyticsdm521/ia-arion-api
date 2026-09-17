@@ -353,7 +353,9 @@
                 "settings": {
                   "_ia_field": "contact.form",
                   "form_name": "Contact",
+                  "_ia_form_purpose": "quote",
                   "form_css_class": "ia-quote",
+                  "_css_classes": "ia-form-quote",
                   "form_fields": [
                     {
                       "_id": "8dcecc3",

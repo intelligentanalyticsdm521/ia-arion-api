@@ -3,7 +3,7 @@
  *
  * The plugin's form interceptor decides what a submission IS from the form
  * widget's `form_css_class`
- * (ia-plugin-septa/includes/class-ia-form-interceptor.php:127):
+ * (ia-plugin-septa intelligent-analytics.php, process_submission()):
  *
  *   [ 'ia-booking' => 'booking', 'ia-quote' => 'quote',
  *     'ia-newsletter' => 'newsletter', 'ia-lead' => 'lead',
@@ -79,7 +79,7 @@ test('the class is stable across re-emits of the same block', () => {
 });
 
 test('every token we emit is one the plugin interceptor actually routes', () => {
-  // The interceptor's table, transcribed from class-ia-form-interceptor.php:127.
+  // The interceptor's table, transcribed from intelligent-analytics.php process_submission().
   const INTERCEPTOR_TOKENS = new Set(['ia-booking', 'ia-quote', 'ia-newsletter', 'ia-lead', 'ia-contact']);
   for (const cls of Object.values(adapterTest.FORM_PURPOSE_CLASS)) {
     assert.ok(INTERCEPTOR_TOKENS.has(cls), `${cls} must be a token the interceptor knows`);

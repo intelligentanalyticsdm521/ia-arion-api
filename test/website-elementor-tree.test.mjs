@@ -62,16 +62,23 @@ const CHOOSE_YOUR_PLAN = {
           type: 'widget',
           kind: 'card',
           props: {
-            title: 'Garden tidy', price: '£120', per: 'month',
+            heading: 'Garden tidy', price: '£120', period: 'month',
             description: 'Every fortnight, April to October.',
-            bullets: ['Lawn cut', 'Edges done'], ctaText: 'Choose this', recommended: true,
+            features_list: [{ item_text: 'Lawn cut' }, { item_text: 'Edges done' }],
+            button_text: 'Choose this', show_ribbon: true, ribbon_preset: 'recommended',
           },
         },
         {
           id: 'c2',
           type: 'widget',
           kind: 'catalog_card',
-          props: { itemId: 'svc-441', title: 'Full maintenance', ctaText: 'Choose this' },
+          props: {
+            _ia_source: 'oliver:catalogue',
+            _ia_selection: { offering_id: 'svc-441', price_id: 'pr-441' },
+            refresh: 'live',
+            on_empty: 'hide',
+            overrides: { heading: 'Full maintenance', button_text: 'Choose this' },
+          },
         },
       ],
     },
@@ -133,8 +140,15 @@ describe('our tree becomes the page engine\'s tree', () => {
     assert.equal(node.settings.flex_direction, 'column');
     const row = node.elements[2];
     assert.equal(row.settings.flex_direction, 'row');
-    assert.equal(row.settings.flex_wrap, 'wrap');
     assert.equal(row.settings.flex_align_items, 'stretch');
+    // A row the author said nothing about wrapping does not carry a wrap at
+    // all — the page engine's own default then applies, which is the same
+    // `nowrap` the canvas draws. `flex_wrap: 'wrap'` used to be hardcoded
+    // here, which silently contradicted an author who turned wrapping off
+    // (audit point 1).
+    assert.equal(row.settings.flex_wrap, undefined);
+    // ...and a row stacks on a phone, because the canvas stacks it there.
+    assert.equal(row.settings.flex_direction_mobile, 'column');
   });
 
   test('a grid asks for the grid controls, not the flex ones', () => {
@@ -269,7 +283,7 @@ describe('every widget declares what plan it needs', () => {
   });
 
   test('a Standard business gets the paid card widget itself', () => {
-    const { node, swapped } = resolveWidget('card', { title: 'Garden tidy', price: '£120' }, PRO);
+    const { node, swapped } = resolveWidget('card', { heading: 'Garden tidy', price: '£120' }, PRO);
     assert.equal(node.widgetType, 'price-table');
     assert.equal(node.settings.heading, 'Garden tidy');
     assert.equal(swapped, null);
@@ -278,7 +292,8 @@ describe('every widget declares what plan it needs', () => {
 
   test('a Lite business gets the card as free widgets — the visitor still reads the price', () => {
     const { node, swapped } = resolveWidget('card', {
-      title: 'Garden tidy', price: '£120', per: 'month', description: 'Fortnightly', bullets: ['Lawn cut'],
+      heading: 'Garden tidy', price: '£120', period: 'month', description: 'Fortnightly',
+      features_list: [{ item_text: 'Lawn cut' }],
     }, LITE);
     assert.equal(node.elType, 'container', 'the card is still a box');
     const types = [];
@@ -329,7 +344,9 @@ describe('every widget declares what plan it needs', () => {
 
   test('a product card whose widget the website has not got falls back with the same words', () => {
     const ctx = { allowPro: true, iaWidgets: [], seed: 'x' };
-    const { node, swapped } = resolveWidget('catalog_card', { itemId: 'svc-1', title: 'Full maintenance' }, ctx);
+    const { node, swapped } = resolveWidget('catalog_card', {
+      _ia_selection: { offering_id: 'svc-1' }, overrides: { heading: 'Full maintenance' },
+    }, ctx);
     assert.equal(node.elType, 'container');
     assert.ok(JSON.stringify(node).includes('Full maintenance'));
     assert.equal(swapped.reason, 'ia:oliver');
@@ -348,7 +365,10 @@ describe('the catalogue gate — what BUILDER_WIDGET_CATALOG_2026-09-17 asks of 
   test('E.3.3 — a child says how it SITS in its parent, on the flex-item keys the engine uses', () => {
     const node = treeToElementor({
       id: 'r', type: 'container', layout: 'row',
-      children: [{ id: 'c', type: 'container', layout: 'column', width: 48, grow: 0, alignSelf: 'stretch', children: [] }],
+      children: [{
+        id: 'c', type: 'container', layout: 'column',
+        flex_size: 48, flex_grow: 0, alignSelf: 'stretch', children: [],
+      }],
     }, PRO);
     const child = node.elements[0];
     assert.equal(child.settings._flex_size, 'custom');
@@ -358,6 +378,24 @@ describe('the catalogue gate — what BUILDER_WIDGET_CATALOG_2026-09-17 asks of 
     // A node that says nothing about how it sits writes none of them.
     assert.equal('width' in node.settings, false);
     assert.equal('_flex_size' in node.settings, false);
+  });
+
+  test('`width` MEANS ONE THING — content width, never a flex size', () => {
+    // Two meanings on one key (audit point 1): `layoutToSettings` read
+    // `node.width` as boxed-or-full and `flexItemSettings` read the same field
+    // as a percentage, so `width: 48` on a top-level node was both at once.
+    const boxed = treeToElementor({ id: 'b', type: 'container', layout: 'column', width: 'full', children: [] }, PRO);
+    assert.equal(boxed.settings.content_width, 'full');
+    assert.equal('_flex_size' in boxed.settings, false, 'a content width became a flex size');
+    const sized = treeToElementor({
+      id: 'r', type: 'container', layout: 'row',
+      children: [{ id: 'c', type: 'widget', kind: 'heading', props: { text: 'Hi' }, flex_size: 30 }],
+    }, PRO);
+    // A WIDGET has no `width` control; it says the same thing on the keys its
+    // own Advanced tab carries (catalogue A.1).
+    assert.equal(sized.elements[0].settings._element_width, 'initial');
+    assert.equal(sized.elements[0].settings._element_custom_width.size, 30);
+    assert.equal('width' in sized.elements[0].settings, false);
   });
 
   test('E.3.5 — the raw HTML widget exists, because it is the most-used one on the estate', () => {
@@ -419,6 +457,11 @@ describe("Brandon's sentence, as a tree", () => {
     assert.deepEqual(card.settings.ia_item_ids, ['svc-441']);
     assert.equal(card.settings.ia_show_price, 'yes');
     assert.equal(card.settings.ia_title_override, 'Full maintenance');
+    // F.2's own words, so a client learns the Binding section once.
+    assert.equal(card.settings.ia_source, 'oliver:catalogue');
+    assert.equal(card.settings.ia_price_id, 'pr-441');
+    assert.equal(card.settings.ia_refresh, 'live');
+    assert.equal(card.settings.ia_on_empty, 'hide');
   });
 
   test('one card can be removed and the other duplicated — every element stands alone', () => {
