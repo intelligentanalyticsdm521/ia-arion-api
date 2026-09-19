@@ -285,9 +285,20 @@ describe('every widget declares what plan it needs', () => {
     /* D-165 §11.13.3 — the whole paid panel is offered and refused by name on
        Lite, and the IA list is the one the section names. Both lists are read
        off the catalogue rather than typed anywhere else. */
+    /* WIDENED BY B-168's f7-data-lists (2026-09-19): the family took `posts`
+       and `loop_grid` over from the catalogue's own rows - which are deleted,
+       replace means delete - and brought seventeen more Elementor Pro widgets
+       with it. Every one is in the offer file Brandon approved under
+       `website.elementor_pro`, and `test/website-builder-f7-data-lists.test.js`
+       checks each one's keys against the machine file. */
     assert.deepEqual(proWidgetKinds(), [
-      'call_to_action', 'card', 'countdown', 'flip_box', 'form', 'loop_grid', 'nav_menu',
-      'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides', 'testimonial_carousel',
+      'archive_posts', 'author_box', 'call_to_action', 'card', 'countdown', 'flip_box',
+      'form', 'loop_grid', 'nav_menu', 'portfolio', 'post_comments', 'post_info',
+      'post_navigation', 'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'search',
+      'sitemap', 'slides', 'taxonomy_filter', 'template', 'testimonial_carousel',
+      'theme_archive_title', 'theme_page_title', 'theme_post_excerpt',
+      'theme_post_featured_image', 'theme_post_title', 'theme_site_logo',
+      'theme_site_title',
     ]);
     assert.deepEqual(iaWidgetKinds().map((w) => `${w.kind}:${w.product}`), [
       'book_now:oliver', 'catalog_card:oliver', 'hours_location:lumen',

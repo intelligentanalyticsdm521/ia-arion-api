@@ -1,5 +1,697 @@
 {
   "widgets": {
+    "posts": {
+      "title": "Posts",
+      "controls": {
+        "_skin": {
+          "type": "select"
+        },
+        "classic_columns": {
+          "type": "select"
+        },
+        "classic_posts_per_page": {
+          "type": "number"
+        },
+        "classic_thumbnail": {
+          "type": "select"
+        },
+        "classic_show_title": {
+          "type": "switcher"
+        },
+        "classic_title_tag": {
+          "type": "select"
+        },
+        "classic_show_excerpt": {
+          "type": "switcher"
+        },
+        "classic_excerpt_length": {
+          "type": "number"
+        },
+        "classic_show_read_more": {
+          "type": "switcher"
+        },
+        "classic_read_more_text": {
+          "type": "text"
+        },
+        "classic_column_gap": {
+          "type": "slider"
+        },
+        "classic_row_gap": {
+          "type": "slider"
+        },
+        "classic_alignment": {
+          "type": "choose"
+        },
+        "classic_title_color": {
+          "type": "color"
+        },
+        "classic_meta_color": {
+          "type": "color"
+        },
+        "classic_excerpt_color": {
+          "type": "color"
+        },
+        "posts_post_type": {
+          "type": "select"
+        },
+        "posts_orderby": {
+          "type": "select"
+        },
+        "posts_order": {
+          "type": "select"
+        },
+        "posts_offset": {
+          "type": "number"
+        },
+        "posts_avoid_duplicates": {
+          "type": "switcher"
+        },
+        "pagination_type": {
+          "type": "select"
+        },
+        "pagination_page_limit": {
+          "type": "text"
+        },
+        "pagination_prev_label": {
+          "type": "text"
+        },
+        "pagination_next_label": {
+          "type": "text"
+        },
+        "pagination_align": {
+          "type": "choose"
+        }
+      }
+    },
+    "portfolio": {
+      "title": "Portfolio",
+      "controls": {
+        "columns": {
+          "type": "select"
+        },
+        "posts_per_page": {
+          "type": "number"
+        },
+        "thumbnail_size_size": {
+          "type": "select"
+        },
+        "masonry": {
+          "type": "switcher"
+        },
+        "item_ratio": {
+          "type": "slider"
+        },
+        "show_title": {
+          "type": "switcher"
+        },
+        "title_tag": {
+          "type": "select"
+        },
+        "show_filter_bar": {
+          "type": "switcher"
+        },
+        "taxonomy": {
+          "type": "select2"
+        },
+        "item_gap": {
+          "type": "slider"
+        },
+        "column_gap": {
+          "type": "slider"
+        },
+        "row_gap": {
+          "type": "slider"
+        },
+        "posts_post_type": {
+          "type": "select"
+        },
+        "posts_orderby": {
+          "type": "select"
+        },
+        "posts_order": {
+          "type": "select"
+        },
+        "posts_offset": {
+          "type": "number"
+        },
+        "posts_avoid_duplicates": {
+          "type": "switcher"
+        }
+      }
+    },
+    "loop-grid": {
+      "title": "Loop Grid",
+      "controls": {
+        "template_id": {
+          "type": "template_query"
+        },
+        "columns": {
+          "type": "number"
+        },
+        "posts_per_page": {
+          "type": "number"
+        },
+        "masonry": {
+          "type": "switcher"
+        },
+        "equal_height": {
+          "type": "switcher"
+        },
+        "enable_nothing_found_message": {
+          "type": "switcher"
+        },
+        "nothing_found_message_text": {
+          "type": "textarea"
+        },
+        "post_query_post_type": {
+          "type": "select"
+        },
+        "post_query_orderby": {
+          "type": "select"
+        },
+        "post_query_order": {
+          "type": "select"
+        },
+        "post_query_offset": {
+          "type": "number"
+        },
+        "post_query_avoid_duplicates": {
+          "type": "switcher"
+        },
+        "pagination_type": {
+          "type": "select"
+        },
+        "pagination_page_limit": {
+          "type": "text"
+        },
+        "pagination_prev_label": {
+          "type": "text"
+        },
+        "pagination_next_label": {
+          "type": "text"
+        },
+        "pagination_align": {
+          "type": "choose"
+        }
+      }
+    },
+    "archive-posts": {
+      "title": "Archive Posts",
+      "controls": {
+        "_skin": {
+          "type": "select"
+        },
+        "archive_classic_columns": {
+          "type": "select"
+        },
+        "archive_classic_thumbnail": {
+          "type": "select"
+        },
+        "archive_classic_show_title": {
+          "type": "switcher"
+        },
+        "archive_classic_title_tag": {
+          "type": "select"
+        },
+        "archive_classic_show_excerpt": {
+          "type": "switcher"
+        },
+        "archive_classic_excerpt_length": {
+          "type": "number"
+        },
+        "archive_classic_show_read_more": {
+          "type": "switcher"
+        },
+        "archive_classic_read_more_text": {
+          "type": "text"
+        },
+        "archive_classic_column_gap": {
+          "type": "slider"
+        },
+        "archive_classic_row_gap": {
+          "type": "slider"
+        },
+        "archive_classic_title_color": {
+          "type": "color"
+        },
+        "archive_classic_meta_color": {
+          "type": "color"
+        },
+        "archive_classic_excerpt_color": {
+          "type": "color"
+        },
+        "nothing_found_message": {
+          "type": "textarea"
+        },
+        "pagination_type": {
+          "type": "select"
+        },
+        "pagination_page_limit": {
+          "type": "text"
+        },
+        "pagination_prev_label": {
+          "type": "text"
+        },
+        "pagination_next_label": {
+          "type": "text"
+        },
+        "pagination_align": {
+          "type": "choose"
+        }
+      }
+    },
+    "taxonomy-filter": {
+      "title": "Taxonomy Filter",
+      "controls": {
+        "selected_element": {
+          "type": "select"
+        },
+        "taxonomy": {
+          "type": "select"
+        },
+        "direction": {
+          "type": "select"
+        },
+        "item_alignment_horizontal": {
+          "type": "choose"
+        },
+        "multiple_selection": {
+          "type": "switcher"
+        },
+        "logical_combination": {
+          "type": "select"
+        },
+        "show_empty_items": {
+          "type": "switcher"
+        },
+        "show_first_item": {
+          "type": "switcher"
+        },
+        "first_item_title": {
+          "type": "text"
+        },
+        "taxonomy_filter_items_space_between": {
+          "type": "slider"
+        },
+        "taxonomy_filter_normal_text_color": {
+          "type": "color"
+        }
+      }
+    },
+    "search": {
+      "title": "Search",
+      "controls": {
+        "search_input_placeholder_text": {
+          "type": "text"
+        },
+        "submit_trigger": {
+          "type": "select"
+        },
+        "submit_button_text": {
+          "type": "text"
+        },
+        "live_results": {
+          "type": "switcher"
+        },
+        "minimum_search_characters": {
+          "type": "number"
+        },
+        "number_of_columns": {
+          "type": "number"
+        },
+        "number_of_items": {
+          "type": "number"
+        },
+        "enable_nothing_found_message": {
+          "type": "switcher"
+        },
+        "nothing_found_message_text": {
+          "type": "textarea"
+        },
+        "pagination_type_options": {
+          "type": "select"
+        },
+        "pagination_prev_label": {
+          "type": "text"
+        },
+        "pagination_next_label": {
+          "type": "text"
+        },
+        "search_query_post_type": {
+          "type": "select"
+        },
+        "search_query_orderby": {
+          "type": "select"
+        },
+        "search_query_order": {
+          "type": "select"
+        }
+      }
+    },
+    "sitemap": {
+      "title": "Sitemap",
+      "controls": {
+        "sitemap_items": {
+          "type": "repeater"
+        },
+        "sitemap_columns": {
+          "type": "select"
+        },
+        "sitemap_title_tag": {
+          "type": "select"
+        },
+        "sitemap_add_nofollow": {
+          "type": "switcher"
+        },
+        "sitemap_password_protected": {
+          "type": "switcher"
+        },
+        "sitemap_title_color": {
+          "type": "color"
+        },
+        "sitemap_list_item_color": {
+          "type": "color"
+        },
+        "sitemap_list_item_bullet_style": {
+          "type": "choose"
+        }
+      }
+    },
+    "template": {
+      "title": "Template",
+      "controls": {
+        "template_id": {
+          "type": "query"
+        }
+      }
+    },
+    "post-info": {
+      "title": "Post Info",
+      "controls": {
+        "view": {
+          "type": "choose"
+        },
+        "icon_list": {
+          "type": "repeater"
+        },
+        "space_between": {
+          "type": "slider"
+        },
+        "icon_align": {
+          "type": "choose"
+        },
+        "divider": {
+          "type": "switcher"
+        },
+        "divider_color": {
+          "type": "color"
+        },
+        "icon_color": {
+          "type": "color"
+        },
+        "icon_size": {
+          "type": "slider"
+        },
+        "text_color": {
+          "type": "color"
+        }
+      }
+    },
+    "post-navigation": {
+      "title": "Post Navigation",
+      "controls": {
+        "show_label": {
+          "type": "switcher"
+        },
+        "prev_label": {
+          "type": "text"
+        },
+        "next_label": {
+          "type": "text"
+        },
+        "show_arrow": {
+          "type": "switcher"
+        },
+        "show_title": {
+          "type": "switcher"
+        },
+        "show_borders": {
+          "type": "switcher"
+        },
+        "label_color": {
+          "type": "color"
+        },
+        "text_color": {
+          "type": "color"
+        },
+        "arrow_color": {
+          "type": "color"
+        },
+        "arrow_size": {
+          "type": "slider"
+        },
+        "sep_color": {
+          "type": "color"
+        }
+      }
+    },
+    "post-comments": {
+      "title": "Post Comments",
+      "controls": {
+        "source_type": {
+          "type": "select"
+        },
+        "source_custom": {
+          "type": "query"
+        }
+      }
+    },
+    "author-box": {
+      "title": "Author Box",
+      "controls": {
+        "source": {
+          "type": "select"
+        },
+        "show_avatar": {
+          "type": "switcher"
+        },
+        "avatar_size": {
+          "type": "number"
+        },
+        "author_avatar": {
+          "type": "media"
+        },
+        "show_name": {
+          "type": "switcher"
+        },
+        "author_name": {
+          "type": "text"
+        },
+        "author_name_tag": {
+          "type": "select"
+        },
+        "show_biography": {
+          "type": "switcher"
+        },
+        "author_bio": {
+          "type": "textarea"
+        },
+        "show_link": {
+          "type": "switcher"
+        },
+        "link_text": {
+          "type": "text"
+        },
+        "posts_url": {
+          "type": "url"
+        },
+        "layout": {
+          "type": "choose"
+        },
+        "alignment": {
+          "type": "choose"
+        },
+        "image_size": {
+          "type": "slider"
+        },
+        "name_color": {
+          "type": "color"
+        },
+        "bio_color": {
+          "type": "color"
+        },
+        "button_text_color": {
+          "type": "color"
+        },
+        "button_background_color": {
+          "type": "color"
+        }
+      }
+    },
+    "theme-site-logo": {
+      "title": "Site Logo",
+      "controls": {
+        "image": {
+          "type": "media-preview"
+        },
+        "image_size": {
+          "type": "select"
+        },
+        "caption_source": {
+          "type": "select"
+        },
+        "link_to": {
+          "type": "select"
+        },
+        "link": {
+          "type": "url"
+        },
+        "open_lightbox": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        }
+      }
+    },
+    "theme-post-featured-image": {
+      "title": "Featured Image",
+      "controls": {
+        "image": {
+          "type": "media"
+        },
+        "image_size": {
+          "type": "select"
+        },
+        "caption_source": {
+          "type": "select"
+        },
+        "caption": {
+          "type": "text"
+        },
+        "link_to": {
+          "type": "select"
+        },
+        "link": {
+          "type": "url"
+        },
+        "open_lightbox": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        }
+      }
+    },
+    "theme-post-excerpt": {
+      "title": "Post Excerpt",
+      "controls": {
+        "excerpt": {
+          "type": "text"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "title_color": {
+          "type": "color"
+        },
+        "link_color": {
+          "type": "color"
+        }
+      }
+    },
+    "theme-site-title": {
+      "title": "Site Title",
+      "controls": {
+        "title": {
+          "type": "textarea"
+        },
+        "link": {
+          "type": "url"
+        },
+        "size": {
+          "type": "select"
+        },
+        "header_size": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "title_color": {
+          "type": "color"
+        }
+      }
+    },
+    "theme-page-title": {
+      "title": "Page Title",
+      "controls": {
+        "title": {
+          "type": "textarea"
+        },
+        "link": {
+          "type": "url"
+        },
+        "size": {
+          "type": "select"
+        },
+        "header_size": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "title_color": {
+          "type": "color"
+        }
+      }
+    },
+    "theme-post-title": {
+      "title": "Post Title",
+      "controls": {
+        "title": {
+          "type": "textarea"
+        },
+        "link": {
+          "type": "url"
+        },
+        "size": {
+          "type": "select"
+        },
+        "header_size": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "title_color": {
+          "type": "color"
+        }
+      }
+    },
+    "theme-archive-title": {
+      "title": "Archive Title",
+      "controls": {
+        "title": {
+          "type": "textarea"
+        },
+        "link": {
+          "type": "url"
+        },
+        "size": {
+          "type": "select"
+        },
+        "header_size": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "title_color": {
+          "type": "color"
+        }
+      }
+    },
     "heading": {
       "title": "Heading",
       "controls": {
@@ -416,20 +1108,6 @@
         }
       }
     },
-    "posts": {
-      "title": "Posts",
-      "controls": {
-        "_skin": {
-          "type": "select"
-        },
-        "classic_columns": {
-          "type": "select"
-        },
-        "classic_posts_per_page": {
-          "type": "number"
-        }
-      }
-    },
     "gallery": {
       "title": "Gallery",
       "controls": {
@@ -559,20 +1237,6 @@
         },
         "layout": {
           "type": "select"
-        }
-      }
-    },
-    "loop-grid": {
-      "title": "Loop Grid",
-      "controls": {
-        "_skin": {
-          "type": "select"
-        },
-        "columns": {
-          "type": "number"
-        },
-        "posts_per_page": {
-          "type": "number"
         }
       }
     },
