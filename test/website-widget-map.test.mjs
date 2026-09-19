@@ -93,7 +93,37 @@ describe('the standard set maps one for one onto the page engine', () => {
     for (const [slug, stored] of Object.entries(WIDGET_KIND_ALIASES)) {
       assert.ok(ELEMENTOR_WIDGETS[stored], `${slug} points at a kind that has no row`);
       assert.ok(!ELEMENTOR_WIDGETS[slug], `${slug} is BOTH an alias and a row — two answers for one widget`);
-      assert.equal(canonicalKind(slug), stored);
+      assert.equal(canonicalKind(slug), stored,
+        `canonicalKind("${slug}") must answer "${stored}" — otherwise Elementor's own spelling `
+        + 'reaches no row at all and the widget is refused as unknown');
+    }
+  });
+
+  test('a value the control does not offer is never handed to the engine', () => {
+    /* The engine DROPS a select value it does not offer, so passing one
+       through is a setting the author watched us accept and the page never
+       got. Every guarded control answers its own default instead. */
+    const wild = { view: 'sparkly', shape: 'trapezoid', type: 'exuberant', align: 'sideways',
+      position: 'behind', direction: 'diagonal', navigation: 'telepathy' };
+    for (const [kind, key, expected] of [
+      ['icon', 'view', 'default'],
+      ['icon', 'shape', 'circle'],
+      ['alert', 'alert_type', 'info'],
+      ['social_links', 'align', 'center'],
+      ['social_links', 'shape', 'rounded'],
+      ['testimonial', 'testimonial_image_position', 'aside'],
+      ['testimonial', 'testimonial_alignment', 'center'],
+      ['tabs', 'type', 'horizontal'],
+      ['image_carousel', 'navigation', 'both'],
+    ]) {
+      const emitted = ELEMENTOR_WIDGETS[kind].settings(wild, WIDGET_CTX);
+      assert.equal(emitted[key], expected,
+        `${kind}.${key} passed a value the control does not offer straight through`);
+      const pin = PIN.widgets[ELEMENTOR_WIDGETS[kind].widgetType].controls[key];
+      if (pin.options) {
+        assert.ok(pin.options.includes(emitted[key]),
+          `${kind}.${key} fell back to "${emitted[key]}", which the control does not offer either`);
+      }
     }
   });
 
