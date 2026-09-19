@@ -1,5 +1,97 @@
 {
   "widgets": {
+    "counter": {
+      "title": "Counter",
+      "controls": {
+        "starting_number": {
+          "type": "number"
+        },
+        "ending_number": {
+          "type": "number"
+        },
+        "prefix": {
+          "type": "text"
+        },
+        "suffix": {
+          "type": "text"
+        },
+        "title": {
+          "type": "text"
+        },
+        "title_tag": {
+          "type": "select"
+        },
+        "thousand_separator": {
+          "type": "switcher"
+        }
+      }
+    },
+    "progress": {
+      "title": "Progress Bar",
+      "controls": {
+        "title": {
+          "type": "text"
+        },
+        "title_tag": {
+          "type": "select"
+        },
+        "title_display": {
+          "type": "switcher"
+        },
+        "progress_type": {
+          "type": "select"
+        },
+        "percent": {
+          "type": "slider"
+        },
+        "display_percentage": {
+          "type": "switcher"
+        },
+        "inner_text": {
+          "type": "text"
+        }
+      }
+    },
+    "star-rating": {
+      "title": "Star Rating",
+      "controls": {
+        "rating": {
+          "type": "number"
+        },
+        "rating_scale": {
+          "type": "select"
+        },
+        "title": {
+          "type": "text"
+        },
+        "star_style": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        }
+      }
+    },
+    "progress-tracker": {
+      "title": "Progress Tracker",
+      "controls": {
+        "type": {
+          "type": "select"
+        },
+        "relative_to": {
+          "type": "select"
+        },
+        "percentage": {
+          "type": "switcher"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "direction": {
+          "type": "choose"
+        }
+      }
+    },
     "heading": {
       "title": "Heading",
       "controls": {
@@ -172,26 +264,6 @@
         }
       }
     },
-    "counter": {
-      "title": "Counter",
-      "controls": {
-        "starting_number": {
-          "type": "number"
-        },
-        "ending_number": {
-          "type": "number"
-        },
-        "prefix": {
-          "type": "text"
-        },
-        "suffix": {
-          "type": "text"
-        },
-        "title": {
-          "type": "text"
-        }
-      }
-    },
     "accordion": {
       "title": "Accordion",
       "controls": {
@@ -236,26 +308,6 @@
           "type": "choose"
         },
         "testimonial_alignment": {
-          "type": "choose"
-        }
-      }
-    },
-    "star-rating": {
-      "title": "Star Rating",
-      "controls": {
-        "rating": {
-          "type": "number"
-        },
-        "rating_scale": {
-          "type": "select"
-        },
-        "title": {
-          "type": "text"
-        },
-        "star_style": {
-          "type": "select"
-        },
-        "align": {
           "type": "choose"
         }
       }
@@ -330,23 +382,6 @@
         },
         "infinite": {
           "type": "switcher"
-        }
-      }
-    },
-    "progress": {
-      "title": "Progress Bar",
-      "controls": {
-        "title": {
-          "type": "text"
-        },
-        "percent": {
-          "type": "slider"
-        },
-        "display_percentage": {
-          "type": "switcher"
-        },
-        "inner_text": {
-          "type": "text"
         }
       }
     },

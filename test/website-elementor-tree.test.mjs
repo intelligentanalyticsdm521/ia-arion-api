@@ -287,7 +287,11 @@ describe('every widget declares what plan it needs', () => {
        off the catalogue rather than typed anywhere else. */
     assert.deepEqual(proWidgetKinds(), [
       'call_to_action', 'card', 'countdown', 'flip_box', 'form', 'loop_grid', 'nav_menu',
-      'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides', 'testimonial_carousel',
+      'posts', 'price_list', 'pro_gallery', 'pro_reviews',
+      /* B-168 f4-moving — Elementor's Progress Tracker is a Pro widget and the
+         offer file puts it on the website and landing panels. */
+      'progress_tracker',
+      'slides', 'testimonial_carousel',
     ]);
     assert.deepEqual(iaWidgetKinds().map((w) => `${w.kind}:${w.product}`), [
       'book_now:oliver', 'catalog_card:oliver', 'hours_location:lumen',
