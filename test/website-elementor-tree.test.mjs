@@ -285,9 +285,14 @@ describe('every widget declares what plan it needs', () => {
     /* D-165 §11.13.3 — the whole paid panel is offered and refused by name on
        Lite, and the IA list is the one the section names. Both lists are read
        off the catalogue rather than typed anywhere else. */
+    /* B-168 f6-money added four, all of them in Elementor's own pro-elements
+       category and all of them in the offer file: Price Table, Price List (the
+       row MOVED out of elementorWidgets.js, kind unchanged), PayPal Button and
+       Stripe Button. */
     assert.deepEqual(proWidgetKinds(), [
       'call_to_action', 'card', 'countdown', 'flip_box', 'form', 'loop_grid', 'nav_menu',
-      'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides', 'testimonial_carousel',
+      'paypal_button', 'posts', 'price_list', 'price_table', 'pro_gallery', 'pro_reviews',
+      'slides', 'stripe_button', 'testimonial_carousel',
     ]);
     assert.deepEqual(iaWidgetKinds().map((w) => `${w.kind}:${w.product}`), [
       'book_now:oliver', 'catalog_card:oliver', 'hours_location:lumen',

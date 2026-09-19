@@ -1,5 +1,271 @@
 {
   "widgets": {
+    "price-table": {
+      "title": "Price Table",
+      "controls": {
+        "heading": {
+          "type": "text"
+        },
+        "sub_heading": {
+          "type": "text"
+        },
+        "heading_tag": {
+          "type": "select"
+        },
+        "currency_symbol": {
+          "type": "select"
+        },
+        "price": {
+          "type": "text"
+        },
+        "currency_format": {
+          "type": "select"
+        },
+        "sale": {
+          "type": "switcher"
+        },
+        "original_price": {
+          "type": "number"
+        },
+        "period": {
+          "type": "text"
+        },
+        "features_list": {
+          "type": "repeater"
+        },
+        "button_text": {
+          "type": "text"
+        },
+        "link": {
+          "type": "url"
+        },
+        "footer_additional_info": {
+          "type": "textarea"
+        },
+        "show_ribbon": {
+          "type": "switcher"
+        },
+        "ribbon_title": {
+          "type": "text"
+        },
+        "ribbon_horizontal_position": {
+          "type": "choose"
+        },
+        "ribbon_bg_color": {
+          "type": "color"
+        },
+        "ribbon_text_color": {
+          "type": "color"
+        },
+        "header_bg_color": {
+          "type": "color"
+        },
+        "heading_color": {
+          "type": "color"
+        },
+        "pricing_element_bg_color": {
+          "type": "color"
+        },
+        "price_color": {
+          "type": "color"
+        },
+        "features_list_bg_color": {
+          "type": "color"
+        },
+        "features_list_color": {
+          "type": "color"
+        },
+        "features_list_alignment": {
+          "type": "choose"
+        },
+        "footer_bg_color": {
+          "type": "color"
+        },
+        "button_background_color": {
+          "type": "color"
+        },
+        "button_text_color": {
+          "type": "color"
+        }
+      }
+    },
+    "price-list": {
+      "title": "Price List",
+      "controls": {
+        "price_list": {
+          "type": "repeater"
+        },
+        "title_tag": {
+          "type": "select"
+        },
+        "description_tag": {
+          "type": "select"
+        },
+        "image_size_size": {
+          "type": "select"
+        },
+        "heading_color": {
+          "type": "color"
+        },
+        "price_color": {
+          "type": "color"
+        },
+        "description_color": {
+          "type": "color"
+        },
+        "separator_style": {
+          "type": "select"
+        },
+        "separator_color": {
+          "type": "color"
+        },
+        "vertical_align": {
+          "type": "choose"
+        }
+      }
+    },
+    "paypal-button": {
+      "title": "PayPal Button",
+      "controls": {
+        "email": {
+          "type": "text"
+        },
+        "type": {
+          "type": "select"
+        },
+        "product_name": {
+          "type": "text"
+        },
+        "product_sku": {
+          "type": "text"
+        },
+        "product_price": {
+          "type": "number"
+        },
+        "donation_type": {
+          "type": "select"
+        },
+        "donation_amount": {
+          "type": "number"
+        },
+        "currency": {
+          "type": "select"
+        },
+        "billing_cycle": {
+          "type": "select"
+        },
+        "auto_renewal": {
+          "type": "switcher"
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "shipping_price": {
+          "type": "number"
+        },
+        "tax_type": {
+          "type": "select"
+        },
+        "tax_rate": {
+          "type": "number"
+        },
+        "text": {
+          "type": "text"
+        },
+        "selected_icon": {
+          "type": "icons"
+        },
+        "button_css_id": {
+          "type": "text"
+        },
+        "redirect_after_success": {
+          "type": "url"
+        },
+        "sandbox_mode": {
+          "type": "switcher"
+        },
+        "open_in_new_window": {
+          "type": "switcher"
+        },
+        "custom_messages": {
+          "type": "switcher"
+        },
+        "error_message_global": {
+          "type": "text"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "background_color": {
+          "type": "color"
+        },
+        "button_text_color": {
+          "type": "color"
+        }
+      }
+    },
+    "stripe-button": {
+      "title": "Stripe Button",
+      "controls": {
+        "product_name": {
+          "type": "text"
+        },
+        "stripe_product_price": {
+          "type": "number"
+        },
+        "stripe_currency": {
+          "type": "select2"
+        },
+        "stripe_quantity": {
+          "type": "number"
+        },
+        "donation_type": {
+          "type": "select"
+        },
+        "donation_amount": {
+          "type": "number"
+        },
+        "shipping_price": {
+          "type": "number"
+        },
+        "tax_rate": {
+          "type": "number"
+        },
+        "text": {
+          "type": "text"
+        },
+        "selected_icon": {
+          "type": "icons"
+        },
+        "button_css_id": {
+          "type": "text"
+        },
+        "redirect_after_success": {
+          "type": "url"
+        },
+        "sandbox_mode": {
+          "type": "switcher"
+        },
+        "open_in_new_window": {
+          "type": "switcher"
+        },
+        "custom_messages": {
+          "type": "switcher"
+        },
+        "error_message_global": {
+          "type": "text"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "background_color": {
+          "type": "color"
+        },
+        "button_text_color": {
+          "type": "color"
+        }
+      }
+    },
     "heading": {
       "title": "Heading",
       "controls": {
@@ -372,50 +638,6 @@
         }
       }
     },
-    "price-table": {
-      "title": "Price Table",
-      "controls": {
-        "heading": {
-          "type": "text"
-        },
-        "sub_heading": {
-          "type": "text"
-        },
-        "price": {
-          "type": "text"
-        },
-        "currency_symbol": {
-          "type": "select"
-        },
-        "sale": {
-          "type": "switcher"
-        },
-        "original_price": {
-          "type": "number"
-        },
-        "period": {
-          "type": "text"
-        },
-        "features_list": {
-          "type": "repeater"
-        },
-        "button_text": {
-          "type": "text"
-        },
-        "link": {
-          "type": "url"
-        },
-        "footer_additional_info": {
-          "type": "textarea"
-        },
-        "show_ribbon": {
-          "type": "switcher"
-        },
-        "ribbon_title": {
-          "type": "text"
-        }
-      }
-    },
     "posts": {
       "title": "Posts",
       "controls": {
@@ -455,17 +677,6 @@
         },
         "autoplay": {
           "type": "switcher"
-        }
-      }
-    },
-    "price-list": {
-      "title": "Price List",
-      "controls": {
-        "price_list": {
-          "type": "repeater"
-        },
-        "title_tag": {
-          "type": "select"
         }
       }
     },
