@@ -266,7 +266,13 @@ describe('every widget declares what plan it needs', () => {
       assert.ok(tier, `${kind} has no tier`);
       assert.ok(tier === 'free' || tier === 'pro' || tier.startsWith('ia:'), `${kind}: ${tier}`);
       assert.ok(ELEMENTOR_WIDGETS[kind].widgetType, `${kind} names no page widget`);
-      assert.equal(typeof ELEMENTOR_WIDGETS[kind].settings, 'function', `${kind} has no settings`);
+      /* D-165: a row either writes one widget's settings, or BUILDS a tree of
+         free widgets (`node`) — §11.13.3's compositions. Exactly one of the
+         two, because a row with both has two answers to "what gets
+         published" and a row with neither publishes nothing. */
+      const row = ELEMENTOR_WIDGETS[kind];
+      const ways = [typeof row.settings === 'function', typeof row.node === 'function'].filter(Boolean);
+      assert.equal(ways.length, 1, `${kind} must have exactly one of settings() and node()`);
     }
   });
 
@@ -276,9 +282,18 @@ describe('every widget declares what plan it needs', () => {
   });
 
   test('the paid ones are the paid ones, and ours are ours', () => {
-    assert.deepEqual(proWidgetKinds(), ['card', 'form']);
-    assert.deepEqual(iaWidgetKinds(), [
-      { kind: 'catalog_card', product: 'oliver', widgetType: 'ia_product_cards' },
+    /* D-165 §11.13.3 — the whole paid panel is offered and refused by name on
+       Lite, and the IA list is the one the section names. Both lists are read
+       off the catalogue rather than typed anywhere else. */
+    assert.deepEqual(proWidgetKinds(), [
+      'call_to_action', 'card', 'countdown', 'flip_box', 'form', 'loop_grid', 'nav_menu',
+      'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides', 'testimonial_carousel',
+    ]);
+    assert.deepEqual(iaWidgetKinds().map((w) => `${w.kind}:${w.product}`), [
+      'book_now:oliver', 'catalog_card:oliver', 'hours_location:lumen',
+      'ia_form:lumen', 'ia_mega_menu:arion', 'ia_mobile_menu:arion',
+      'ia_oliver_invoice:oliver', 'ia_posts:arion', 'ia_social_links:arion',
+      'newsletter_signup:lumen', 'product_cards:oliver', 'reviews:lumen',
     ]);
   });
 

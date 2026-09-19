@@ -1,0 +1,655 @@
+{
+  "widgets": {
+    "heading": {
+      "title": "Heading",
+      "controls": {
+        "title": {
+          "type": "textarea"
+        },
+        "header_size": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        }
+      }
+    },
+    "text-editor": {
+      "title": "Text Editor",
+      "controls": {
+        "editor": {
+          "type": "wysiwyg"
+        },
+        "align": {
+          "type": "choose"
+        }
+      }
+    },
+    "icon-list": {
+      "title": "Icon List",
+      "controls": {
+        "icon_list": {
+          "type": "repeater"
+        }
+      }
+    },
+    "divider": {
+      "title": "Divider",
+      "controls": {
+        "style": {
+          "type": "select"
+        }
+      }
+    },
+    "spacer": {
+      "title": "Spacer",
+      "controls": {
+        "space": {
+          "type": "slider"
+        }
+      }
+    },
+    "image": {
+      "title": "Image",
+      "controls": {
+        "image": {
+          "type": "media"
+        },
+        "image_size": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "caption": {
+          "type": "text"
+        }
+      }
+    },
+    "image-gallery": {
+      "title": "Basic Gallery",
+      "controls": {
+        "wp_gallery": {
+          "type": "gallery"
+        },
+        "gallery_columns": {
+          "type": "select"
+        }
+      }
+    },
+    "video": {
+      "title": "Video",
+      "controls": {
+        "youtube_url": {
+          "type": "text"
+        },
+        "video_type": {
+          "type": "select"
+        }
+      }
+    },
+    "button": {
+      "title": "Button",
+      "controls": {
+        "text": {
+          "type": "text"
+        },
+        "link": {
+          "type": "url"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "size": {
+          "type": "select"
+        }
+      }
+    },
+    "html": {
+      "title": "HTML",
+      "controls": {
+        "html": {
+          "type": "code"
+        }
+      }
+    },
+    "shortcode": {
+      "title": "Shortcode",
+      "controls": {
+        "shortcode": {
+          "type": "textarea"
+        }
+      }
+    },
+    "google_maps": {
+      "title": "Google Maps",
+      "controls": {
+        "address": {
+          "type": "text"
+        },
+        "zoom": {
+          "type": "slider"
+        }
+      }
+    },
+    "image-box": {
+      "title": "Image Box",
+      "controls": {
+        "image": {
+          "type": "media"
+        },
+        "title_text": {
+          "type": "text"
+        },
+        "description_text": {
+          "type": "textarea"
+        },
+        "position": {
+          "type": "choose"
+        },
+        "title_size": {
+          "type": "select"
+        }
+      }
+    },
+    "icon-box": {
+      "title": "Icon Box",
+      "controls": {
+        "selected_icon": {
+          "type": "icons"
+        },
+        "title_text": {
+          "type": "text"
+        },
+        "description_text": {
+          "type": "textarea"
+        },
+        "position": {
+          "type": "choose"
+        },
+        "title_size": {
+          "type": "select"
+        }
+      }
+    },
+    "counter": {
+      "title": "Counter",
+      "controls": {
+        "starting_number": {
+          "type": "number"
+        },
+        "ending_number": {
+          "type": "number"
+        },
+        "prefix": {
+          "type": "text"
+        },
+        "suffix": {
+          "type": "text"
+        },
+        "title": {
+          "type": "text"
+        }
+      }
+    },
+    "accordion": {
+      "title": "Accordion",
+      "controls": {
+        "tabs": {
+          "type": "repeater"
+        }
+      }
+    },
+    "icon": {
+      "title": "Icon",
+      "controls": {
+        "selected_icon": {
+          "type": "icons"
+        },
+        "view": {
+          "type": "select"
+        },
+        "shape": {
+          "type": "select"
+        },
+        "link": {
+          "type": "url"
+        }
+      }
+    },
+    "testimonial": {
+      "title": "Testimonial",
+      "controls": {
+        "testimonial_content": {
+          "type": "textarea"
+        },
+        "testimonial_name": {
+          "type": "text"
+        },
+        "testimonial_job": {
+          "type": "text"
+        },
+        "testimonial_image": {
+          "type": "media"
+        },
+        "testimonial_image_position": {
+          "type": "choose"
+        },
+        "testimonial_alignment": {
+          "type": "choose"
+        }
+      }
+    },
+    "star-rating": {
+      "title": "Star Rating",
+      "controls": {
+        "rating": {
+          "type": "number"
+        },
+        "rating_scale": {
+          "type": "select"
+        },
+        "title": {
+          "type": "text"
+        },
+        "star_style": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        }
+      }
+    },
+    "alert": {
+      "title": "Alert",
+      "controls": {
+        "alert_type": {
+          "type": "select"
+        },
+        "alert_title": {
+          "type": "text"
+        },
+        "alert_description": {
+          "type": "textarea"
+        },
+        "show_dismiss": {
+          "type": "switcher"
+        }
+      }
+    },
+    "social-icons": {
+      "title": "Social Icons",
+      "controls": {
+        "social_icon_list": {
+          "type": "repeater"
+        },
+        "shape": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        }
+      }
+    },
+    "tabs": {
+      "title": "Tabs",
+      "controls": {
+        "tabs": {
+          "type": "repeater"
+        },
+        "type": {
+          "type": "choose"
+        }
+      }
+    },
+    "toggle": {
+      "title": "Toggle",
+      "controls": {
+        "tabs": {
+          "type": "repeater"
+        },
+        "title_html_tag": {
+          "type": "select"
+        }
+      }
+    },
+    "image-carousel": {
+      "title": "Image Carousel",
+      "controls": {
+        "carousel": {
+          "type": "gallery"
+        },
+        "navigation": {
+          "type": "select"
+        },
+        "image_stretch": {
+          "type": "select"
+        },
+        "autoplay": {
+          "type": "switcher"
+        },
+        "infinite": {
+          "type": "switcher"
+        }
+      }
+    },
+    "progress": {
+      "title": "Progress Bar",
+      "controls": {
+        "title": {
+          "type": "text"
+        },
+        "percent": {
+          "type": "slider"
+        },
+        "display_percentage": {
+          "type": "switcher"
+        },
+        "inner_text": {
+          "type": "text"
+        }
+      }
+    },
+    "menu-anchor": {
+      "title": "Menu Anchor",
+      "controls": {
+        "anchor": {
+          "type": "text"
+        }
+      }
+    },
+    "form": {
+      "title": "Form",
+      "controls": {
+        "form_name": {
+          "type": "text"
+        },
+        "email_to": {
+          "type": "text"
+        },
+        "form_fields": {
+          "type": "form-fields-repeater"
+        }
+      }
+    },
+    "price-table": {
+      "title": "Price Table",
+      "controls": {
+        "heading": {
+          "type": "text"
+        },
+        "sub_heading": {
+          "type": "text"
+        },
+        "price": {
+          "type": "text"
+        },
+        "currency_symbol": {
+          "type": "select"
+        },
+        "sale": {
+          "type": "switcher"
+        },
+        "original_price": {
+          "type": "number"
+        },
+        "period": {
+          "type": "text"
+        },
+        "features_list": {
+          "type": "repeater"
+        },
+        "button_text": {
+          "type": "text"
+        },
+        "link": {
+          "type": "url"
+        },
+        "footer_additional_info": {
+          "type": "textarea"
+        },
+        "show_ribbon": {
+          "type": "switcher"
+        },
+        "ribbon_title": {
+          "type": "text"
+        }
+      }
+    },
+    "posts": {
+      "title": "Posts",
+      "controls": {
+        "_skin": {
+          "type": "select"
+        },
+        "classic_columns": {
+          "type": "select"
+        },
+        "classic_posts_per_page": {
+          "type": "number"
+        }
+      }
+    },
+    "gallery": {
+      "title": "Gallery",
+      "controls": {
+        "gallery_type": {
+          "type": "select"
+        },
+        "gallery_layout": {
+          "type": "select"
+        },
+        "columns": {
+          "type": "number"
+        }
+      }
+    },
+    "slides": {
+      "title": "Slides",
+      "controls": {
+        "slides": {
+          "type": "repeater"
+        },
+        "navigation": {
+          "type": "select"
+        },
+        "autoplay": {
+          "type": "switcher"
+        }
+      }
+    },
+    "price-list": {
+      "title": "Price List",
+      "controls": {
+        "price_list": {
+          "type": "repeater"
+        },
+        "title_tag": {
+          "type": "select"
+        }
+      }
+    },
+    "call-to-action": {
+      "title": "Call to Action",
+      "controls": {
+        "skin": {
+          "type": "select"
+        },
+        "title": {
+          "type": "text"
+        },
+        "description": {
+          "type": "textarea"
+        },
+        "button": {
+          "type": "text"
+        },
+        "link": {
+          "type": "url"
+        }
+      }
+    },
+    "flip-box": {
+      "title": "Flip Box",
+      "controls": {
+        "title_text_a": {
+          "type": "text"
+        },
+        "description_text_a": {
+          "type": "textarea"
+        },
+        "title_text_b": {
+          "type": "text"
+        },
+        "description_text_b": {
+          "type": "textarea"
+        },
+        "button_text": {
+          "type": "text"
+        },
+        "link": {
+          "type": "url"
+        }
+      }
+    },
+    "countdown": {
+      "title": "Countdown",
+      "controls": {
+        "countdown_type": {
+          "type": "select"
+        },
+        "due_date": {
+          "type": "date_time"
+        },
+        "show_days": {
+          "type": "switcher"
+        },
+        "show_hours": {
+          "type": "switcher"
+        },
+        "show_minutes": {
+          "type": "switcher"
+        },
+        "show_seconds": {
+          "type": "switcher"
+        }
+      }
+    },
+    "testimonial-carousel": {
+      "title": "Testimonial Carousel",
+      "controls": {
+        "slides": {
+          "type": "repeater"
+        }
+      }
+    },
+    "reviews": {
+      "title": "Reviews",
+      "controls": {
+        "slides": {
+          "type": "repeater"
+        }
+      }
+    },
+    "nav-menu": {
+      "title": "WordPress Menu",
+      "controls": {
+        "menu": {
+          "type": "select"
+        },
+        "layout": {
+          "type": "select"
+        }
+      }
+    },
+    "loop-grid": {
+      "title": "Loop Grid",
+      "controls": {
+        "_skin": {
+          "type": "select"
+        },
+        "columns": {
+          "type": "number"
+        },
+        "posts_per_page": {
+          "type": "number"
+        }
+      }
+    },
+    "ia_mega_menu": {
+      "title": "IA Mega Menu",
+      "controls": {
+        "menu_source": {
+          "type": "select"
+        },
+        "wp_menu": {
+          "type": "select"
+        },
+        "menu_style": {
+          "type": "select"
+        }
+      }
+    },
+    "ia_mobile_menu": {
+      "title": "IA Mobile Menu",
+      "controls": {
+        "menu_source": {
+          "type": "select"
+        },
+        "wp_menu": {
+          "type": "select"
+        },
+        "style": {
+          "type": "select"
+        }
+      }
+    },
+    "ia_posts": {
+      "title": "IA Posts",
+      "controls": {
+        "posts_per_page": {
+          "type": "number"
+        },
+        "columns": {
+          "type": "select"
+        }
+      }
+    },
+    "ia_oliver_invoice": {
+      "title": "IA OLIVER Invoice",
+      "controls": {
+        "business_name": {
+          "type": "text"
+        },
+        "show_book_again_cta": {
+          "type": "switcher"
+        },
+        "book_again_url": {
+          "type": "url"
+        }
+      }
+    },
+    "ia_social_links": {
+      "title": "IA Social Links",
+      "controls": {
+        "platforms": {
+          "type": "select2"
+        },
+        "shape": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        }
+      }
+    }
+  },
+  "unregistered": [
+    {
+      "kind": "catalog_card",
+      "widgetType": "ia_product_cards",
+      "hasFallback": true
+    }
+  ],
+  "note": "Generated by scripts/dev/extract-widget-controls.mjs from BUILDER_WIDGET_CATALOG_2026-09-17.pro.json (Elementor 4.1.4 free + Pro 4.1.1, read off the live IA site 2026-09-17). Regenerate when the emitter gains a key or the engine is upgraded, and read the diff — a fixture regenerated without looking at is a test that agrees with whatever you did."
+}
