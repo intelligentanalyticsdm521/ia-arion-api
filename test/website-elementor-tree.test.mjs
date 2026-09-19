@@ -285,9 +285,16 @@ describe('every widget declares what plan it needs', () => {
     /* D-165 §11.13.3 — the whole paid panel is offered and refused by name on
        Lite, and the IA list is the one the section names. Both lists are read
        off the catalogue rather than typed anywhere else. */
+    /* `login` joined the paid panel with B-168 F8 — Elementor's own Login
+       widget, `pro-elements`, offered on the website panel by the offer file
+       Brandon approved on 2026-09-19. `form` and `nav_menu` are the same two
+       rows as before: they MOVED out of elementorWidgets.js into
+       families/f8-contact-furniture and kept their kind, their widgetType and
+       their tier, so this list is one name longer and not one name different. */
     assert.deepEqual(proWidgetKinds(), [
-      'call_to_action', 'card', 'countdown', 'flip_box', 'form', 'loop_grid', 'nav_menu',
-      'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides', 'testimonial_carousel',
+      'call_to_action', 'card', 'countdown', 'flip_box', 'form', 'login', 'loop_grid',
+      'nav_menu', 'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides',
+      'testimonial_carousel',
     ]);
     assert.deepEqual(iaWidgetKinds().map((w) => `${w.kind}:${w.product}`), [
       'book_now:oliver', 'catalog_card:oliver', 'hours_location:lumen',

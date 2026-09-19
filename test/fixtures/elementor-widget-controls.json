@@ -1,5 +1,197 @@
 {
   "widgets": {
+    "form": {
+      "title": "Form",
+      "controls": {
+        "form_name": {
+          "type": "text"
+        },
+        "email_to": {
+          "type": "text"
+        },
+        "form_fields": {
+          "type": "form-fields-repeater"
+        },
+        "input_size": {
+          "type": "select"
+        },
+        "show_labels": {
+          "type": "switcher"
+        },
+        "mark_required": {
+          "type": "switcher"
+        },
+        "button_size": {
+          "type": "select"
+        },
+        "button_width": {
+          "type": "select"
+        },
+        "button_text": {
+          "type": "text"
+        },
+        "column_gap": {
+          "type": "slider"
+        },
+        "row_gap": {
+          "type": "slider"
+        },
+        "label_color": {
+          "type": "color"
+        },
+        "field_text_color": {
+          "type": "color"
+        },
+        "field_background_color": {
+          "type": "color"
+        },
+        "field_border_color": {
+          "type": "color"
+        },
+        "button_background_color": {
+          "type": "color"
+        },
+        "button_text_color": {
+          "type": "color"
+        }
+      }
+    },
+    "login": {
+      "title": "Login",
+      "controls": {
+        "show_labels": {
+          "type": "switcher"
+        },
+        "input_size": {
+          "type": "select"
+        },
+        "button_text": {
+          "type": "text"
+        },
+        "button_size": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "show_lost_password": {
+          "type": "switcher"
+        },
+        "show_remember_me": {
+          "type": "switcher"
+        },
+        "show_logged_in_message": {
+          "type": "switcher"
+        },
+        "redirect_after_login": {
+          "type": "switcher"
+        },
+        "redirect_url": {
+          "type": "url"
+        },
+        "redirect_after_logout": {
+          "type": "switcher"
+        },
+        "redirect_logout_url": {
+          "type": "url"
+        },
+        "row_gap": {
+          "type": "slider"
+        },
+        "links_color": {
+          "type": "color"
+        },
+        "label_color": {
+          "type": "color"
+        },
+        "field_text_color": {
+          "type": "color"
+        },
+        "field_background_color": {
+          "type": "color"
+        },
+        "field_border_color": {
+          "type": "color"
+        },
+        "button_text_color": {
+          "type": "color"
+        },
+        "button_background_color": {
+          "type": "color"
+        },
+        "button_border_color": {
+          "type": "color"
+        }
+      }
+    },
+    "nav-menu": {
+      "title": "WordPress Menu",
+      "controls": {
+        "menu": {
+          "type": "select"
+        },
+        "menu_name": {
+          "type": "text"
+        },
+        "layout": {
+          "type": "select"
+        },
+        "align_items": {
+          "type": "choose"
+        },
+        "pointer": {
+          "type": "select"
+        },
+        "dropdown": {
+          "type": "select"
+        },
+        "full_width": {
+          "type": "switcher"
+        },
+        "text_align": {
+          "type": "select"
+        },
+        "toggle": {
+          "type": "select"
+        },
+        "toggle_align": {
+          "type": "choose"
+        },
+        "color_menu_item": {
+          "type": "color"
+        },
+        "pointer_color_menu_item_hover": {
+          "type": "color"
+        },
+        "menu_space_between": {
+          "type": "slider"
+        },
+        "padding_horizontal_menu_item": {
+          "type": "slider"
+        },
+        "padding_vertical_menu_item": {
+          "type": "slider"
+        },
+        "border_radius_menu_item": {
+          "type": "slider"
+        },
+        "color_dropdown_item": {
+          "type": "color"
+        },
+        "background_color_dropdown_item": {
+          "type": "color"
+        },
+        "toggle_color": {
+          "type": "color"
+        },
+        "toggle_background_color": {
+          "type": "color"
+        },
+        "toggle_size": {
+          "type": "slider"
+        }
+      }
+    },
     "heading": {
       "title": "Heading",
       "controls": {
@@ -358,20 +550,6 @@
         }
       }
     },
-    "form": {
-      "title": "Form",
-      "controls": {
-        "form_name": {
-          "type": "text"
-        },
-        "email_to": {
-          "type": "text"
-        },
-        "form_fields": {
-          "type": "form-fields-repeater"
-        }
-      }
-    },
     "price-table": {
       "title": "Price Table",
       "controls": {
@@ -548,17 +726,6 @@
       "controls": {
         "slides": {
           "type": "repeater"
-        }
-      }
-    },
-    "nav-menu": {
-      "title": "WordPress Menu",
-      "controls": {
-        "menu": {
-          "type": "select"
-        },
-        "layout": {
-          "type": "select"
         }
       }
     },
