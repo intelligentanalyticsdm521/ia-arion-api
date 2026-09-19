@@ -1,97 +1,5 @@
 {
   "widgets": {
-    "counter": {
-      "title": "Counter",
-      "controls": {
-        "starting_number": {
-          "type": "number"
-        },
-        "ending_number": {
-          "type": "number"
-        },
-        "prefix": {
-          "type": "text"
-        },
-        "suffix": {
-          "type": "text"
-        },
-        "title": {
-          "type": "text"
-        },
-        "title_tag": {
-          "type": "select"
-        },
-        "thousand_separator": {
-          "type": "switcher"
-        }
-      }
-    },
-    "progress": {
-      "title": "Progress Bar",
-      "controls": {
-        "title": {
-          "type": "text"
-        },
-        "title_tag": {
-          "type": "select"
-        },
-        "title_display": {
-          "type": "switcher"
-        },
-        "progress_type": {
-          "type": "select"
-        },
-        "percent": {
-          "type": "slider"
-        },
-        "display_percentage": {
-          "type": "switcher"
-        },
-        "inner_text": {
-          "type": "text"
-        }
-      }
-    },
-    "star-rating": {
-      "title": "Star Rating",
-      "controls": {
-        "rating": {
-          "type": "number"
-        },
-        "rating_scale": {
-          "type": "select"
-        },
-        "title": {
-          "type": "text"
-        },
-        "star_style": {
-          "type": "select"
-        },
-        "align": {
-          "type": "choose"
-        }
-      }
-    },
-    "progress-tracker": {
-      "title": "Progress Tracker",
-      "controls": {
-        "type": {
-          "type": "select"
-        },
-        "relative_to": {
-          "type": "select"
-        },
-        "percentage": {
-          "type": "switcher"
-        },
-        "align": {
-          "type": "choose"
-        },
-        "direction": {
-          "type": "choose"
-        }
-      }
-    },
     "heading": {
       "title": "Heading",
       "controls": {
@@ -264,14 +172,6 @@
         }
       }
     },
-    "accordion": {
-      "title": "Accordion",
-      "controls": {
-        "tabs": {
-          "type": "repeater"
-        }
-      }
-    },
     "icon": {
       "title": "Icon",
       "controls": {
@@ -339,17 +239,6 @@
           "type": "select"
         },
         "align": {
-          "type": "choose"
-        }
-      }
-    },
-    "tabs": {
-      "title": "Tabs",
-      "controls": {
-        "tabs": {
-          "type": "repeater"
-        },
-        "type": {
           "type": "choose"
         }
       }
@@ -674,6 +563,339 @@
           "type": "select"
         },
         "align": {
+          "type": "choose"
+        }
+      }
+    },
+    "counter": {
+      "title": "Counter",
+      "controls": {
+        "starting_number": {
+          "type": "number"
+        },
+        "ending_number": {
+          "type": "number"
+        },
+        "prefix": {
+          "type": "text"
+        },
+        "suffix": {
+          "type": "text"
+        },
+        "title": {
+          "type": "text"
+        },
+        "title_tag": {
+          "type": "select"
+        },
+        "thousand_separator": {
+          "type": "switcher"
+        },
+        "duration": {
+          "type": "number"
+        },
+        "thousand_separator_char": {
+          "type": "select"
+        },
+        "title_position": {
+          "type": "choose"
+        },
+        "title_horizontal_alignment": {
+          "type": "choose"
+        },
+        "number_alignment": {
+          "type": "choose"
+        },
+        "title_gap": {
+          "type": "slider"
+        },
+        "number_color": {
+          "type": "color"
+        },
+        "typography_number_font_size": {
+          "type": "slider"
+        },
+        "typography_number_font_weight": {
+          "type": "select"
+        },
+        "typography_number_typography": {
+          "type": "popover_toggle"
+        },
+        "title_color": {
+          "type": "color"
+        },
+        "typography_title_font_size": {
+          "type": "slider"
+        },
+        "typography_title_font_weight": {
+          "type": "select"
+        },
+        "typography_title_typography": {
+          "type": "popover_toggle"
+        }
+      }
+    },
+    "progress": {
+      "title": "Progress Bar",
+      "controls": {
+        "title": {
+          "type": "text"
+        },
+        "title_tag": {
+          "type": "select"
+        },
+        "title_display": {
+          "type": "switcher"
+        },
+        "progress_type": {
+          "type": "select"
+        },
+        "percent": {
+          "type": "slider"
+        },
+        "display_percentage": {
+          "type": "switcher"
+        },
+        "inner_text": {
+          "type": "text"
+        },
+        "title_color": {
+          "type": "color"
+        },
+        "typography_font_size": {
+          "type": "slider"
+        },
+        "typography_font_weight": {
+          "type": "select"
+        },
+        "typography_typography": {
+          "type": "popover_toggle"
+        },
+        "bar_color": {
+          "type": "color"
+        },
+        "bar_bg_color": {
+          "type": "color"
+        },
+        "bar_height": {
+          "type": "slider"
+        },
+        "bar_border_radius": {
+          "type": "slider"
+        },
+        "bar_inline_color": {
+          "type": "color"
+        },
+        "bar_inner_typography_font_size": {
+          "type": "slider"
+        },
+        "bar_inner_typography_typography": {
+          "type": "popover_toggle"
+        }
+      }
+    },
+    "star-rating": {
+      "title": "Star Rating",
+      "controls": {
+        "rating": {
+          "type": "number"
+        },
+        "rating_scale": {
+          "type": "select"
+        },
+        "title": {
+          "type": "text"
+        },
+        "star_style": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "stars_color": {
+          "type": "color"
+        },
+        "stars_unmarked_color": {
+          "type": "color"
+        },
+        "icon_size": {
+          "type": "slider"
+        },
+        "icon_space": {
+          "type": "slider"
+        }
+      }
+    },
+    "nested-tabs": {
+      "title": "Tabs",
+      "controls": {
+        "tabs": {
+          "type": "nested-elements-repeater"
+        },
+        "tabs_direction": {
+          "type": "choose"
+        },
+        "tabs_justify_horizontal": {
+          "type": "choose"
+        },
+        "tabs_justify_vertical": {
+          "type": "choose"
+        },
+        "tabs_width": {
+          "type": "slider"
+        },
+        "title_alignment": {
+          "type": "choose"
+        },
+        "tabs_title_space_between": {
+          "type": "slider"
+        },
+        "tabs_title_spacing": {
+          "type": "slider"
+        },
+        "tabs_title_background_color_background": {
+          "type": "choose"
+        },
+        "tabs_title_background_color_color": {
+          "type": "color"
+        },
+        "tabs_title_border_border": {
+          "type": "select"
+        },
+        "tabs_title_border_color": {
+          "type": "color"
+        },
+        "tabs_title_background_color_active_background": {
+          "type": "choose"
+        },
+        "tabs_title_background_color_active_color": {
+          "type": "color"
+        },
+        "title_text_color": {
+          "type": "color"
+        },
+        "title_text_color_active": {
+          "type": "color"
+        },
+        "title_typography_font_size": {
+          "type": "slider"
+        },
+        "title_typography_font_weight": {
+          "type": "select"
+        },
+        "title_typography_typography": {
+          "type": "popover_toggle"
+        },
+        "box_background_color_background": {
+          "type": "choose"
+        },
+        "box_background_color_color": {
+          "type": "color"
+        },
+        "box_border_border": {
+          "type": "select"
+        },
+        "box_border_color": {
+          "type": "color"
+        },
+        "box_padding": {
+          "type": "dimensions"
+        }
+      }
+    },
+    "nested-accordion": {
+      "title": "Accordion",
+      "controls": {
+        "items": {
+          "type": "nested-elements-repeater"
+        },
+        "title_tag": {
+          "type": "select"
+        },
+        "accordion_item_title_position_horizontal": {
+          "type": "choose"
+        },
+        "accordion_item_title_icon_position": {
+          "type": "choose"
+        },
+        "faq_schema": {
+          "type": "switcher"
+        },
+        "default_state": {
+          "type": "select"
+        },
+        "accordion_item_title_space_between": {
+          "type": "slider"
+        },
+        "accordion_item_title_distance_from_content": {
+          "type": "slider"
+        },
+        "accordion_background_normal_background": {
+          "type": "choose"
+        },
+        "accordion_background_normal_color": {
+          "type": "color"
+        },
+        "accordion_border_normal_border": {
+          "type": "select"
+        },
+        "accordion_border_normal_color": {
+          "type": "color"
+        },
+        "normal_title_color": {
+          "type": "color"
+        },
+        "active_title_color": {
+          "type": "color"
+        },
+        "title_typography_font_size": {
+          "type": "slider"
+        },
+        "title_typography_font_weight": {
+          "type": "select"
+        },
+        "title_typography_typography": {
+          "type": "popover_toggle"
+        },
+        "normal_icon_color": {
+          "type": "color"
+        },
+        "icon_spacing": {
+          "type": "slider"
+        },
+        "content_background_background": {
+          "type": "choose"
+        },
+        "content_background_color": {
+          "type": "color"
+        },
+        "content_border_border": {
+          "type": "select"
+        },
+        "content_border_color": {
+          "type": "color"
+        },
+        "content_padding": {
+          "type": "dimensions"
+        }
+      }
+    },
+    "progress-tracker": {
+      "title": "Progress Tracker",
+      "controls": {
+        "type": {
+          "type": "select"
+        },
+        "relative_to": {
+          "type": "select"
+        },
+        "percentage": {
+          "type": "switcher"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "direction": {
           "type": "choose"
         }
       }

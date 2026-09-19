@@ -58,8 +58,18 @@ const WEBSITE_EXTRAS = {
   map: 'google_maps',
   counter: 'counter',
   progress_bar: 'progress',
-  tabs: 'tabs',
-  accordion: 'accordion',
+  /* CHANGED 2026-09-19 (b168/f4-moving-deep). These two used to read
+     `tabs: 'tabs'` and `accordion: 'accordion'`, and that was plan section
+     B.2's open defect written down as an expectation: in the real editor
+     `tabs` and `accordion` are BOTH `show_in_panel: false` — deprecated
+     widgets nobody can add any more — and the tiles a person sees named Tabs
+     and Accordion are `nested-tabs` and `nested-accordion`. The family now
+     publishes the nested tree, from a live capture of what Elementor itself
+     writes (elementor-reference/widgets/_g4_nested_tree.json), so the map says
+     so. They are NESTED elements and therefore build a `node()` rather than
+     `settings()`, which is why the two exceptions below exist. */
+  tabs: 'nested-tabs',
+  accordion: 'nested-accordion',
   toggle: 'toggle',
   image_carousel: 'image-carousel',
   gallery: 'image-gallery',
@@ -84,6 +94,10 @@ describe('the standard set maps one for one onto the page engine', () => {
       const row = ELEMENTOR_WIDGETS[kind];
       assert.ok(row, `§11.13.3 names ${kind} and there is no row for it`);
       assert.equal(row.widgetType, widgetType);
+      /* A nested element builds a tree, so it has `node()` and no
+         `settings()`; everything else is the other way round. Asserted here
+         so "it has neither" cannot pass as "it is nested". */
+      assert.equal(typeof (row.settings || row.node), 'function', `${kind} draws nothing`);
       assert.equal(row.tier, FREE, `${kind} is a free widget on every website on earth`);
       assert.ok(PIN.widgets[widgetType], `${widgetType} is not in the machine-file extract`);
     });
@@ -113,7 +127,11 @@ describe('the standard set maps one for one onto the page engine', () => {
       ['social_links', 'shape', 'rounded'],
       ['testimonial', 'testimonial_image_position', 'aside'],
       ['testimonial', 'testimonial_alignment', 'center'],
-      ['tabs', 'type', 'horizontal'],
+      /* `tabs` is gone from this list, and not because the guard weakened:
+         Elementor's `nested-tabs` has no `type` control at all. Its direction
+         control is `tabs_direction`, it is guarded the same way, and the
+         family's own test drives it with "diagonal" and reads back
+         "block-start". See test/website-families-f4-moving.test.js. */
       ['image_carousel', 'navigation', 'both'],
     ]) {
       const emitted = ELEMENTOR_WIDGETS[kind].settings(wild, WIDGET_CTX);

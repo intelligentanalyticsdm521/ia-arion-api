@@ -36,6 +36,7 @@ const KEYS_CANDIDATES = [
   /* the seam's own worktree, and this family's, while the branch is in flight */
   'Portal-septa-b168s',
   'Portal-septa-b168f4',
+  'Portal-septa-b168g4',
 ].map((d) => path.join('C:', 'dev', 'iadm', d, 'test', 'fixtures', 'WIDGET_SETTINGS_KEYS.json'));
 const KEYS_FILE = KEYS_CANDIDATES.find((p) => fs.existsSync(p)) || KEYS_CANDIDATES[0];
 const HAVE_KEYS = fs.existsSync(KEYS_FILE);
@@ -64,12 +65,18 @@ function assertKeys(kind, props = {}, ctx = {}) {
   return row;
 }
 
-test('the family publishes four rows, each one a real Elementor widget', () => {
+test('the family publishes six rows, each one a real Elementor widget', () => {
   assert.deepEqual(Object.keys(EMITTERS).sort(),
-    ['counter', 'progress_bar', 'progress_tracker', 'star_rating']);
+    ['accordion', 'counter', 'progress_bar', 'progress_tracker', 'star_rating', 'tabs']);
   for (const [kind, row] of Object.entries(EMITTERS)) {
     assert.ok(row.widgetType, `${kind}: no widgetType`);
-    assert.equal(typeof row.settings, 'function', `${kind}: no settings(props, ctx)`);
+    /* EXACTLY ONE of settings() and node(). A NESTED element (Tabs,
+       Accordion) has to build its own tree, because its panels are child
+       containers; everything else produces settings. A row with both has two
+       answers and `website-elementor-tree.test.mjs` refuses it. */
+    const two = [typeof row.settings === 'function', typeof row.node === 'function'];
+    assert.equal(two.filter(Boolean).length, 1,
+      `${kind}: a row has settings(props, ctx) OR node(props, ctx), never both and never neither`);
     assert.ok(row.tier && row.label, `${kind}: no tier or label`);
   }
 });
@@ -193,5 +200,269 @@ test('the family wins the spread — the old rows really were deleted', () => {
   for (const kind of Object.keys(EMITTERS)) {
     assert.equal(ELEMENTOR_WIDGETS[kind], EMITTERS[kind],
       `${kind}: elementorWidgets.js still has its own row and it overrides this family's`);
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   WAVE 2 (b168/f4-moving-deep, 2026-09-19)
+
+   Five widgets went from thin to Elementor's own panel, so five emitters had
+   to grow with them. Everything below EXECUTES the real row — nothing here
+   reads source and agrees with it.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/** Every key a NESTED row's own widget node emits, checked like any other. */
+function assertNodeKeys(kind, props, ctx = { seed: 'g4', nodeId: 'n1' }) {
+  const row = EMITTERS[kind];
+  assert.ok(row && typeof row.node === 'function', `${kind}: no node(props, ctx)`);
+  const tree = row.node(props, ctx);
+  assert.ok(tree, `${kind}: node() refused a widget that has panels`);
+  const widget = SETTINGS_KEYS.widgets[row.widgetType];
+  assert.ok(widget && widget.keys.length,
+    `${row.widgetType}: the machine file reports no controls, so nothing can be checked`);
+  const legal = new Set(widget.keys);
+  const bad = Object.keys(tree.settings)
+    .filter((k) => !legal.has(k) && !legal.has(k.replace(/_(tablet|mobile)$/, '')));
+  assert.deepEqual(bad, [], `${kind} -> ${row.widgetType}: keys the page engine does not have, `
+    + `so they are dropped on publish and the author's change does nothing: ${bad.join(', ')}`);
+  return tree;
+}
+
+/* -- Counter ------------------------------------------------------------- */
+
+test('every Style control the Counter panel offers reaches the page', () => {
+  const out = EMITTERS.counter.settings({
+    title_position: 'before', title_horizontal_alignment: 'left', number_alignment: 'right',
+    title_gap: 6, number_color: '#0C4A60', typography_number_font_size: 40,
+    typography_number_font_weight: '700', title_color: '#334155',
+    typography_title_font_size: 14, typography_title_font_weight: '500',
+    duration: 1500, thousand_separator_char: '.',
+  });
+  assert.equal(out.title_position, 'before');
+  // OUR left/right become ELEMENTOR'S start/end. One translation, here.
+  assert.equal(out.title_horizontal_alignment, 'start');
+  assert.equal(out.number_alignment, 'end');
+  assert.deepEqual(out.title_gap, { unit: 'px', size: 6, sizes: [] });
+  assert.equal(out.number_color, '#0C4A60');
+  assert.deepEqual(out.typography_number_font_size, { unit: 'px', size: 40, sizes: [] });
+  assert.equal(out.typography_number_font_weight, '700');
+  assert.equal(out.duration, 1500);
+  assert.equal(out.thousand_separator_char, '.');
+  assertKeys('counter', {
+    title_position: 'before', title_horizontal_alignment: 'left', number_alignment: 'right',
+    title_gap: 6, number_color: '#0C4A60', typography_number_font_size: 40,
+    typography_number_font_weight: '700', title_color: '#334155',
+    typography_title_font_size: 14, typography_title_font_weight: '500',
+    duration: 1500, thousand_separator_char: '.',
+  });
+});
+
+test('a typography SIZE without its popover toggle is a size the engine ignores', () => {
+  /* MUTATION: drop the `typography` line out of typo() in emitters.js and this
+     goes red - run 2026-09-19, then restored. Elementor's group control only
+     applies a custom size when its own toggle says 'custom'. */
+  const sized = EMITTERS.counter.settings({ typography_number_font_size: 40 });
+  assert.equal(sized.typography_number_typography, 'custom');
+  const bare = EMITTERS.counter.settings({});
+  assert.equal('typography_number_typography' in bare, false,
+    'a toggle published with nothing to toggle overrides the site theme with nothing');
+  assert.equal('typography_number_font_size' in bare, false);
+});
+
+test('a Separator the control does not offer is never handed to the engine', () => {
+  assert.equal(
+    EMITTERS.counter.settings({ thousand_separator_char: 'sparkle' }).thousand_separator_char, '');
+});
+
+/* -- Progress Bar -------------------------------------------------------- */
+
+test('every Style control the Progress Bar panel offers reaches the page', () => {
+  const props = {
+    percent: 72, title_color: '#334155', typography_font_size: 15, typography_font_weight: '600',
+    bar_color: '#0C4A60', bar_bg_color: '#E2E8F0', bar_height: 18, bar_border_radius: 9,
+    bar_inline_color: '#FFFFFF', bar_inner_typography_font_size: 11,
+  };
+  const out = EMITTERS.progress_bar.settings(props);
+  assert.equal(out.bar_color, '#0C4A60');
+  assert.equal(out.bar_bg_color, '#E2E8F0');
+  assert.deepEqual(out.bar_height, { unit: 'px', size: 18, sizes: [] });
+  assert.deepEqual(out.bar_border_radius, { unit: 'px', size: 9, sizes: [] });
+  assert.equal(out.bar_inline_color, '#FFFFFF');
+  assert.equal(out.typography_typography, 'custom');
+  assert.equal(out.bar_inner_typography_typography, 'custom');
+  assertKeys('progress_bar', props);
+});
+
+/* -- Rating -------------------------------------------------------------- */
+
+test('the Rating panel Style controls reach BOTH widgets, under each widget keys', () => {
+  const props = {
+    rating_value: 4, rating_scale: 5, icon_color: '#F59E0B',
+    icon_unmarked_color: '#E2E8F0', icon_size: 22, icon_gap: 4, rating_icon: 'eicon-star',
+  };
+  const modern = EMITTERS.star_rating.settings(props, MODERN_SITE);
+  assert.equal(modern.icon_color, '#F59E0B');
+  assert.equal(modern.icon_unmarked_color, '#E2E8F0');
+  assert.deepEqual(modern.icon_size, { unit: 'px', size: 22, sizes: [] });
+  assert.deepEqual(modern.icon_gap, { unit: 'px', size: 4, sizes: [] });
+  assert.deepEqual(modern.rating_icon, { value: 'eicon-star', library: 'eicons' });
+  assertModernRatingKeys(props);
+
+  /* The SAME author settings, on a site that still has the old widget: the
+     same four values under the old widget's own key names. Sending
+     `icon_gap` there would be dropped in silence. */
+  const legacy = EMITTERS.star_rating.settings(props, SILENT_SITE);
+  assert.equal(legacy.stars_color, '#F59E0B');
+  assert.equal(legacy.stars_unmarked_color, '#E2E8F0');
+  assert.deepEqual(legacy.icon_space, { unit: 'px', size: 4, sizes: [] });
+  assert.equal('icon_gap' in legacy, false);
+  assertKeys('star_rating', props);
+});
+
+/* -- Tabs, as Elementor's NESTED widget ---------------------------------- */
+
+const TWO_TABS = {
+  tabs: [
+    { tab_title: 'What we do', tab_content: 'We clear it before six.' },
+    { tab_title: 'What it costs', tab_content: 'Per push, billed monthly.' },
+  ],
+};
+
+test('Tabs publishes the REAL nested widget, with a container per panel', () => {
+  /* The shape is not invented: it is a live capture of what Elementor's own
+     editor wrote, 2026-09-19 -
+     overnight-report/elementor-reference/widgets/_g4_nested_tree.json. */
+  const tree = assertNodeKeys('tabs', TWO_TABS);
+  assert.equal(tree.widgetType, 'nested-tabs', 'still publishing the deprecated widget');
+  assert.deepEqual(tree.settings.tabs,
+    [{ _id: 't0', tab_title: 'What we do' }, { _id: 't1', tab_title: 'What it costs' }]);
+  assert.equal(tree.elements.length, 2, 'a nested tab with no container cannot be opened');
+  for (const [i, boxNode] of tree.elements.entries()) {
+    assert.equal(boxNode.elType, 'container');
+    assert.equal(boxNode.settings.content_width, 'full');
+    assert.equal(boxNode.settings._title, TWO_TABS.tabs[i].tab_title);
+    assert.equal(boxNode.elements[0].widgetType, 'text-editor');
+    assert.match(boxNode.elements[0].settings.editor, /clear it before six|billed monthly/);
+  }
+});
+
+test('the words an author typed cannot become markup on a published page', () => {
+  const tree = EMITTERS.tabs.node(
+    { tabs: [{ tab_title: 'x', tab_content: '<script>steal()</script>' }] }, { nodeId: 'n' });
+  assert.ok(!tree.elements[0].elements[0].settings.editor.includes('<script>'),
+    'words an author typed reached a live page as markup');
+});
+
+test('every Style control the Tabs panel offers reaches the page', () => {
+  const tree = assertNodeKeys('tabs', {
+    ...TWO_TABS,
+    tabs_direction: 'inline-end', tabs_justify_horizontal: 'center', tabs_width: 30,
+    title_alignment: 'center', tabs_title_space_between: 8, tabs_title_spacing: 12,
+    tabs_title_background_color_color: '#F1F5F9', tabs_title_border_color: '#CBD5E1',
+    tabs_title_background_color_active_color: '#0C4A60',
+    title_text_color: '#334155', title_text_color_active: '#0C4A60',
+    title_typography_font_size: 16, title_typography_font_weight: '600',
+    box_background_color_color: '#FFFFFF', box_border_color: '#E2E8F0', box_padding: 16,
+  });
+  const s = tree.settings;
+  assert.equal(s.tabs_direction, 'inline-end');
+  assert.deepEqual(s.tabs_width, { unit: '%', size: 30, sizes: [] });
+  /* A BACKGROUND group only paints when its TYPE is classic, and a BORDER
+     group only draws when its type is set. Sending the colour alone is the
+     silent drop this whole pass is about. */
+  assert.equal(s.tabs_title_background_color_background, 'classic');
+  assert.equal(s.tabs_title_background_color_color, '#F1F5F9');
+  assert.equal(s.tabs_title_border_border, 'solid');
+  assert.equal(s.tabs_title_border_color, '#CBD5E1');
+  assert.equal(s.box_border_border, 'solid');
+  assert.deepEqual(s.box_padding,
+    { unit: 'px', top: '16', right: '16', bottom: '16', left: '16', isLinked: true });
+  assert.equal(s.title_typography_typography, 'custom');
+});
+
+test('a Direction the control does not offer is never handed to the engine', () => {
+  assert.equal(
+    EMITTERS.tabs.node({ ...TWO_TABS, tabs_direction: 'diagonal' }, {}).settings.tabs_direction,
+    'block-start');
+});
+
+test('a Tabs with no tabs is REFUSED by name, not published as an empty strip', () => {
+  assert.equal(EMITTERS.tabs.node({ tabs: [] }, {}), null);
+  assert.throws(() => resolveWidget('tabs', { tabs: [] }, {}),
+    (e) => e.code === 'WIDGET_NOT_ON_PLAN');
+});
+
+/* -- Accordion, as Elementor's NESTED widget ----------------------------- */
+
+const TWO_ITEMS = {
+  tabs: [
+    { tab_title: 'Do you salt?', tab_content: 'Yes, and it is in the price.' },
+    { tab_title: 'When do you come?', tab_content: 'Before six.' },
+  ],
+};
+
+test('Accordion publishes the REAL nested widget, under Elementor own key names', () => {
+  const tree = assertNodeKeys('accordion', TWO_ITEMS);
+  assert.equal(tree.widgetType, 'nested-accordion');
+  /* OUR stored key is `tabs`/`tab_title`. ELEMENTOR'S is `items`/`item_title`.
+     The translation happens HERE and nowhere else, so the database keeps the
+     id every stored page and shipped template carries. */
+  assert.deepEqual(tree.settings.items,
+    [{ _id: 'a0', item_title: 'Do you salt?' }, { _id: 'a1', item_title: 'When do you come?' }]);
+  assert.equal('tabs' in tree.settings, false, 'our own key rode along to a widget without it');
+  assert.equal(tree.elements.length, 2);
+  assert.equal(tree.elements[0].settings._title, 'Do you salt?');
+  assert.match(tree.elements[0].elements[0].settings.editor, /in the price/);
+});
+
+test('an accordion stored under the OLDER spelling still publishes its rows', () => {
+  /* `items: [{ question, answer }]` is what the deleted legacy row read, and
+     a page saved through it is still in the database. */
+  const tree = EMITTERS.accordion.node(
+    { items: [{ question: 'Do you salt?', answer: 'Yes.' }] }, { nodeId: 'n' });
+  assert.deepEqual(tree.settings.items, [{ _id: 'a0', item_title: 'Do you salt?' }]);
+  assert.match(tree.elements[0].elements[0].settings.editor, /Yes\./);
+});
+
+test('every Style control the Accordion panel offers reaches the page', () => {
+  const tree = assertNodeKeys('accordion', {
+    ...TWO_ITEMS,
+    accordion_item_title_position_horizontal: 'left', accordion_item_title_icon_position: 'right',
+    title_tag: 'h4', faq_schema: true, default_state: 'all_collapsed',
+    accordion_item_title_space_between: 6, accordion_item_title_distance_from_content: 4,
+    accordion_background_normal_color: '#FFFFFF', accordion_border_normal_color: '#E2E8F0',
+    normal_title_color: '#334155', active_title_color: '#0C4A60',
+    title_typography_font_size: 16, title_typography_font_weight: '600',
+    normal_icon_color: '#64748B', icon_spacing: 10,
+    content_background_color: '#F8FAFC', content_border_color: '#E2E8F0', content_padding: 12,
+  });
+  const s = tree.settings;
+  assert.equal(s.accordion_item_title_position_horizontal, 'start');
+  assert.equal(s.accordion_item_title_icon_position, 'end');
+  assert.equal(s.title_tag, 'h4');
+  assert.equal(s.faq_schema, 'yes');
+  assert.equal(s.default_state, 'all_collapsed');
+  assert.equal(s.accordion_background_normal_background, 'classic');
+  assert.equal(s.accordion_border_normal_border, 'solid');
+  assert.equal(s.content_background_background, 'classic');
+  assert.deepEqual(s.content_padding,
+    { unit: 'px', top: '12', right: '12', bottom: '12', left: '12', isLinked: true });
+  assert.equal(s.normal_icon_color, '#64748B');
+});
+
+test('an Accordion with no rows is REFUSED by name', () => {
+  assert.equal(EMITTERS.accordion.node({}, {}), null);
+});
+
+test('the DEPRECATED widgets are gone from the catalogue for good', () => {
+  /* In the live editor `tabs` and `accordion` are both `show_in_panel: false`
+     - nobody can add either one any more. We were publishing them. The rows
+     were DELETED from elementorWidgets.js in the same pass rather than left
+     to be shadowed, and this is what says so. */
+  assert.equal(ELEMENTOR_WIDGETS.tabs.widgetType, 'nested-tabs');
+  assert.equal(ELEMENTOR_WIDGETS.accordion.widgetType, 'nested-accordion');
+  for (const kind of ['tabs', 'accordion']) {
+    assert.equal(typeof ELEMENTOR_WIDGETS[kind].settings, 'undefined',
+      `${kind} still has a flat settings() - the deprecated row came back`);
   }
 });
