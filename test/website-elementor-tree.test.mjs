@@ -285,9 +285,15 @@ describe('every widget declares what plan it needs', () => {
     /* D-165 §11.13.3 — the whole paid panel is offered and refused by name on
        Lite, and the IA list is the one the section names. Both lists are read
        off the catalogue rather than typed anywhere else. */
+    /* B-168 f2-pictures (2026-09-19) added three: `hotspot`, `lottie` and
+       `video_playlist`, all three in Elementor's own pro-elements group and all
+       three in the offer file for website and landing. `pro_gallery` is still
+       here and still paid — it MOVED to families/f2-pictures/emitters.js, where
+       it finally publishes the author's pictures as well as the layout. */
     assert.deepEqual(proWidgetKinds(), [
-      'call_to_action', 'card', 'countdown', 'flip_box', 'form', 'loop_grid', 'nav_menu',
-      'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides', 'testimonial_carousel',
+      'call_to_action', 'card', 'countdown', 'flip_box', 'form', 'hotspot', 'loop_grid',
+      'lottie', 'nav_menu', 'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides',
+      'testimonial_carousel', 'video_playlist',
     ]);
     assert.deepEqual(iaWidgetKinds().map((w) => `${w.kind}:${w.product}`), [
       'book_now:oliver', 'catalog_card:oliver', 'hours_location:lumen',
