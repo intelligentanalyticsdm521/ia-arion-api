@@ -1,5 +1,297 @@
 {
   "widgets": {
+    "share-buttons": {
+      "title": "Share Buttons",
+      "controls": {
+        "share_buttons": {
+          "type": "repeater"
+        },
+        "view": {
+          "type": "select"
+        },
+        "show_label": {
+          "type": "switcher"
+        },
+        "skin": {
+          "type": "select"
+        },
+        "shape": {
+          "type": "select"
+        },
+        "columns": {
+          "type": "select"
+        },
+        "alignment": {
+          "type": "choose"
+        },
+        "share_url_type": {
+          "type": "select"
+        },
+        "share_url": {
+          "type": "url"
+        },
+        "color_source": {
+          "type": "select"
+        },
+        "primary_color": {
+          "type": "color"
+        },
+        "secondary_color": {
+          "type": "color"
+        },
+        "icon_size": {
+          "type": "slider"
+        },
+        "column_gap": {
+          "type": "slider"
+        }
+      }
+    },
+    "call-to-action": {
+      "title": "Call to Action",
+      "controls": {
+        "skin": {
+          "type": "select"
+        },
+        "layout": {
+          "type": "choose"
+        },
+        "bg_image": {
+          "type": "media"
+        },
+        "bg_image_size": {
+          "type": "select"
+        },
+        "graphic_element": {
+          "type": "choose"
+        },
+        "graphic_image": {
+          "type": "media"
+        },
+        "graphic_image_size": {
+          "type": "select"
+        },
+        "selected_icon": {
+          "type": "icons"
+        },
+        "title": {
+          "type": "text"
+        },
+        "title_tag": {
+          "type": "select"
+        },
+        "description": {
+          "type": "textarea"
+        },
+        "description_tag": {
+          "type": "select"
+        },
+        "button": {
+          "type": "text"
+        },
+        "link": {
+          "type": "url"
+        },
+        "link_click": {
+          "type": "select"
+        },
+        "ribbon_title": {
+          "type": "text"
+        },
+        "ribbon_horizontal_position": {
+          "type": "choose"
+        },
+        "alignment": {
+          "type": "choose"
+        },
+        "min-height": {
+          "type": "slider"
+        },
+        "icon_primary_color": {
+          "type": "color"
+        },
+        "icon_size": {
+          "type": "slider"
+        },
+        "graphic_image_width": {
+          "type": "slider"
+        },
+        "content_bg_color": {
+          "type": "color"
+        },
+        "title_color": {
+          "type": "color"
+        },
+        "description_color": {
+          "type": "color"
+        },
+        "button_text_color": {
+          "type": "color"
+        },
+        "button_background_color": {
+          "type": "color"
+        },
+        "ribbon_bg_color": {
+          "type": "color"
+        },
+        "ribbon_text_color": {
+          "type": "color"
+        }
+      }
+    },
+    "flip-box": {
+      "title": "Flip Box",
+      "controls": {
+        "graphic_element": {
+          "type": "choose"
+        },
+        "image": {
+          "type": "media"
+        },
+        "image_size": {
+          "type": "select"
+        },
+        "selected_icon": {
+          "type": "icons"
+        },
+        "title_text_a": {
+          "type": "text"
+        },
+        "description_text_a": {
+          "type": "textarea"
+        },
+        "title_text_b": {
+          "type": "text"
+        },
+        "description_text_b": {
+          "type": "textarea"
+        },
+        "button_text": {
+          "type": "text"
+        },
+        "link": {
+          "type": "url"
+        },
+        "link_click": {
+          "type": "select"
+        },
+        "title_tag": {
+          "type": "select"
+        },
+        "description_tag": {
+          "type": "select"
+        },
+        "height": {
+          "type": "slider"
+        },
+        "border_radius": {
+          "type": "slider"
+        },
+        "flip_effect": {
+          "type": "select"
+        },
+        "flip_direction": {
+          "type": "choose"
+        },
+        "flip_3d": {
+          "type": "switcher"
+        },
+        "background_a_color": {
+          "type": "color"
+        },
+        "alignment_a": {
+          "type": "choose"
+        },
+        "icon_primary_color": {
+          "type": "color"
+        },
+        "icon_size": {
+          "type": "slider"
+        },
+        "title_color_a": {
+          "type": "color"
+        },
+        "description_color_a": {
+          "type": "color"
+        },
+        "background_b_color": {
+          "type": "color"
+        },
+        "alignment_b": {
+          "type": "choose"
+        },
+        "title_color_b": {
+          "type": "color"
+        },
+        "description_color_b": {
+          "type": "color"
+        },
+        "button_text_color": {
+          "type": "color"
+        },
+        "button_background_color": {
+          "type": "color"
+        }
+      }
+    },
+    "facebook-embed": {
+      "title": "Facebook Embed",
+      "controls": {
+        "type": {
+          "type": "select"
+        },
+        "post_url": {
+          "type": "text"
+        },
+        "video_url": {
+          "type": "text"
+        },
+        "comment_url": {
+          "type": "text"
+        },
+        "show_text": {
+          "type": "switcher"
+        },
+        "include_parent": {
+          "type": "switcher"
+        },
+        "video_allowfullscreen": {
+          "type": "switcher"
+        },
+        "video_autoplay": {
+          "type": "switcher"
+        },
+        "video_show_captions": {
+          "type": "switcher"
+        }
+      }
+    },
+    "facebook-page": {
+      "title": "Facebook Page",
+      "controls": {
+        "url": {
+          "type": "text"
+        },
+        "tabs": {
+          "type": "select2"
+        },
+        "small_header": {
+          "type": "switcher"
+        },
+        "show_cover": {
+          "type": "switcher"
+        },
+        "show_facepile": {
+          "type": "switcher"
+        },
+        "show_cta": {
+          "type": "switcher"
+        },
+        "height": {
+          "type": "slider"
+        }
+      }
+    },
     "heading": {
       "title": "Heading",
       "controls": {
@@ -466,49 +758,6 @@
         },
         "title_tag": {
           "type": "select"
-        }
-      }
-    },
-    "call-to-action": {
-      "title": "Call to Action",
-      "controls": {
-        "skin": {
-          "type": "select"
-        },
-        "title": {
-          "type": "text"
-        },
-        "description": {
-          "type": "textarea"
-        },
-        "button": {
-          "type": "text"
-        },
-        "link": {
-          "type": "url"
-        }
-      }
-    },
-    "flip-box": {
-      "title": "Flip Box",
-      "controls": {
-        "title_text_a": {
-          "type": "text"
-        },
-        "description_text_a": {
-          "type": "textarea"
-        },
-        "title_text_b": {
-          "type": "text"
-        },
-        "description_text_b": {
-          "type": "textarea"
-        },
-        "button_text": {
-          "type": "text"
-        },
-        "link": {
-          "type": "url"
         }
       }
     },

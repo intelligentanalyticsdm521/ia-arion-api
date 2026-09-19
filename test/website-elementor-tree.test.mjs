@@ -285,9 +285,18 @@ describe('every widget declares what plan it needs', () => {
     /* D-165 §11.13.3 — the whole paid panel is offered and refused by name on
        Lite, and the IA list is the one the section names. Both lists are read
        off the catalogue rather than typed anywhere else. */
+    /* B-168 F3 added three: `share_buttons`, `facebook_embed` and
+       `facebook_page`, all three `pro-elements` in the 2026-09-17 registry and
+       all three in the website and landing offers Brandon approved. The list
+       is sorted, so they land where the sort puts them, not where they were
+       written. `call_to_action` and `flip_box` are still here and still PRO -
+       what changed is that their rows moved out of elementorWidgets.js and
+       into families/f3-buttons-icons-panels/, with Elementor's own controls
+       instead of a five-key stub. */
     assert.deepEqual(proWidgetKinds(), [
-      'call_to_action', 'card', 'countdown', 'flip_box', 'form', 'loop_grid', 'nav_menu',
-      'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides', 'testimonial_carousel',
+      'call_to_action', 'card', 'countdown', 'facebook_embed', 'facebook_page',
+      'flip_box', 'form', 'loop_grid', 'nav_menu', 'posts', 'price_list',
+      'pro_gallery', 'pro_reviews', 'share_buttons', 'slides', 'testimonial_carousel',
     ]);
     assert.deepEqual(iaWidgetKinds().map((w) => `${w.kind}:${w.product}`), [
       'book_now:oliver', 'catalog_card:oliver', 'hours_location:lumen',
