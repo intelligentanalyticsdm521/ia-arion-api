@@ -105,10 +105,31 @@ const PROPS = {
 
 const CTX = { seed: 'f3', nodeId: 'f3-1', allowPro: true };
 
-describe('F3 publishes five Elementor Pro widgets', () => {
-  test('the family owns exactly the five, by Elementor’s own slug', () => {
-    assert.deepEqual(Object.keys(EMITTERS).sort(), Object.keys(F3).sort());
-    for (const [kind, widgetType] of Object.entries(F3)) {
+/**
+ * THE EIGHT EVERYDAY WIDGETS, added by wave 2 (B-168, 2026-09-19).
+ *
+ * They already had rows in `elementorWidgets.js` and those rows were thin — the
+ * Divider's was `settings: () => ({ style: 'solid' })`, a constant that took no
+ * props at all. Since the override seam a FAMILY row beats the legacy one, so
+ * the family owns them now. `website-builder-f3-deep.test.js` is where each
+ * one's settings are executed; this file only says which rows exist.
+ */
+const F3_DEEP = {
+  button: 'button',
+  icon: 'icon',
+  icon_box: 'icon-box',
+  list: 'icon-list',
+  social_links: 'social-icons',
+  alert: 'alert',
+  divider: 'divider',
+  spacer: 'spacer',
+};
+
+describe('F3 publishes five Elementor Pro widgets and eight everyday ones', () => {
+  test('the family owns exactly those thirteen, by Elementor’s own slug', () => {
+    const all = { ...F3, ...F3_DEEP };
+    assert.deepEqual(Object.keys(EMITTERS).sort(), Object.keys(all).sort());
+    for (const [kind, widgetType] of Object.entries(all)) {
       assert.equal(EMITTERS[kind].widgetType, widgetType, kind);
     }
   });
@@ -124,9 +145,9 @@ describe('F3 publishes five Elementor Pro widgets', () => {
     }
   });
 
-  test('all five are PRO, and none pretends to have a fallback it has not got', () => {
+  test('the five are PRO, the eight are free, and none pretends to have a fallback', () => {
     for (const [kind, row] of Object.entries(EMITTERS)) {
-      assert.equal(row.tier, 'pro', kind);
+      assert.equal(row.tier, F3_DEEP[kind] ? 'free' : 'pro', kind);
       assert.ok(row.label && row.label.trim(), `${kind} has no label for the refusal message`);
       assert.equal(row.fallback, undefined,
         `${kind} declares a fallback; if it really has one, say what it publishes`);
