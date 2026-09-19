@@ -33,6 +33,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
+import path from 'node:path';
 
 import { EMITTERS, bookNowButtonSettings }
   from '../lib/websiteBuilder/families/f8-contact-furniture/emitters.js';
@@ -357,5 +358,117 @@ describe('f8-contact-furniture refuses a value the engine would drop', () => {
   test('a number reaches the engine in the shape its slider control reads', () => {
     const nav = EMITTERS.nav_menu.settings({ menu_space_between: 28 });
     assert.deepEqual(nav.menu_space_between, { unit: 'px', size: 28, sizes: [] });
+  });
+});
+
+describe('f8-contact-furniture wave 2: the five deepened rows publish what the panel writes', () => {
+  test("Google Maps' CSS filters travel under Elementor's own word, and only when they are on", () => {
+    /* The popover toggle stores the string `custom` - read off the LIVE editor
+       on 2026-09-19 (`return_value: "custom"`), because neither 2026-09-17
+       scrape records a control's return value. Publishing `yes` there leaves
+       every filter the author set doing nothing on the page, silently, which is
+       `reference_catch_swallow_report_success` with a settings object instead of
+       a try/catch. EXECUTED, not read. */
+    const off = EMITTERS.map.settings({ address: 'Ames', css_filters_blur: 4 });
+    assert.equal('css_filters_css_filter' in off, false, 'a filter travelled with the switch off');
+    assert.equal('css_filters_blur' in off, false);
+    const on = EMITTERS.map.settings({ address: 'Ames', css_filters_css_filter: true, css_filters_blur: 4 });
+    assert.equal(on.css_filters_css_filter, 'custom',
+      'Elementor stores the word `custom`; `yes` is dropped and every filter with it');
+    assert.deepEqual(on.css_filters_blur, { unit: 'px', size: 4, sizes: [] });
+    /* ...and Elementor's own default zoom is 10. The row this replaces used 12,
+       so an untouched map published at a different zoom than the canvas drew. */
+    assert.equal(EMITTERS.map.settings({ address: 'Ames' }).zoom.size, 10);
+  });
+
+  test('a wave-2 select never passes through a value the engine would drop', () => {
+    const mega = EMITTERS.ia_mega_menu.settings({
+      menu_source: 'sideways', menu_style: 'sparkles',
+      dropdown_animation: 'cartwheel', dropdown_width: 'enormous',
+    });
+    assert.deepEqual(
+      [mega.menu_source, mega.menu_style, mega.dropdown_animation, mega.dropdown_width],
+      ['wordpress', 'split-panel', 'fade', 'full-width']);
+    const mob = EMITTERS.ia_mobile_menu.settings({
+      menu_source: 'telepathy', style: 'origami', bg_type: 'hologram', animation_direction: 'up',
+    });
+    assert.deepEqual([mob.menu_source, mob.style, mob.bg_type, mob.animation_direction],
+      ['wp_menu', 'slide_panel', 'solid', 'right']);
+    const soc = EMITTERS.ia_social_links.settings({
+      shape: 'blob', columns: '99', align: 'diagonal', icon_color: 'rainbow',
+    });
+    assert.deepEqual([soc.shape, soc.columns, soc.align, soc.icon_color],
+      ['rounded', '0', 'center', 'default']);
+    const btn = bookNowButtonSettings({ size: 'gigantic', button_type: 'sparkle', border_border: 'squiggle' });
+    assert.equal(btn.size, 'sm');
+    assert.equal('button_type' in btn, false, 'a Type the engine has not got travelled anyway');
+    assert.equal('border_border' in btn, false);
+  });
+
+  test('the two menus publish a source value their own select offers', () => {
+    /* The rows these replace hard-coded `menu_source: 'wp'`, which is NOT one of
+       the two values either plugin widget's select carries (wordpress/custom and
+       wp_menu/custom), so the source was dropped on every publish and nobody was
+       told. */
+    assert.equal(EMITTERS.ia_mega_menu.settings({}).menu_source, 'wordpress');
+    assert.equal(EMITTERS.ia_mobile_menu.settings({}).menu_source, 'wp_menu');
+    /* ...and `wp_menu` is OMITTED, never sent empty: the select lists the menus
+       registered on THAT site and the Portal cannot know a client's. Sending ''
+       selects a menu called '' and the visitor gets an empty bar. */
+    assert.equal('wp_menu' in EMITTERS.ia_mega_menu.settings({}), false);
+    assert.equal('wp_menu' in EMITTERS.ia_mobile_menu.settings({}), false);
+  });
+
+  test('the invoice still reads the prop names a stored page holds', () => {
+    /* The row this replaces read `p.showBookAgain` and `p.bookAgainUrl` -
+       camel-case names no panel ever wrote - so Book Again was published OFF on
+       every invoice whatever the author chose. Both spellings are read now, and
+       an untouched switch means the DEFAULT, never "off". */
+    assert.equal(EMITTERS.ia_oliver_invoice.settings({}).show_book_again_cta, 'yes');
+    assert.equal(EMITTERS.ia_oliver_invoice.settings({ showBookAgain: false }).show_book_again_cta, '');
+    assert.equal(EMITTERS.ia_oliver_invoice.settings({ show_book_again_cta: false }).show_book_again_cta, '');
+    assert.equal(
+      EMITTERS.ia_oliver_invoice.settings({ bookAgainUrl: 'https://x.test/b' }).book_again_url.url,
+      'https://x.test/b');
+    assert.equal(EMITTERS.ia_oliver_invoice.settings({ businessName: 'A business' }).business_name,
+      'A business');
+    /* `oliver_api_base` is a deployment fact, not a design choice, and a key we
+       send overrides the plugin's own production default. Never published. */
+    assert.equal('oliver_api_base' in EMITTERS.ia_oliver_invoice.settings({
+      oliver_api_base: 'https://somewhere.else',
+    }), false);
+  });
+
+  test('iaBinding.js imports NOTHING, which is the only reason a family may use it', () => {
+    /* The stamp moved out of `elementorWidgets.js` because that file imports
+       `families/index.js`, so a family importing the stamp from there closed a
+       cycle and threw "Cannot access F8_CONTACT_FURNITURE before
+       initialization" the moment a family test was the entry point. The ONE
+       property that keeps it safe is that it imports nothing at all - the same
+       rule `builder/esc.ts` keeps on the Portal side. A PRESENCE test on the
+       real file, not a promise in a comment. */
+    const src = readFileSync(path.join(process.cwd(), 'lib/websiteBuilder/iaBinding.js'), 'utf8');
+    const imports = src.split(/\r?\n/).filter((l) => /^\s*(import |const .*= *require\()/.test(l));
+    assert.deepEqual(imports, [],
+      'iaBinding.js has grown an import, so the cycle a family folder cannot survive is back');
+    /* ...and it really is the module the family uses, not a second copy. */
+    const fam = readFileSync(path.join(process.cwd(),
+      'lib/websiteBuilder/families/f8-contact-furniture/emitters.js'), 'utf8');
+    assert.ok(fam.includes("from '../../iaBinding.js'"),
+      'the family is importing the stamp from somewhere else');
+  });
+
+  test('Book Now stamps the binding, so a re-publish can refresh the booking link', () => {
+    const node = EMITTERS.book_now.node({ text: 'Book', link: 'https://x.test/b' }, { nodeId: 'n1' });
+    assert.equal(node.widgetType, 'button', 'a site with no shortcode gets a real Elementor button');
+    assert.equal(node.settings._ia_widget, 'book_now');
+    assert.equal(node.settings._ia_source, 'oliver:booking');
+    assert.equal(node.settings.text, 'Book');
+    /* PRESENCE, never absence: the shortcode is used when the site SAID it has
+       it (`reference_absence_based_guards_fail_open`). */
+    const withShortcode = EMITTERS.book_now.node({ bookingPageId: '12' },
+      { nodeId: 'n2', iaShortcodes: ['ia_book_now'] });
+    assert.equal(withShortcode.widgetType, 'shortcode');
+    assert.equal(withShortcode.settings.shortcode, '[ia_book_now page="12"]');
   });
 });
