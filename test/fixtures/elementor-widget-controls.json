@@ -1,5 +1,219 @@
 {
   "widgets": {
+    "testimonial": {
+      "title": "Testimonial",
+      "controls": {
+        "testimonial_content": {
+          "type": "textarea"
+        },
+        "testimonial_name": {
+          "type": "text"
+        },
+        "testimonial_job": {
+          "type": "text"
+        },
+        "testimonial_image": {
+          "type": "media"
+        },
+        "testimonial_image_position": {
+          "type": "choose"
+        },
+        "testimonial_alignment": {
+          "type": "choose"
+        },
+        "link": {
+          "type": "url"
+        }
+      }
+    },
+    "reviews": {
+      "title": "Reviews",
+      "controls": {
+        "slides_name": {
+          "type": "text"
+        },
+        "slides": {
+          "type": "repeater"
+        },
+        "show_arrows": {
+          "type": "switcher"
+        },
+        "pagination": {
+          "type": "select"
+        },
+        "speed": {
+          "type": "number"
+        },
+        "autoplay": {
+          "type": "switcher"
+        },
+        "autoplay_speed": {
+          "type": "number"
+        },
+        "loop": {
+          "type": "switcher"
+        },
+        "pause_on_hover": {
+          "type": "switcher"
+        },
+        "slides_per_view": {
+          "type": "select"
+        },
+        "slides_to_scroll": {
+          "type": "select"
+        },
+        "space_between": {
+          "type": "slider"
+        }
+      }
+    },
+    "testimonial-carousel": {
+      "title": "Testimonial Carousel",
+      "controls": {
+        "slides_name": {
+          "type": "text"
+        },
+        "slides": {
+          "type": "repeater"
+        },
+        "skin": {
+          "type": "select"
+        },
+        "layout": {
+          "type": "select"
+        },
+        "alignment": {
+          "type": "choose"
+        },
+        "show_arrows": {
+          "type": "switcher"
+        },
+        "pagination": {
+          "type": "select"
+        },
+        "speed": {
+          "type": "number"
+        },
+        "autoplay": {
+          "type": "switcher"
+        },
+        "autoplay_speed": {
+          "type": "number"
+        },
+        "loop": {
+          "type": "switcher"
+        },
+        "pause_on_hover": {
+          "type": "switcher"
+        },
+        "slides_per_view": {
+          "type": "select"
+        },
+        "slides_to_scroll": {
+          "type": "select"
+        },
+        "space_between": {
+          "type": "slider"
+        }
+      }
+    },
+    "slides": {
+      "title": "Slides",
+      "controls": {
+        "slides_name": {
+          "type": "text"
+        },
+        "slides": {
+          "type": "repeater"
+        },
+        "slides_height": {
+          "type": "slider"
+        },
+        "slides_title_tag": {
+          "type": "select"
+        },
+        "slides_description_tag": {
+          "type": "select"
+        },
+        "navigation": {
+          "type": "select"
+        },
+        "autoplay": {
+          "type": "switcher"
+        },
+        "pause_on_hover": {
+          "type": "switcher"
+        },
+        "pause_on_interaction": {
+          "type": "switcher"
+        },
+        "autoplay_speed": {
+          "type": "number"
+        },
+        "infinite": {
+          "type": "switcher"
+        },
+        "transition": {
+          "type": "select"
+        },
+        "transition_speed": {
+          "type": "number"
+        }
+      }
+    },
+    "media-carousel": {
+      "title": "Media Carousel",
+      "controls": {
+        "skin": {
+          "type": "select"
+        },
+        "slides_name": {
+          "type": "text"
+        },
+        "slides": {
+          "type": "repeater"
+        },
+        "effect": {
+          "type": "select"
+        },
+        "caption": {
+          "type": "select"
+        },
+        "lazyload": {
+          "type": "switcher"
+        },
+        "show_arrows": {
+          "type": "switcher"
+        },
+        "pagination": {
+          "type": "select"
+        },
+        "speed": {
+          "type": "number"
+        },
+        "autoplay": {
+          "type": "switcher"
+        },
+        "autoplay_speed": {
+          "type": "number"
+        },
+        "loop": {
+          "type": "switcher"
+        },
+        "pause_on_hover": {
+          "type": "switcher"
+        },
+        "slides_per_view": {
+          "type": "select"
+        },
+        "slides_to_scroll": {
+          "type": "select"
+        },
+        "space_between": {
+          "type": "slider"
+        }
+      }
+    },
     "heading": {
       "title": "Heading",
       "controls": {
@@ -217,29 +431,6 @@
         }
       }
     },
-    "testimonial": {
-      "title": "Testimonial",
-      "controls": {
-        "testimonial_content": {
-          "type": "textarea"
-        },
-        "testimonial_name": {
-          "type": "text"
-        },
-        "testimonial_job": {
-          "type": "text"
-        },
-        "testimonial_image": {
-          "type": "media"
-        },
-        "testimonial_image_position": {
-          "type": "choose"
-        },
-        "testimonial_alignment": {
-          "type": "choose"
-        }
-      }
-    },
     "star-rating": {
       "title": "Star Rating",
       "controls": {
@@ -444,20 +635,6 @@
         }
       }
     },
-    "slides": {
-      "title": "Slides",
-      "controls": {
-        "slides": {
-          "type": "repeater"
-        },
-        "navigation": {
-          "type": "select"
-        },
-        "autoplay": {
-          "type": "switcher"
-        }
-      }
-    },
     "price-list": {
       "title": "Price List",
       "controls": {
@@ -532,22 +709,6 @@
         },
         "show_seconds": {
           "type": "switcher"
-        }
-      }
-    },
-    "testimonial-carousel": {
-      "title": "Testimonial Carousel",
-      "controls": {
-        "slides": {
-          "type": "repeater"
-        }
-      }
-    },
-    "reviews": {
-      "title": "Reviews",
-      "controls": {
-        "slides": {
-          "type": "repeater"
         }
       }
     },

@@ -286,14 +286,17 @@ describe('every widget declares what plan it needs', () => {
        Lite, and the IA list is the one the section names. Both lists are read
        off the catalogue rather than typed anywhere else. */
     assert.deepEqual(proWidgetKinds(), [
-      'call_to_action', 'card', 'countdown', 'flip_box', 'form', 'loop_grid', 'nav_menu',
-      'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides', 'testimonial_carousel',
+      /* B-168 F5: `pro_reviews` is gone - Elementor's Reviews is `reviews` now,
+         which is what the offer file calls it - and Media Carousel is new. */
+      'call_to_action', 'card', 'countdown', 'flip_box', 'form', 'loop_grid',
+      'media_carousel', 'nav_menu', 'posts', 'price_list', 'pro_gallery', 'reviews',
+      'slides', 'testimonial_carousel',
     ]);
     assert.deepEqual(iaWidgetKinds().map((w) => `${w.kind}:${w.product}`), [
       'book_now:oliver', 'catalog_card:oliver', 'hours_location:lumen',
       'ia_form:lumen', 'ia_mega_menu:arion', 'ia_mobile_menu:arion',
-      'ia_oliver_invoice:oliver', 'ia_posts:arion', 'ia_social_links:arion',
-      'newsletter_signup:lumen', 'product_cards:oliver', 'reviews:lumen',
+      'ia_oliver_invoice:oliver', 'ia_posts:arion', 'ia_reviews:lumen',
+      'ia_social_links:arion', 'newsletter_signup:lumen', 'product_cards:oliver',
     ]);
   });
 
