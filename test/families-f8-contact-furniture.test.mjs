@@ -34,8 +34,10 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 
-import { EMITTERS } from '../lib/websiteBuilder/families/f8-contact-furniture/emitters.js';
-import { ELEMENTOR_WIDGETS, PRO } from '../lib/websiteBuilder/elementorWidgets.js';
+import { EMITTERS, bookNowButtonSettings }
+  from '../lib/websiteBuilder/families/f8-contact-furniture/emitters.js';
+import { ELEMENTOR_WIDGETS, PRO, FREE, shadowedLegacyKinds }
+  from '../lib/websiteBuilder/elementorWidgets.js';
 /* Keys we write that are OURS, not the page engine's — the form-purpose stamp
    and the CSS classes `formPurpose.js` owns. One list, shared with the pin
    extractor, so this test and that script cannot disagree about which keys are
@@ -82,6 +84,59 @@ const FILLED = {
     toggle_background_color: '#ffffff', toggle_size: 22,
   },
   mega_menu: {},
+
+  /* WAVE 2. Every control the deepened panels offer, filled in. */
+  map: {
+    address: '1200 Prairie Ave, Marshalltown, IA', zoom: 8, height: 420,
+    height_tablet: 320, height_mobile: 240,
+    css_filters_css_filter: 'custom', css_filters_blur: 2, css_filters_brightness: 110,
+    css_filters_contrast: 95, css_filters_saturate: 80, css_filters_hue: 20,
+    css_filters_hover_css_filter: 'custom', css_filters_hover_blur: 0,
+    css_filters_hover_brightness: 120, css_filters_hover_contrast: 100,
+    css_filters_hover_saturate: 120, css_filters_hover_hue: 0, hover_transition: 0.3,
+  },
+  book_now: {
+    text: 'Book now', link: 'https://example.org/book', size: 'lg', button_type: 'success',
+    button_css_id: 'book', icon_align: 'row-reverse', icon_indent: 8,
+    align: 'center', align_tablet: 'left', align_mobile: 'center',
+    typography_font_size: 15, typography_font_size_tablet: 14, typography_font_size_mobile: 13,
+    button_text_color: '#ffffff', background_color: '#1D7A8C', hover_color: '#ffffff',
+    button_background_hover_color: '#0C4A60', button_hover_border_color: '#0C4A60',
+    border_border: 'solid', border_color: '#0C4A60', border_width: 1, border_radius: 8,
+  },
+  ia_social_links: {
+    platforms: ['facebook', 'linkedin'], shape: 'circle',
+    columns: '3', columns_tablet: '2', columns_mobile: '1',
+    align: 'left', align_tablet: 'center', align_mobile: 'center',
+    icon_color: 'custom', icon_primary_color: '#0C4A60', icon_secondary_color: '#ffffff',
+    icon_size: 24, icon_size_tablet: 22, icon_size_mobile: 20,
+    icon_padding: 0.5, icon_spacing: 6, border_radius: 8,
+  },
+  ia_mega_menu: {
+    menu_source: 'custom', menu_style: 'column-dropdown',
+    menu_items: [{ item_label: 'Services', item_type: 'mega_trigger' }],
+    menu_groups: [], featured_heading: 'Featured', featured_text: 'What is new',
+    featured_link: 'https://example.org/new', featured_link_text: 'Learn More',
+    bg_color: '#ffffff', text_color: '#0B1C24', accent_color: '#0C4A60',
+    hover_color: '#2D9CDB', border_color: '#0C4A60',
+    font_size: 14, item_spacing: 24, dropdown_animation: 'slide',
+    dropdown_width: 'custom', dropdown_custom_width: 720,
+  },
+  ia_mobile_menu: {
+    menu_source: 'custom', custom_items: [{ label: 'Home', url: '/' }],
+    style: 'fullscreen_overlay', show_social: 'yes', social_links: [],
+    show_cta: 'yes', cta_text: 'Contact Us', cta_link: 'https://example.org/contact',
+    show_search: 'yes', bg_type: 'overlay', bg_color: '#0C4A60',
+    bg_image: 'https://cdn.example.org/bg.jpg', overlay_color: 'rgba(12,74,96,0.92)',
+    text_color: '#ffffff', accent_color: '#EF6C33', close_icon_color: 'rgba(255,255,255,0.6)',
+    animation_direction: 'left', panel_width: 320,
+  },
+  ia_oliver_invoice: {
+    business_logo_url: 'https://cdn.example.org/logo.png', business_name: 'A business',
+    business_phone: '555-0100', business_email: 'hello@example.org',
+    show_book_again_cta: 'yes', book_again_url: 'https://example.org/book',
+    book_again_text: 'Schedule your next service', accent_color: '#FEC82C',
+  },
 };
 
 describe('f8-contact-furniture publishes only real controls', () => {
@@ -92,7 +147,33 @@ describe('f8-contact-furniture publishes only real controls', () => {
       + 'Pass IA_CATALOG_PRO_JSON, the way scripts/dev/extract-widget-controls.mjs does.');
   });
 
+  /**
+   * BOOK NOW IS CHECKED AGAINST `button`, NOT AGAINST `ia_book_now`.
+   *
+   * The row publishes one of two things: the plugin's `[ia_book_now]`
+   * shortcode on a site that says it has it, or a REAL ELEMENTOR BUTTON on a
+   * site that has not. `ia_book_now` is not a registered widget in either
+   * scrape - the plugin exposes it as a shortcode - so the keys that have to
+   * be checked are the BUTTON's, which is what `bookNowButtonSettings` writes.
+   * A row with `node()` has no `settings()` of its own (the tree test asserts
+   * exactly one of the two), so the loop below skips it and this names it.
+   */
+  test('book_now: every key it publishes is a control Elementor\'s Button has', () => {
+    const keys = controlsOf(FREE_MACHINE, 'button') || controlsOf(MACHINE, 'button');
+    assert.ok(keys && keys.length, 'the catalogue carries no controls for `button`');
+    const legal = new Set(keys);
+    for (const props of [{}, FILLED.book_now]) {
+      const emitted = Object.keys(bookNowButtonSettings(props))
+        .filter((k) => !SETTINGS_NOT_CONTROLS.includes(k));
+      const bad = emitted.filter((k) => !legal.has(k) && !legal.has(k.replace(/_(tablet|mobile)$/, '')));
+      assert.deepEqual(bad, [],
+        `button: the page engine has no control called ${bad.join(', ')}`);
+    }
+  });
+
   for (const [kind, row] of Object.entries(EMITTERS)) {
+    /* A COMPOSITION builds its own node and has no settings of its own. */
+    if (!row.settings) continue;
     test(`${kind} → “${row.widgetType}”: every key is a control the engine has`, () => {
       const pro = controlsOf(MACHINE, row.widgetType);
       const free = controlsOf(FREE_MACHINE, row.widgetType);
@@ -120,14 +201,33 @@ describe('f8-contact-furniture publishes only real controls', () => {
     });
   }
 
-  test('every F8 row is Pro, and the catalogue agrees', () => {
+  test('each row needs the plan the catalogue says it needs, and no other', () => {
+    /* THREE tiers, and the difference between them is a different sentence a
+       client reads (`reference_nav_visibility_semantics`): `pro` is *not on
+       your plan*, `ia:<product>` is *needs a product you do not have*, `free`
+       is neither. Reading `pro` off the catalogue's own `pro-elements` group is
+       how the editor draws the PRO badge, so it is what we follow. */
     const reg = JSON.parse(readFileSync(MACHINE, 'utf8'));
+    const EXPECTED = {
+      form: PRO, login: PRO, nav_menu: PRO,
+      map: FREE,
+      book_now: 'ia:oliver', ia_oliver_invoice: 'ia:oliver',
+      ia_social_links: 'ia:arion', ia_mega_menu: 'ia:arion', ia_mobile_menu: 'ia:arion',
+    };
+    assert.deepEqual(Object.keys(EMITTERS).sort(), Object.keys(EXPECTED).sort(),
+      'a row was added or removed and its tier was not recorded here');
     for (const [kind, row] of Object.entries(EMITTERS)) {
-      assert.equal(row.tier, PRO, `${kind} must need a plan above ARION Lite`);
+      assert.equal(row.tier, EXPECTED[kind], `${kind} is on the wrong tier`);
       const w = reg.widgets[row.widgetType];
-      if (!w) continue; // mega-menu; recorded above.
-      assert.ok((w.categories || []).includes('pro-elements'),
-        `${row.widgetType} is no longer in the engine's pro-elements group — re-read the tier`);
+      if (!w) continue; // ia_book_now is a shortcode, not a registered widget.
+      const isPro = (w.categories || []).includes('pro-elements');
+      if (row.tier === PRO) {
+        assert.ok(isPro,
+          `${row.widgetType} is no longer in the engine's pro-elements group - re-read the tier`);
+      } else {
+        assert.equal(isPro, false,
+          `${row.widgetType} IS in the engine's pro-elements group and we charge nothing for it`);
+      }
     }
   });
 
@@ -174,16 +274,33 @@ describe('f8-contact-furniture is wired in, and shadows nothing', () => {
     }
   });
 
-  test('the one F8 kind elementorWidgets.js still owns is NOT duplicated here', () => {
-    /* `ELEMENTOR_WIDGETS` spreads the families FIRST and its own rows after, so
-       a family row for a kind that file still declares would be shadowed and
-       never called. `form` and `google_maps` are the two; they move here in the
-       same pass the old rows are deleted (the handoff's "Land: delete these").
-       The `form` row there is also the richer one — it carries the form-purpose
-       stamp and the ARION Lite shortcode fallback. */
-    for (const kind of ['map']) {
-      assert.equal(EMITTERS[kind], undefined, `${kind} would be shadowed by elementorWidgets.js`);
-      assert.ok(ELEMENTOR_WIDGETS[kind], `${kind} has vanished from the catalogue altogether`);
+  test('where a family row and a legacy row share a kind, THE FAMILY WINS', () => {
+    /* This INVERTED on b168/override. `ELEMENTOR_WIDGETS` used to be
+       `{ ...FAMILY_EMITTERS, ...LEGACY }`, so the later entry - the legacy one -
+       won, and a family row for a kind `elementorWidgets.js` still declared was
+       never called. `mergeEmitters(family, legacy)` decides it now, and that is
+       what let wave 2 deepen five kinds that already had a row.
+
+       EXECUTED, not read: the merged catalogue is asked for each kind and the
+       answer has to be this family's own object. */
+    for (const kind of ['map', 'book_now', 'ia_social_links', 'ia_mega_menu',
+      'ia_mobile_menu', 'ia_oliver_invoice']) {
+      assert.equal(ELEMENTOR_WIDGETS[kind], EMITTERS[kind],
+        `${kind}: the legacy row in elementorWidgets.js is still winning, so every setting `
+        + 'the rebuilt panel writes is dropped on publish');
+    }
+  });
+
+  test('the shadowed legacy rows are named, so the lander knows what to delete', () => {
+    /* Deleting them changes nothing at run time, which is how you know it is
+       safe. `form` and `nav_menu` were deleted outright in wave 1; these six are
+       still there because `hours_location`'s own node builder calls
+       `ELEMENTOR_WIDGETS.map.settings(...)`, and a delete plus a caller change
+       in one pass is two changes a merge cannot separate. */
+    const shadowed = shadowedLegacyKinds();
+    for (const kind of ['map', 'book_now', 'ia_social_links', 'ia_mega_menu',
+      'ia_mobile_menu', 'ia_oliver_invoice']) {
+      assert.ok(shadowed.includes(kind), `${kind} is not on the lander's delete list`);
     }
   });
 });

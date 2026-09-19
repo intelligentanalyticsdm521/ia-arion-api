@@ -1,197 +1,5 @@
 {
   "widgets": {
-    "form": {
-      "title": "Form",
-      "controls": {
-        "form_name": {
-          "type": "text"
-        },
-        "email_to": {
-          "type": "text"
-        },
-        "form_fields": {
-          "type": "form-fields-repeater"
-        },
-        "input_size": {
-          "type": "select"
-        },
-        "show_labels": {
-          "type": "switcher"
-        },
-        "mark_required": {
-          "type": "switcher"
-        },
-        "button_size": {
-          "type": "select"
-        },
-        "button_width": {
-          "type": "select"
-        },
-        "button_text": {
-          "type": "text"
-        },
-        "column_gap": {
-          "type": "slider"
-        },
-        "row_gap": {
-          "type": "slider"
-        },
-        "label_color": {
-          "type": "color"
-        },
-        "field_text_color": {
-          "type": "color"
-        },
-        "field_background_color": {
-          "type": "color"
-        },
-        "field_border_color": {
-          "type": "color"
-        },
-        "button_background_color": {
-          "type": "color"
-        },
-        "button_text_color": {
-          "type": "color"
-        }
-      }
-    },
-    "login": {
-      "title": "Login",
-      "controls": {
-        "show_labels": {
-          "type": "switcher"
-        },
-        "input_size": {
-          "type": "select"
-        },
-        "button_text": {
-          "type": "text"
-        },
-        "button_size": {
-          "type": "select"
-        },
-        "align": {
-          "type": "choose"
-        },
-        "show_lost_password": {
-          "type": "switcher"
-        },
-        "show_remember_me": {
-          "type": "switcher"
-        },
-        "show_logged_in_message": {
-          "type": "switcher"
-        },
-        "redirect_after_login": {
-          "type": "switcher"
-        },
-        "redirect_url": {
-          "type": "url"
-        },
-        "redirect_after_logout": {
-          "type": "switcher"
-        },
-        "redirect_logout_url": {
-          "type": "url"
-        },
-        "row_gap": {
-          "type": "slider"
-        },
-        "links_color": {
-          "type": "color"
-        },
-        "label_color": {
-          "type": "color"
-        },
-        "field_text_color": {
-          "type": "color"
-        },
-        "field_background_color": {
-          "type": "color"
-        },
-        "field_border_color": {
-          "type": "color"
-        },
-        "button_text_color": {
-          "type": "color"
-        },
-        "button_background_color": {
-          "type": "color"
-        },
-        "button_border_color": {
-          "type": "color"
-        }
-      }
-    },
-    "nav-menu": {
-      "title": "WordPress Menu",
-      "controls": {
-        "menu": {
-          "type": "select"
-        },
-        "menu_name": {
-          "type": "text"
-        },
-        "layout": {
-          "type": "select"
-        },
-        "align_items": {
-          "type": "choose"
-        },
-        "pointer": {
-          "type": "select"
-        },
-        "dropdown": {
-          "type": "select"
-        },
-        "full_width": {
-          "type": "switcher"
-        },
-        "text_align": {
-          "type": "select"
-        },
-        "toggle": {
-          "type": "select"
-        },
-        "toggle_align": {
-          "type": "choose"
-        },
-        "color_menu_item": {
-          "type": "color"
-        },
-        "pointer_color_menu_item_hover": {
-          "type": "color"
-        },
-        "menu_space_between": {
-          "type": "slider"
-        },
-        "padding_horizontal_menu_item": {
-          "type": "slider"
-        },
-        "padding_vertical_menu_item": {
-          "type": "slider"
-        },
-        "border_radius_menu_item": {
-          "type": "slider"
-        },
-        "color_dropdown_item": {
-          "type": "color"
-        },
-        "background_color_dropdown_item": {
-          "type": "color"
-        },
-        "toggle_color": {
-          "type": "color"
-        },
-        "toggle_background_color": {
-          "type": "color"
-        },
-        "toggle_size": {
-          "type": "slider"
-        }
-      }
-    },
     "heading": {
       "title": "Heading",
       "controls": {
@@ -320,6 +128,54 @@
           "type": "text"
         },
         "zoom": {
+          "type": "slider"
+        },
+        "height": {
+          "type": "slider"
+        },
+        "height_tablet": {
+          "type": "slider"
+        },
+        "height_mobile": {
+          "type": "slider"
+        },
+        "css_filters_css_filter": {
+          "type": "popover_toggle"
+        },
+        "css_filters_blur": {
+          "type": "slider"
+        },
+        "css_filters_brightness": {
+          "type": "slider"
+        },
+        "css_filters_contrast": {
+          "type": "slider"
+        },
+        "css_filters_saturate": {
+          "type": "slider"
+        },
+        "css_filters_hue": {
+          "type": "slider"
+        },
+        "css_filters_hover_css_filter": {
+          "type": "popover_toggle"
+        },
+        "css_filters_hover_blur": {
+          "type": "slider"
+        },
+        "css_filters_hover_brightness": {
+          "type": "slider"
+        },
+        "css_filters_hover_contrast": {
+          "type": "slider"
+        },
+        "css_filters_hover_saturate": {
+          "type": "slider"
+        },
+        "css_filters_hover_hue": {
+          "type": "slider"
+        },
+        "hover_transition": {
           "type": "slider"
         }
       }
@@ -749,11 +605,56 @@
         "menu_source": {
           "type": "select"
         },
-        "wp_menu": {
-          "type": "select"
-        },
         "menu_style": {
           "type": "select"
+        },
+        "menu_items": {
+          "type": "repeater"
+        },
+        "menu_groups": {
+          "type": "repeater"
+        },
+        "featured_heading": {
+          "type": "text"
+        },
+        "featured_text": {
+          "type": "textarea"
+        },
+        "featured_link": {
+          "type": "url"
+        },
+        "featured_link_text": {
+          "type": "text"
+        },
+        "bg_color": {
+          "type": "color"
+        },
+        "text_color": {
+          "type": "color"
+        },
+        "accent_color": {
+          "type": "color"
+        },
+        "hover_color": {
+          "type": "color"
+        },
+        "border_color": {
+          "type": "color"
+        },
+        "font_size": {
+          "type": "slider"
+        },
+        "item_spacing": {
+          "type": "slider"
+        },
+        "dropdown_animation": {
+          "type": "select"
+        },
+        "dropdown_width": {
+          "type": "select"
+        },
+        "dropdown_custom_width": {
+          "type": "slider"
         }
       }
     },
@@ -763,11 +664,56 @@
         "menu_source": {
           "type": "select"
         },
-        "wp_menu": {
-          "type": "select"
+        "custom_items": {
+          "type": "repeater"
         },
         "style": {
           "type": "select"
+        },
+        "show_social": {
+          "type": "switcher"
+        },
+        "social_links": {
+          "type": "repeater"
+        },
+        "show_cta": {
+          "type": "switcher"
+        },
+        "cta_text": {
+          "type": "text"
+        },
+        "cta_link": {
+          "type": "url"
+        },
+        "show_search": {
+          "type": "switcher"
+        },
+        "bg_type": {
+          "type": "select"
+        },
+        "bg_color": {
+          "type": "color"
+        },
+        "bg_image": {
+          "type": "media"
+        },
+        "overlay_color": {
+          "type": "color"
+        },
+        "text_color": {
+          "type": "color"
+        },
+        "accent_color": {
+          "type": "color"
+        },
+        "close_icon_color": {
+          "type": "color"
+        },
+        "animation_direction": {
+          "type": "select"
+        },
+        "panel_width": {
+          "type": "slider"
         }
       }
     },
@@ -785,7 +731,16 @@
     "ia_oliver_invoice": {
       "title": "IA OLIVER Invoice",
       "controls": {
+        "business_logo_url": {
+          "type": "media"
+        },
         "business_name": {
+          "type": "text"
+        },
+        "business_phone": {
+          "type": "text"
+        },
+        "business_email": {
           "type": "text"
         },
         "show_book_again_cta": {
@@ -793,6 +748,12 @@
         },
         "book_again_url": {
           "type": "url"
+        },
+        "book_again_text": {
+          "type": "text"
+        },
+        "accent_color": {
+          "type": "color"
         }
       }
     },
@@ -805,8 +766,242 @@
         "shape": {
           "type": "select"
         },
+        "columns": {
+          "type": "select"
+        },
+        "columns_tablet": {
+          "type": "select"
+        },
+        "columns_mobile": {
+          "type": "select"
+        },
         "align": {
           "type": "choose"
+        },
+        "align_tablet": {
+          "type": "choose"
+        },
+        "align_mobile": {
+          "type": "choose"
+        },
+        "icon_color": {
+          "type": "select"
+        },
+        "icon_primary_color": {
+          "type": "color"
+        },
+        "icon_secondary_color": {
+          "type": "color"
+        },
+        "icon_size": {
+          "type": "slider"
+        },
+        "icon_size_tablet": {
+          "type": "slider"
+        },
+        "icon_size_mobile": {
+          "type": "slider"
+        },
+        "icon_padding": {
+          "type": "slider"
+        },
+        "icon_spacing": {
+          "type": "slider"
+        },
+        "border_radius": {
+          "type": "dimensions"
+        }
+      }
+    },
+    "form": {
+      "title": "Form",
+      "controls": {
+        "form_name": {
+          "type": "text"
+        },
+        "email_to": {
+          "type": "text"
+        },
+        "form_fields": {
+          "type": "form-fields-repeater"
+        },
+        "input_size": {
+          "type": "select"
+        },
+        "show_labels": {
+          "type": "switcher"
+        },
+        "mark_required": {
+          "type": "switcher"
+        },
+        "button_size": {
+          "type": "select"
+        },
+        "button_width": {
+          "type": "select"
+        },
+        "button_text": {
+          "type": "text"
+        },
+        "column_gap": {
+          "type": "slider"
+        },
+        "row_gap": {
+          "type": "slider"
+        },
+        "label_color": {
+          "type": "color"
+        },
+        "field_text_color": {
+          "type": "color"
+        },
+        "field_background_color": {
+          "type": "color"
+        },
+        "field_border_color": {
+          "type": "color"
+        },
+        "button_background_color": {
+          "type": "color"
+        },
+        "button_text_color": {
+          "type": "color"
+        }
+      }
+    },
+    "login": {
+      "title": "Login",
+      "controls": {
+        "show_labels": {
+          "type": "switcher"
+        },
+        "input_size": {
+          "type": "select"
+        },
+        "button_text": {
+          "type": "text"
+        },
+        "button_size": {
+          "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "show_lost_password": {
+          "type": "switcher"
+        },
+        "show_remember_me": {
+          "type": "switcher"
+        },
+        "show_logged_in_message": {
+          "type": "switcher"
+        },
+        "redirect_after_login": {
+          "type": "switcher"
+        },
+        "redirect_url": {
+          "type": "url"
+        },
+        "redirect_after_logout": {
+          "type": "switcher"
+        },
+        "redirect_logout_url": {
+          "type": "url"
+        },
+        "row_gap": {
+          "type": "slider"
+        },
+        "links_color": {
+          "type": "color"
+        },
+        "label_color": {
+          "type": "color"
+        },
+        "field_text_color": {
+          "type": "color"
+        },
+        "field_background_color": {
+          "type": "color"
+        },
+        "field_border_color": {
+          "type": "color"
+        },
+        "button_text_color": {
+          "type": "color"
+        },
+        "button_background_color": {
+          "type": "color"
+        },
+        "button_border_color": {
+          "type": "color"
+        }
+      }
+    },
+    "nav-menu": {
+      "title": "WordPress Menu",
+      "controls": {
+        "menu": {
+          "type": "select"
+        },
+        "menu_name": {
+          "type": "text"
+        },
+        "layout": {
+          "type": "select"
+        },
+        "align_items": {
+          "type": "choose"
+        },
+        "pointer": {
+          "type": "select"
+        },
+        "dropdown": {
+          "type": "select"
+        },
+        "full_width": {
+          "type": "switcher"
+        },
+        "text_align": {
+          "type": "select"
+        },
+        "toggle": {
+          "type": "select"
+        },
+        "toggle_align": {
+          "type": "choose"
+        },
+        "color_menu_item": {
+          "type": "color"
+        },
+        "pointer_color_menu_item_hover": {
+          "type": "color"
+        },
+        "menu_space_between": {
+          "type": "slider"
+        },
+        "padding_horizontal_menu_item": {
+          "type": "slider"
+        },
+        "padding_vertical_menu_item": {
+          "type": "slider"
+        },
+        "border_radius_menu_item": {
+          "type": "slider"
+        },
+        "color_dropdown_item": {
+          "type": "color"
+        },
+        "background_color_dropdown_item": {
+          "type": "color"
+        },
+        "toggle_color": {
+          "type": "color"
+        },
+        "toggle_background_color": {
+          "type": "color"
+        },
+        "toggle_size": {
+          "type": "slider"
         }
       }
     }
