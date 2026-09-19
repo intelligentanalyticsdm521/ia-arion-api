@@ -285,9 +285,18 @@ describe('every widget declares what plan it needs', () => {
     /* D-165 §11.13.3 — the whole paid panel is offered and refused by name on
        Lite, and the IA list is the one the section names. Both lists are read
        off the catalogue rather than typed anywhere else. */
+    /* B-168 f1-words, 2026-09-19: FOUR more paid ones, and each is Pro in
+       Elementor's own catalogue rather than by our choosing —
+       BUILDER_WIDGET_CATALOG_2026-09-17.pro.json files Blockquote, Animated
+       Headline, Table of Contents and Code Highlight under `pro-elements`,
+       which is the category the editor draws its PRO badge from. The offer file
+       lists all four under `website.elementor_pro`. Whether a given business
+       passes the gate is still the server's answer and is not read here. */
     assert.deepEqual(proWidgetKinds(), [
-      'call_to_action', 'card', 'countdown', 'flip_box', 'form', 'loop_grid', 'nav_menu',
-      'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides', 'testimonial_carousel',
+      'animated_headline', 'blockquote', 'call_to_action', 'card', 'code_highlight',
+      'countdown', 'flip_box', 'form', 'loop_grid', 'nav_menu',
+      'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides', 'table_of_contents',
+      'testimonial_carousel',
     ]);
     assert.deepEqual(iaWidgetKinds().map((w) => `${w.kind}:${w.product}`), [
       'book_now:oliver', 'catalog_card:oliver', 'hours_location:lumen',
