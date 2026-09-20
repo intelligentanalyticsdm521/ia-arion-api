@@ -285,18 +285,22 @@ describe('every widget declares what plan it needs', () => {
     /* D-165 §11.13.3 — the whole paid panel is offered and refused by name on
        Lite, and the IA list is the one the section names. Both lists are read
        off the catalogue rather than typed anywhere else. */
-    /* B-168 f1-words, 2026-09-19: FOUR more paid ones, and each is Pro in
-       Elementor's own catalogue rather than by our choosing —
-       BUILDER_WIDGET_CATALOG_2026-09-17.pro.json files Blockquote, Animated
-       Headline, Table of Contents and Code Highlight under `pro-elements`,
-       which is the category the editor draws its PRO badge from. The offer file
-       lists all four under `website.elementor_pro`. Whether a given business
-       passes the gate is still the server's answer and is not read here. */
+    /* LANDED (B-168): the eight families each brought Elementor's own paid
+       widgets with them, so this list is now the offer file's
+       `website.elementor_pro` as far as the publisher has emitters for it.
+       Elementor's own Reviews is `reviews` now, not `pro_reviews` - family F5
+       gave it Elementor's id and the IA twin keeps `ia_reviews`. Read off the
+       catalogue, never typed anywhere else. */
     assert.deepEqual(proWidgetKinds(), [
-      'animated_headline', 'blockquote', 'call_to_action', 'card', 'code_highlight',
-      'countdown', 'flip_box', 'form', 'loop_grid', 'nav_menu',
-      'posts', 'price_list', 'pro_gallery', 'pro_reviews', 'slides', 'table_of_contents',
-      'testimonial_carousel',
+      'animated_headline', 'archive_posts', 'author_box', 'blockquote', 'call_to_action',
+      'card', 'code_highlight', 'countdown', 'facebook_embed', 'facebook_page', 'flip_box',
+      'form', 'hotspot', 'login', 'loop_grid', 'lottie', 'media_carousel', 'nav_menu',
+      'paypal_button', 'portfolio', 'post_comments', 'post_info', 'post_navigation',
+      'posts', 'price_list', 'price_table', 'pro_gallery', 'progress_tracker', 'reviews',
+      'search', 'share_buttons', 'sitemap', 'slides', 'stripe_button', 'table_of_contents',
+      'taxonomy_filter', 'template', 'testimonial_carousel', 'theme_archive_title',
+      'theme_page_title', 'theme_post_excerpt', 'theme_post_featured_image',
+      'theme_post_title', 'theme_site_logo', 'theme_site_title', 'video_playlist',
     ]);
     assert.deepEqual(iaWidgetKinds().map((w) => `${w.kind}:${w.product}`), [
       'book_now:oliver', 'catalog_card:oliver', 'hours_location:lumen',
