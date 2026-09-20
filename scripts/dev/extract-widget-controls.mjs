@@ -47,9 +47,51 @@ if (!widgets || typeof widgets !== 'object') {
 const out = { widgets: {}, unregistered: [] };
 const missing = [];
 
+/** Every widget node inside a tree a `node()` row built, itself included. */
+function widgetsIn(node, out = []) {
+  if (!node || typeof node !== 'object') return out;
+  if (node.elType === 'widget' && node.widgetType) out.push(node);
+  for (const kid of (Array.isArray(node.elements) ? node.elements : [])) widgetsIn(kid, out);
+  return out;
+}
+
 for (const [kind, row] of Object.entries(ELEMENTOR_WIDGETS)) {
   /* A COMPOSITION publishes free widgets that already have their own rows, so
-     there is nothing of its own to pin here. */
+     there is nothing of its own to pin here — UNLESS the tree it builds is
+     headed by a widget of ITS OWN name, which is what a NESTED element is
+     (Elementor's `nested-tabs`, `nested-accordion`: the widget carries the
+     titles and its child CONTAINERS carry the words). Those DO have settings
+     the engine can silently drop, so they are pinned like any other row.
+     Added 2026-09-19, f4-moving wave 2 — before it, every key a nested widget
+     published was unchecked. */
+  if (row.node && !row.settings) {
+    let tree;
+    try { tree = row.node(MAXIMAL_WIDGET_PROPS, WIDGET_CTX); }
+    catch (e) { missing.push(`${kind}: node() threw — ${e.message}`); continue; }
+    if (!tree) continue;
+    const self = widgetsIn(tree).find((n) => n.widgetType === row.widgetType);
+    if (!self) continue;
+    const engineSelf = widgets[row.widgetType];
+    if (!engineSelf) { missing.push(`${kind}: the engine has no widget called "${row.widgetType}"`); continue; }
+    const selfKeys = Object.keys(self.settings || {}).filter((k) => !SETTINGS_NOT_CONTROLS.includes(k));
+    const badSelf = selfKeys.filter((k) => !engineSelf.controls?.[k]);
+    if (badSelf.length) {
+      missing.push(`${kind} (${row.widgetType}): not controls of that widget — ${badSelf.join(', ')}`);
+      continue;
+    }
+    out.widgets[row.widgetType] = {
+      title: engineSelf.title,
+      controls: Object.fromEntries(selfKeys.map((k) => {
+        const c = engineSelf.controls[k];
+        return [k, {
+          type: c.type,
+          ...(c.options && !Array.isArray(c.options) ? { options: Object.keys(c.options) } : {}),
+          ...(c.repeater_fields ? { repeater_fields: Object.keys(c.repeater_fields) } : {}),
+        }];
+      })),
+    };
+    continue;
+  }
   if (row.node || !row.settings) continue;
   const widgetType = row.widgetType;
   const engine = widgets[widgetType];

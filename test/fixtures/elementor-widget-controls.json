@@ -478,14 +478,6 @@
         }
       }
     },
-    "accordion": {
-      "title": "Accordion",
-      "controls": {
-        "tabs": {
-          "type": "repeater"
-        }
-      }
-    },
     "icon": {
       "title": "Icon",
       "controls": {
@@ -620,17 +612,6 @@
         },
         "hover_secondary_color": {
           "type": "color"
-        }
-      }
-    },
-    "tabs": {
-      "title": "Tabs",
-      "controls": {
-        "tabs": {
-          "type": "repeater"
-        },
-        "type": {
-          "type": "choose"
         }
       }
     },
