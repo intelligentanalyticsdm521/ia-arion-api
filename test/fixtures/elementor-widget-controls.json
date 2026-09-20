@@ -238,6 +238,7 @@
         }
       }
     },
+
     "heading": {
       "title": "Heading",
       "controls": {
@@ -690,49 +691,6 @@
         },
         "title_tag": {
           "type": "select"
-        }
-      }
-    },
-    "call-to-action": {
-      "title": "Call to Action",
-      "controls": {
-        "skin": {
-          "type": "select"
-        },
-        "title": {
-          "type": "text"
-        },
-        "description": {
-          "type": "textarea"
-        },
-        "button": {
-          "type": "text"
-        },
-        "link": {
-          "type": "url"
-        }
-      }
-    },
-    "flip-box": {
-      "title": "Flip Box",
-      "controls": {
-        "title_text_a": {
-          "type": "text"
-        },
-        "description_text_a": {
-          "type": "textarea"
-        },
-        "title_text_b": {
-          "type": "text"
-        },
-        "description_text_b": {
-          "type": "textarea"
-        },
-        "button_text": {
-          "type": "text"
-        },
-        "link": {
-          "type": "url"
         }
       }
     },
