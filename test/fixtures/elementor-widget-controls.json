@@ -270,8 +270,35 @@
     "icon-list": {
       "title": "Icon List",
       "controls": {
+        "view": {
+          "type": "choose"
+        },
         "icon_list": {
           "type": "repeater"
+        },
+        "link_click": {
+          "type": "select"
+        },
+        "divider": {
+          "type": "switcher"
+        },
+        "divider_style": {
+          "type": "select"
+        },
+        "divider_weight": {
+          "type": "slider"
+        },
+        "divider_color": {
+          "type": "color"
+        },
+        "icon_color": {
+          "type": "color"
+        },
+        "text_indent": {
+          "type": "slider"
+        },
+        "text_color": {
+          "type": "color"
         }
       }
     },
@@ -280,6 +307,45 @@
       "controls": {
         "style": {
           "type": "select"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "look": {
+          "type": "choose"
+        },
+        "text": {
+          "type": "text"
+        },
+        "html_tag": {
+          "type": "select"
+        },
+        "icon": {
+          "type": "icons"
+        },
+        "color": {
+          "type": "color"
+        },
+        "weight": {
+          "type": "slider"
+        },
+        "text_color": {
+          "type": "color"
+        },
+        "typography_font_weight": {
+          "type": "select"
+        },
+        "text_align": {
+          "type": "choose"
+        },
+        "icon_view": {
+          "type": "select"
+        },
+        "primary_color": {
+          "type": "color"
+        },
+        "icon_align": {
+          "type": "choose"
         }
       }
     },
@@ -294,17 +360,53 @@
     "button": {
       "title": "Button",
       "controls": {
+        "button_type": {
+          "type": "select"
+        },
         "text": {
           "type": "text"
         },
         "link": {
           "type": "url"
         },
+        "size": {
+          "type": "select"
+        },
+        "selected_icon": {
+          "type": "icons"
+        },
+        "icon_align": {
+          "type": "choose"
+        },
+        "icon_indent": {
+          "type": "slider"
+        },
         "align": {
           "type": "choose"
         },
-        "size": {
+        "typography_font_weight": {
           "type": "select"
+        },
+        "typography_text_transform": {
+          "type": "select"
+        },
+        "button_text_color": {
+          "type": "color"
+        },
+        "background_color": {
+          "type": "color"
+        },
+        "border_border": {
+          "type": "select"
+        },
+        "border_color": {
+          "type": "color"
+        },
+        "hover_color": {
+          "type": "color"
+        },
+        "button_background_hover_color": {
+          "type": "color"
         }
       }
     },
@@ -341,17 +443,38 @@
         "selected_icon": {
           "type": "icons"
         },
+        "view": {
+          "type": "select"
+        },
+        "shape": {
+          "type": "select"
+        },
         "title_text": {
           "type": "text"
         },
         "description_text": {
           "type": "textarea"
         },
-        "position": {
-          "type": "choose"
+        "link": {
+          "type": "url"
         },
         "title_size": {
           "type": "select"
+        },
+        "position": {
+          "type": "choose"
+        },
+        "primary_color": {
+          "type": "color"
+        },
+        "secondary_color": {
+          "type": "color"
+        },
+        "title_color": {
+          "type": "color"
+        },
+        "description_color": {
+          "type": "color"
         }
       }
     },
@@ -377,6 +500,24 @@
         },
         "link": {
           "type": "url"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "primary_color": {
+          "type": "color"
+        },
+        "secondary_color": {
+          "type": "color"
+        },
+        "size": {
+          "type": "slider"
+        },
+        "icon_padding": {
+          "type": "slider"
+        },
+        "border_width": {
+          "type": "dimensions"
         }
       }
     },
@@ -417,6 +558,30 @@
         },
         "show_dismiss": {
           "type": "switcher"
+        },
+        "dismiss_icon": {
+          "type": "icons"
+        },
+        "background": {
+          "type": "color"
+        },
+        "border_color": {
+          "type": "color"
+        },
+        "border_left-width": {
+          "type": "slider"
+        },
+        "title_color": {
+          "type": "color"
+        },
+        "alert_title_font_weight": {
+          "type": "select"
+        },
+        "description_color": {
+          "type": "color"
+        },
+        "dismiss_icon_normal_color": {
+          "type": "color"
         }
       }
     },
@@ -429,8 +594,32 @@
         "shape": {
           "type": "select"
         },
+        "columns": {
+          "type": "select"
+        },
         "align": {
           "type": "choose"
+        },
+        "icon_color": {
+          "type": "select"
+        },
+        "icon_primary_color": {
+          "type": "color"
+        },
+        "icon_secondary_color": {
+          "type": "color"
+        },
+        "image_border_border": {
+          "type": "select"
+        },
+        "image_border_color": {
+          "type": "color"
+        },
+        "hover_primary_color": {
+          "type": "color"
+        },
+        "hover_secondary_color": {
+          "type": "color"
         }
       }
     },
