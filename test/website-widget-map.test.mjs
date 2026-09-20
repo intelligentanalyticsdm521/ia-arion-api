@@ -71,12 +71,16 @@ const WEBSITE_EXTRAS = {
 /** The paid panel §11.13.3 names by name. */
 const PRO_SET = [
   'form', 'posts', 'pro_gallery', 'slides', 'card', 'price_list', 'call_to_action',
-  'flip_box', 'countdown', 'testimonial_carousel', 'pro_reviews', 'nav_menu', 'loop_grid',
+  'flip_box', 'countdown', 'testimonial_carousel', 'nav_menu', 'loop_grid',
+  /* B-168 F5: `pro_reviews` is gone and `reviews` IS Elementor's Reviews now
+     - no Portal kind was ever called pro_reviews. Media Carousel joins the
+     paid panel with it. */
+  'reviews', 'media_carousel',
 ];
 
 /** The IA website widgets of §11.13.3, and whether the plugin registers one. */
 const IA_REGISTERED = ['ia_mega_menu', 'ia_mobile_menu', 'ia_posts', 'ia_oliver_invoice', 'ia_social_links'];
-const IA_NEW = ['product_cards', 'reviews', 'book_now', 'ia_form', 'newsletter_signup', 'hours_location'];
+const IA_NEW = ['product_cards', 'ia_reviews', 'book_now', 'ia_form', 'newsletter_signup', 'hours_location'];
 
 describe('the standard set maps one for one onto the page engine', () => {
   for (const [kind, widgetType] of Object.entries({ ...STANDARD_SET, ...WEBSITE_EXTRAS })) {
@@ -270,7 +274,7 @@ describe('the three states of §11.12, and silence locks nothing', () => {
   });
 
   test('a product the business does not own is named, not hinted at', () => {
-    const s = lockSentence('reviews', { ...OWNS_ALL, ownedProducts: ['arion'] });
+    const s = lockSentence('ia_reviews', { ...OWNS_ALL, ownedProducts: ['arion'] });
     assert.match(s, /Needs LUMEN/);
   });
 

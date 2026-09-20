@@ -301,8 +301,8 @@ describe('every widget declares what plan it needs', () => {
     assert.deepEqual(iaWidgetKinds().map((w) => `${w.kind}:${w.product}`), [
       'book_now:oliver', 'catalog_card:oliver', 'hours_location:lumen',
       'ia_form:lumen', 'ia_mega_menu:arion', 'ia_mobile_menu:arion',
-      'ia_oliver_invoice:oliver', 'ia_posts:arion', 'ia_social_links:arion',
-      'newsletter_signup:lumen', 'product_cards:oliver', 'reviews:lumen',
+      'ia_oliver_invoice:oliver', 'ia_posts:arion', 'ia_reviews:lumen',
+      'ia_social_links:arion', 'newsletter_signup:lumen', 'product_cards:oliver',
     ]);
   });
 

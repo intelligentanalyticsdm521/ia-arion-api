@@ -660,22 +660,6 @@
         }
       }
     },
-    "testimonial-carousel": {
-      "title": "Testimonial Carousel",
-      "controls": {
-        "slides": {
-          "type": "repeater"
-        }
-      }
-    },
-    "reviews": {
-      "title": "Reviews",
-      "controls": {
-        "slides": {
-          "type": "repeater"
-        }
-      }
-    },
     "nav-menu": {
       "title": "WordPress Menu",
       "controls": {
