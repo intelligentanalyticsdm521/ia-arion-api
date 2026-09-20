@@ -142,5 +142,52 @@ export const MAXIMAL_WIDGET_PROPS = {
   _ia_source: 'oliver:catalogue',
   _ia_selection: { offering_id: 'svc-1', price_id: 'p-1', tier: 'standard' },
   refresh: 'live', on_empty: 'hide', overrides: { heading: 'Essentials' },
+  /* B-168 F8 WAVE 2 - Google Maps, Book Now and the three IA plugin widgets.
+     Every control those five now offer is set here, because a row that reads a
+     prop nobody set emits its default instead and the pin never sees the key.
+     Elementor's own key names (and, for the three plugin widgets, the PLUGIN'S
+     own, read off the same 2026-09-17 registry scrape). The ones already above
+     are not repeated: `address`, `zoom`, `height`, `align`, `columns`, `size`,
+     `shape`, `link`, `text`, `menu`. */
+  /* Google Maps */
+  height_tablet: 300, height_mobile: 240,
+  css_filters_css_filter: 'custom', css_filters_blur: 2, css_filters_brightness: 110,
+  css_filters_contrast: 95, css_filters_saturate: 80, css_filters_hue: 20,
+  css_filters_hover_css_filter: 'custom', css_filters_hover_blur: 0,
+  css_filters_hover_brightness: 120, css_filters_hover_contrast: 100,
+  css_filters_hover_saturate: 120, css_filters_hover_hue: 0, hover_transition: 0.3,
+  /* Book Now, as Elementor's Button */
+  button_type: 'success', button_css_id: 'book', icon_align: 'row-reverse', icon_indent: 8,
+  align_tablet: 'center', align_mobile: 'left',
+  typography_font_size: 15, typography_font_size_tablet: 14, typography_font_size_mobile: 13,
+  background_color: '#1D7A8C', hover_color: '#ffffff',
+  button_background_hover_color: '#0C4A60', button_hover_border_color: '#0C4A60',
+  border_border: 'solid', border_color: '#0C4A60', border_width: 1, border_radius: 8,
+  /* IA Social Links */
+  platforms: ['facebook', 'linkedin'], columns_tablet: '2', columns_mobile: '1',
+  icon_color: 'custom', icon_primary_color: '#0C4A60', icon_secondary_color: '#ffffff',
+  icon_size: 24, icon_size_tablet: 22, icon_size_mobile: 20, icon_padding: 0.5, icon_spacing: 6,
+  /* IA Mega Menu */
+  menu_source: 'wordpress', menu_style: 'column-dropdown',
+  menu_items: [{ _id: 'i0', item_label: 'Services', item_type: 'mega_trigger' }],
+  menu_groups: [], featured_heading: 'Featured', featured_text: 'What is new',
+  featured_link: 'https://example.test/new', featured_link_text: 'Learn More',
+  bg_color: '#ffffff', text_color: '#0B1C24', accent_color: '#0C4A60',
+  hover_color_menu: '#2D9CDB', border_color_menu: '#0C4A60',
+  font_size: 14, item_spacing: 24, dropdown_animation: 'slide', dropdown_width: 'custom',
+  dropdown_custom_width: 720,
+  /* IA Mobile Menu */
+  style: 'fullscreen_overlay',
+  custom_items: [{ _id: 'i0', label: 'Home', url: '/' }],
+  show_social: 'yes', social_links: [], show_cta: 'yes', cta_text: 'Contact Us',
+  cta_link: 'https://example.test/contact', show_search: 'yes',
+  bg_type: 'overlay', bg_image: 'https://cdn.example.test/bg.jpg',
+  overlay_color: 'rgba(12,74,96,0.92)', close_icon_color: 'rgba(255,255,255,0.6)',
+  animation_direction: 'left', panel_width: 320,
+  /* IA OLIVER Invoice */
+  business_logo_url: 'https://cdn.example.test/logo.png', business_name: 'A business',
+  business_phone: '555-0100', business_email: 'hello@example.test',
+  show_book_again_cta: 'yes', book_again_url: 'https://example.test/book',
+  book_again_text: 'Schedule your next service',
   show_price: true, show_inclusions: true,
 };

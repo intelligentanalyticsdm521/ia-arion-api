@@ -434,6 +434,54 @@
         },
         "zoom": {
           "type": "slider"
+        },
+        "height": {
+          "type": "slider"
+        },
+        "height_tablet": {
+          "type": "slider"
+        },
+        "height_mobile": {
+          "type": "slider"
+        },
+        "css_filters_css_filter": {
+          "type": "popover_toggle"
+        },
+        "css_filters_blur": {
+          "type": "slider"
+        },
+        "css_filters_brightness": {
+          "type": "slider"
+        },
+        "css_filters_contrast": {
+          "type": "slider"
+        },
+        "css_filters_saturate": {
+          "type": "slider"
+        },
+        "css_filters_hue": {
+          "type": "slider"
+        },
+        "css_filters_hover_css_filter": {
+          "type": "popover_toggle"
+        },
+        "css_filters_hover_blur": {
+          "type": "slider"
+        },
+        "css_filters_hover_brightness": {
+          "type": "slider"
+        },
+        "css_filters_hover_contrast": {
+          "type": "slider"
+        },
+        "css_filters_hover_saturate": {
+          "type": "slider"
+        },
+        "css_filters_hover_hue": {
+          "type": "slider"
+        },
+        "hover_transition": {
+          "type": "slider"
         }
       }
     },
@@ -747,11 +795,56 @@
         "menu_source": {
           "type": "select"
         },
-        "wp_menu": {
-          "type": "select"
-        },
         "menu_style": {
           "type": "select"
+        },
+        "menu_items": {
+          "type": "repeater"
+        },
+        "menu_groups": {
+          "type": "repeater"
+        },
+        "featured_heading": {
+          "type": "text"
+        },
+        "featured_text": {
+          "type": "textarea"
+        },
+        "featured_link": {
+          "type": "url"
+        },
+        "featured_link_text": {
+          "type": "text"
+        },
+        "bg_color": {
+          "type": "color"
+        },
+        "text_color": {
+          "type": "color"
+        },
+        "accent_color": {
+          "type": "color"
+        },
+        "hover_color": {
+          "type": "color"
+        },
+        "border_color": {
+          "type": "color"
+        },
+        "font_size": {
+          "type": "slider"
+        },
+        "item_spacing": {
+          "type": "slider"
+        },
+        "dropdown_animation": {
+          "type": "select"
+        },
+        "dropdown_width": {
+          "type": "select"
+        },
+        "dropdown_custom_width": {
+          "type": "slider"
         }
       }
     },
@@ -761,11 +854,56 @@
         "menu_source": {
           "type": "select"
         },
-        "wp_menu": {
-          "type": "select"
+        "custom_items": {
+          "type": "repeater"
         },
         "style": {
           "type": "select"
+        },
+        "show_social": {
+          "type": "switcher"
+        },
+        "social_links": {
+          "type": "repeater"
+        },
+        "show_cta": {
+          "type": "switcher"
+        },
+        "cta_text": {
+          "type": "text"
+        },
+        "cta_link": {
+          "type": "url"
+        },
+        "show_search": {
+          "type": "switcher"
+        },
+        "bg_type": {
+          "type": "select"
+        },
+        "bg_color": {
+          "type": "color"
+        },
+        "bg_image": {
+          "type": "media"
+        },
+        "overlay_color": {
+          "type": "color"
+        },
+        "text_color": {
+          "type": "color"
+        },
+        "accent_color": {
+          "type": "color"
+        },
+        "close_icon_color": {
+          "type": "color"
+        },
+        "animation_direction": {
+          "type": "select"
+        },
+        "panel_width": {
+          "type": "slider"
         }
       }
     },
