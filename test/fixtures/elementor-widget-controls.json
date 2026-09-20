@@ -554,50 +554,6 @@
         }
       }
     },
-    "price-table": {
-      "title": "Price Table",
-      "controls": {
-        "heading": {
-          "type": "text"
-        },
-        "sub_heading": {
-          "type": "text"
-        },
-        "price": {
-          "type": "text"
-        },
-        "currency_symbol": {
-          "type": "select"
-        },
-        "sale": {
-          "type": "switcher"
-        },
-        "original_price": {
-          "type": "number"
-        },
-        "period": {
-          "type": "text"
-        },
-        "features_list": {
-          "type": "repeater"
-        },
-        "button_text": {
-          "type": "text"
-        },
-        "link": {
-          "type": "url"
-        },
-        "footer_additional_info": {
-          "type": "textarea"
-        },
-        "show_ribbon": {
-          "type": "switcher"
-        },
-        "ribbon_title": {
-          "type": "text"
-        }
-      }
-    },
     "posts": {
       "title": "Posts",
       "controls": {

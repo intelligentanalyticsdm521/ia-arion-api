@@ -75,19 +75,26 @@ for (const [kind, row] of Object.entries(ELEMENTOR_WIDGETS)) {
   const unknown = keys.filter((k) => !engine.controls?.[k]);
   if (unknown.length) { missing.push(`${kind} (${widgetType}): not controls of that widget — ${unknown.join(', ')}`); continue; }
 
+  /* TWO KINDS CAN PUBLISH ONE WIDGET TYPE, so the pin is the UNION.
+     `card` and `price_table` both publish `price-table`; this used to write
+     the second one over the first, so whichever row came later decided which
+     controls were pinned and the other row's keys failed the test as
+     "not a control of that widget". Merging is the honest answer: the pin says
+     which controls of that widget ANY emitter writes. */
+  const before = out.widgets[widgetType]?.controls || {};
   out.widgets[widgetType] = {
     title: engine.title,
     /* Every control this emitter can write, with the option list the engine
        offers for it when it has one. The test uses the list to refuse a value
        the control would drop. */
-    controls: Object.fromEntries(keys.map((k) => {
+    controls: Object.fromEntries([...Object.entries(before), ...keys.map((k) => {
       const c = engine.controls[k];
       return [k, {
         type: c.type,
         ...(c.options && !Array.isArray(c.options) ? { options: Object.keys(c.options) } : {}),
         ...(c.repeater_fields ? { repeater_fields: Object.keys(c.repeater_fields) } : {}),
       }];
-    })),
+    })]),
   };
 }
 
