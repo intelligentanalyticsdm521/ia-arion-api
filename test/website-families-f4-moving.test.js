@@ -25,7 +25,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { EMITTERS } from '../lib/websiteBuilder/families/f4-moving/emitters.js';
-import { ELEMENTOR_WIDGETS, resolveWidget } from '../lib/websiteBuilder/elementorWidgets.js';
+import { ELEMENTOR_WIDGETS, resolveWidget, shadowedLegacyKinds } from '../lib/websiteBuilder/elementorWidgets.js';
 
 /* ONE copy of the machine truth. It lives in the Portal because that is where
    the catalogue was turned into a fixture; a second copy here is a second
@@ -465,4 +465,13 @@ test('the DEPRECATED widgets are gone from the catalogue for good', () => {
     assert.equal(typeof ELEMENTOR_WIDGETS[kind].settings, 'undefined',
       `${kind} still has a flat settings() - the deprecated row came back`);
   }
+  /* AND THE ROW IS REALLY GONE FROM THE FILE, not merely out-ranked.
+     `mergeEmitters` makes the family win, so the two assertions above stay
+     green even with the old row back in elementorWidgets.js - measured, on
+     2026-09-19, by putting it back and watching this test pass. A row left
+     behind is a second answer waiting for the next merge to reorder, and
+     `shadowedLegacyKinds()` is the lander's own delete list, so asking it is
+     the guard that actually guards. */
+  assert.deepEqual(shadowedLegacyKinds().filter((k) => k === 'tabs' || k === 'accordion'), [],
+    'the deprecated row is still in elementorWidgets.js - delete it, do not let the merge hide it');
 });
