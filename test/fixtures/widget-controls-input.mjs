@@ -53,6 +53,29 @@ export const MAXIMAL_WIDGET_PROPS = {
   button_text: 'Get in touch',
   fields: [{ id: 'f1', label: 'Your name', type: 'text', required: true }],
   emailTo: 'hello@example.test', purpose: 'contact',
+  /* B-168 F8 — Form, Login and WordPress Menu moved into
+     `families/f8-contact-furniture` and took their whole panel with them. Every
+     control those three now offer is set here, because a row that reads a prop
+     nobody set emits its default instead and the pin never sees the key.
+     Elementor's own key names, so nothing else in this object is disturbed:
+     the three that ARE shared with older rows (`button_text`, `menu`,
+     `heading`) were already above. */
+  form_fields: [{ custom_id: 'name', field_type: 'text', field_label: 'Name', placeholder: 'Name', width: '100' }],
+  form_name: 'Contact', input_size: 'lg', show_labels: 'yes', mark_required: 'yes',
+  button_size: 'md', button_width: '50', column_gap: 12, row_gap: 14,
+  label_color: '#5A7A8A', field_text_color: '#0B1C24', field_background_color: '#ffffff',
+  field_border_color: '#CBD5E1', button_background_color: '#1D7A8C',
+  button_text_color: '#ffffff', button_border_color: '#1D7A8C', links_color: '#1D7A8C',
+  show_lost_password: 'yes', show_remember_me: 'yes', show_logged_in_message: 'yes',
+  redirect_after_login: 'yes', redirect_url: 'https://example.test/account',
+  redirect_after_logout: 'yes', redirect_logout_url: 'https://example.test/',
+  menu_name: 'Primary', align_items: 'center', pointer: 'framed',
+  dropdown: 'mobile', full_width: 'yes', text_align: 'center', toggle: 'burger',
+  toggle_align: 'right', color_menu_item: '#0B1C24', pointer_color_menu_item_hover: '#1D7A8C',
+  menu_space_between: 28, padding_horizontal_menu_item: 14, padding_vertical_menu_item: 10,
+  border_radius_menu_item: 6, color_dropdown_item: '#0B1C24',
+  background_color_dropdown_item: '#F8FAFC', toggle_color: '#0B1C24',
+  toggle_background_color: '#ffffff', toggle_size: 22,
   /* a card, in the paid widget's own spelling */
   heading: 'Essentials', price: '185', currency_symbol: 'dollar', period: 'per push',
   original_price: '220', sale: true,
