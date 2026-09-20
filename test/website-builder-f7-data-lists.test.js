@@ -59,7 +59,16 @@ const SLUG_OF = {
   theme_post_excerpt: 'theme-post-excerpt',
   theme_post_featured_image: 'theme-post-featured-image',
   theme_archive_title: 'theme-archive-title',
+  /* THE FAMILY'S IA TWIN (B-168 wave 2). `ia_posts` is a REGISTERED Elementor
+     widget - the IA plugin's own, 207 controls - so it is in the machine file
+     exactly like the nineteen above and every question below is asked of it in
+     the same way. The row it replaced published two keys and read a prop the
+     Portal never wrote; see the emitter's own header. */
+  ia_posts: 'ia_posts',
 };
+
+/** The one row of this family that is OURS rather than Elementor Pro's. */
+const IA_TWIN = new Set(['ia_posts']);
 
 /**
  * Keys Elementor stores as a slider, per the 2026-09-17 scrape.
@@ -95,7 +104,7 @@ const SWITCHERS = new Set([
 const LINKS = new Set(['link', 'posts_url', 'author_website']);
 const MEDIA = new Set(['image', 'author_avatar']);
 
-test('the family publishes exactly the nineteen kinds it owns', () => {
+test('the family publishes exactly the twenty kinds it owns', () => {
   // PRESENCE first: the failure that matters is a widget quietly not published.
   assert.deepEqual(Object.keys(EMITTERS).sort(), Object.keys(SLUG_OF).sort());
 });
@@ -112,7 +121,13 @@ describe('every key published is a key the widget really has', () => {
     test(`${kind} → ${slug}`, () => {
       const row = EMITTERS[kind];
       assert.equal(row.widgetType, slug);
-      assert.equal(row.tier, 'pro', 'all nineteen are Elementor Pro widgets');
+      if (IA_TWIN.has(kind)) {
+        /* NOT `pro`. It needs the IA PLUGIN, not an Elementor licence, and
+           `reference_nav_visibility_semantics` refuses one word for the two. */
+        assert.equal(row.tier, 'ia:arion', `${kind}: an IA twin needs our plugin, not Elementor Pro`);
+      } else {
+        assert.equal(row.tier, 'pro', 'all nineteen Elementor widgets here are Pro ones');
+      }
       assert.ok(row.label, 'a row needs a label for the message when a plan cannot carry it');
 
       const w = SETTINGS_KEYS.widgets[slug];
@@ -209,3 +224,131 @@ describe('every value published is in the shape the engine reads', () => {
  *   · `breadcrumbs.settings` returned `{ align: 'left' }` → its case went red
  *     saying the catalogue reports no controls. Restored → green.
  */
+
+/* ══════════════════════════════════════════════════════════════════════════
+   IA POSTS — EVERY CONTROL, PUBLISHED (B-168 wave 2)
+   ══════════════════════════════════════════════════════════════════════════
+
+   The keys are checked above. This asks the other half: does the value the
+   author chose really come out the other side? The row this one replaces is
+   the reason the question is worth asking — it published
+   `posts_per_page: Number(p.count) || 3` when the Portal's panel had never
+   written `count` in its life, so the emitter looked correct, the fixture
+   agreed, and the number on the page was always three. */
+describe('IA Posts: what the author chose is what is published', () => {
+  const row = EMITTERS.ia_posts;
+
+  /** One moved value per control on the Portal's panel, and what must come out. */
+  const MOVED = [
+    ['post_skin', 'magazine', 'magazine'],
+    ['image_mode', 'none', 'none'],
+    ['post_theme', 'dark', 'dark'],
+    ['post_preset', 'bold', 'bold'],
+    ['columns', '2', '2'],
+    ['posts_per_page', 4, 4],
+    ['post_type', 'portfolio', 'portfolio'],
+    ['orderby', 'title', 'title'],
+    ['order', 'ASC', 'ASC'],
+    ['show_category', '', ''],
+    ['show_title', '', ''],
+    ['title_tag', 'h2', 'h2'],
+    ['show_excerpt', '', ''],
+    ['excerpt_length', 45, 45],
+    ['show_author', '', ''],
+    ['show_date', '', ''],
+    ['show_read_time', '', ''],
+    ['show_tags', '', ''],
+    ['show_read_more', '', ''],
+    ['read_more_text', 'Read the whole thing', 'Read the whole thing'],
+    ['image_position', 'top left', 'top left'],
+    ['pagination_type', 'load_more', 'load_more'],
+    ['archive_label', 'Everything we have written', 'Everything we have written'],
+    ['title_typography_font_weight', '300', '300'],
+  ];
+
+  for (const [key, given, expected] of MOVED) {
+    test(`ia_posts.${key}`, () => {
+      const out = row.settings({ [key]: given }, {});
+      assert.deepEqual(out[key], expected,
+        `the author set ${key} and the page engine is handed something else`);
+    });
+  }
+
+  for (const key of ['card_gap', 'card_border_radius', 'card_padding',
+    'title_typography_font_size', 'excerpt_typography_font_size', 'meta_typography_font_size']) {
+    test(`ia_posts.${key} is a slider, in the shape the engine reads`, () => {
+      const out = row.settings({ [key]: 37 }, {});
+      assert.deepEqual(out[key], { unit: 'px', size: 37, sizes: [] },
+        'a bare number where a slider belongs is a gap the page never gets');
+    });
+
+    test(`ia_posts.${key} carries its tablet and mobile twins`, () => {
+      const out = row.settings({ [key + '_tablet']: 11, [key + '_mobile']: 5 }, {});
+      assert.deepEqual(out[key + '_tablet'], { unit: 'px', size: 11, sizes: [] });
+      assert.deepEqual(out[key + '_mobile'], { unit: 'px', size: 5, sizes: [] });
+    });
+
+    test(`ia_posts.${key} leaves the twins OFF when nobody set one`, () => {
+      // An absent responsive key is how Elementor says "inherit the desktop
+      // value". Publishing one anyway pins a phone to a number the author
+      // never chose, and they would have to find the device switcher to undo it.
+      const out = row.settings({}, {});
+      assert.equal(key + '_tablet' in out, false);
+      assert.equal(key + '_mobile' in out, false);
+    });
+  }
+
+  test('a switcher the author has not touched keeps the PLUGIN default, not "off"', () => {
+    // The `yn(v, dflt)` rule, at the boundary that matters. Reading an absent
+    // switcher as off turned every title, excerpt and Read More off on publish.
+    const out = row.settings({}, {});
+    for (const k of ['show_category', 'show_title', 'show_excerpt', 'show_author',
+      'show_date', 'show_read_time', 'show_tags', 'show_read_more']) {
+      assert.equal(out[k], 'yes', `${k} was quietly switched off on publish`);
+    }
+  });
+
+  test('…and one the author really switched off stays off', () => {
+    const out = row.settings({ show_excerpt: '', show_tags: '' }, {});
+    assert.equal(out.show_excerpt, '');
+    assert.equal(out.show_tags, '');
+  });
+
+  test('a page published before B-168 keeps the number it was given', () => {
+    // `count` is arion's own legacy prop for this widget. Nothing upgrades the
+    // stored pages, so the emitter reads it — and the new key wins when both
+    // are there, because that is the one the panel writes today.
+    assert.equal(row.settings({ count: 5 }, {}).posts_per_page, 5);
+    assert.equal(row.settings({ count: 5, posts_per_page: 2 }, {}).posts_per_page, 2);
+  });
+
+  test('a value the plugin does not offer is refused, never passed through', () => {
+    const out = row.settings({
+      post_skin: 'whatever', columns: '9', post_type: 'invoice',
+      title_tag: 'marquee', pagination_type: 'infinite', image_position: 'nowhere',
+    }, {});
+    assert.equal(out.post_skin, 'signal');
+    assert.equal(out.columns, '3');
+    assert.equal(out.post_type, 'any');
+    assert.equal(out.title_tag, 'h3');
+    assert.equal(out.pagination_type, 'numbers');
+    assert.equal(out.image_position, 'center center');
+  });
+
+  test('the archive link is published as a plain address, however the panel stored it', () => {
+    // The Portal's `link` control writes `{ url, is_external, nofollow }`; the
+    // plugin's `archive_link` is a TEXT control and reads a string. Both spellings.
+    assert.equal(row.settings({ archive_link: 'https://example.test/news' }, {}).archive_link,
+      'https://example.test/news');
+    assert.equal(row.settings({ archive_link: { url: 'https://example.test/news' } }, {}).archive_link,
+      'https://example.test/news');
+  });
+
+  test('the row the family replaced is GONE from the catalogue', () => {
+    // Replace means delete. `mergeEmitters` would have made the family win
+    // anyway, but a dead row of the same name is the next agent's confusion.
+    assert.equal(ELEMENTOR_WIDGETS.ia_posts, EMITTERS.ia_posts);
+    assert.ok('post_skin' in ELEMENTOR_WIDGETS.ia_posts.settings({}, {}),
+      'the catalogue is still serving the two-key row');
+  });
+});

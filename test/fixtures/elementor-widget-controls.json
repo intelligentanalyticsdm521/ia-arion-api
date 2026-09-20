@@ -772,39 +772,98 @@
     "ia_posts": {
       "title": "IA Posts",
       "controls": {
-        "posts_per_page": {
-          "type": "number"
+        "post_skin": {
+          "type": "select"
+        },
+        "image_mode": {
+          "type": "select"
+        },
+        "post_theme": {
+          "type": "select"
+        },
+        "post_preset": {
+          "type": "select"
         },
         "columns": {
           "type": "select"
-        }
-      }
-    },
-    "ia_oliver_invoice": {
-      "title": "IA OLIVER Invoice",
-      "controls": {
-        "business_name": {
-          "type": "text"
         },
-        "show_book_again_cta": {
-          "type": "switcher"
+        "posts_per_page": {
+          "type": "number"
         },
-        "book_again_url": {
-          "type": "url"
-        }
-      }
-    },
-    "ia_social_links": {
-      "title": "IA Social Links",
-      "controls": {
-        "platforms": {
-          "type": "select2"
-        },
-        "shape": {
+        "post_type": {
           "type": "select"
         },
-        "align": {
-          "type": "choose"
+        "orderby": {
+          "type": "select"
+        },
+        "order": {
+          "type": "select"
+        },
+        "show_category": {
+          "type": "switcher"
+        },
+        "show_title": {
+          "type": "switcher"
+        },
+        "title_tag": {
+          "type": "select"
+        },
+        "show_excerpt": {
+          "type": "switcher"
+        },
+        "excerpt_length": {
+          "type": "number"
+        },
+        "show_author": {
+          "type": "switcher"
+        },
+        "show_date": {
+          "type": "switcher"
+        },
+        "show_read_time": {
+          "type": "switcher"
+        },
+        "show_tags": {
+          "type": "switcher"
+        },
+        "show_read_more": {
+          "type": "switcher"
+        },
+        "read_more_text": {
+          "type": "text"
+        },
+        "image_position": {
+          "type": "select"
+        },
+        "pagination_type": {
+          "type": "select"
+        },
+        "archive_link": {
+          "type": "text"
+        },
+        "archive_label": {
+          "type": "text"
+        },
+        "title_typography_font_weight": {
+          "type": "select"
+        },
+        "card_gap": {
+          "type": "slider"
+        },
+        "card_border_radius": {
+          "type": "slider"
+        },
+        "card_padding": {
+          "type": "dimensions"
+        },
+        "title_typography_font_size": {
+          "type": "slider"
+        },
+        "excerpt_typography_font_size": {
+          "type": "slider"
+        },
+        "meta_typography_font_size": {
+          "type": "slider"
         }
       }
     },
