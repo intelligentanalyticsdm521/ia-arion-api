@@ -291,45 +291,6 @@
         }
       }
     },
-    "image": {
-      "title": "Image",
-      "controls": {
-        "image": {
-          "type": "media"
-        },
-        "image_size": {
-          "type": "select"
-        },
-        "align": {
-          "type": "choose"
-        },
-        "caption": {
-          "type": "text"
-        }
-      }
-    },
-    "image-gallery": {
-      "title": "Basic Gallery",
-      "controls": {
-        "wp_gallery": {
-          "type": "gallery"
-        },
-        "gallery_columns": {
-          "type": "select"
-        }
-      }
-    },
-    "video": {
-      "title": "Video",
-      "controls": {
-        "youtube_url": {
-          "type": "text"
-        },
-        "video_type": {
-          "type": "select"
-        }
-      }
-    },
     "button": {
       "title": "Button",
       "controls": {
@@ -371,26 +332,6 @@
         },
         "zoom": {
           "type": "slider"
-        }
-      }
-    },
-    "image-box": {
-      "title": "Image Box",
-      "controls": {
-        "image": {
-          "type": "media"
-        },
-        "title_text": {
-          "type": "text"
-        },
-        "description_text": {
-          "type": "textarea"
-        },
-        "position": {
-          "type": "choose"
-        },
-        "title_size": {
-          "type": "select"
         }
       }
     },
