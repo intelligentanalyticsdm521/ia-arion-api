@@ -102,7 +102,7 @@ import { pluginPost } from '../../lib/pluginClient.js';
 // through the seams that already answer it — the site (`siteCapability`) and
 // `core.tenant_services` (`coreTenants`). No third copy of a tier table.
 import {
-  widgetCatalog, productsNeeded, ownedProductsFrom,
+  widgetCatalog, productsNeeded, ownedProductsFrom, UnsupportedWidgetError,
 } from '../../lib/websiteBuilder/elementorWidgets.js';
 import { tenantServiceOwnership } from '../../lib/coreTenants.js';
 import {
@@ -559,7 +559,32 @@ function publicAdoption(row) {
  * style and setting it picked up since we wrote it survives. A section we did
  * not author is passed straight back, byte for byte (SCOPE §3.3).
  * ======================================================================== */
-function buildNodes(incoming, brand = null) {
+/**
+ * What the WIDGET emitters need to know about this website, gathered once.
+ *
+ * B-168. A free section may now hold any widget the families publish, and some
+ * of those need a plan (`pro`) or one of our products (`ia:<product>`). The
+ * answer to "what does this business HAVE" is the one that already exists —
+ * `siteCapability` asks the site and `allowProFor` falls back to the tier — and
+ * it is handed to `applyFields`, never re-decided inside it.
+ *
+ * `ownedProducts` is deliberately not asked here: `lockSentence` treats null as
+ * "we could not ask", which locks nothing, and refusing a save because an
+ * ownership query was slow is the D-ARION-E defect with a new address. The pane
+ * already gates the ADD with the real ownership, and a widget the site cannot
+ * draw is still refused below, by name.
+ */
+async function widgetContextFor(site, brand = null) {
+  const capability = await getSiteCapability(site);
+  const { allowPro } = allowProFor(site, capability);
+  return {
+    allowPro,
+    iaWidgets: capability.iaWidgets ?? null,
+    emailTo: String(brand?.email || ''),
+  };
+}
+
+function buildNodes(incoming, brand = null, widgetCtx = {}) {
   const errors = [];
   const nodes = [];
 
@@ -598,7 +623,21 @@ function buildNodes(incoming, brand = null) {
       }
       return;
     }
-    nodes.push({ handle: parsed.handle, node: applyFields(node, kind, addressed.fields) });
+    /* A WIDGET THIS SITE CANNOT DRAW IS REFUSED BY NAME, NOT SWALLOWED.
+     * `resolveWidget` throws `UnsupportedWidgetError` with its own plain
+     * sentence — "Available on ARION Standard and above", "we will switch it on
+     * for you" — and that sentence is what the author reads. Anything else is a
+     * real bug and still boils up to the route's 500, because a page that
+     * silently lost a widget is the green-toast-over-a-blank-page failure. */
+    try {
+      nodes.push({ handle: parsed.handle, node: applyFields(node, kind, addressed.fields, widgetCtx) });
+    } catch (err) {
+      if (err instanceof UnsupportedWidgetError || err?.code === 'WIDGET_NOT_ON_PLAN') {
+        errors.push({ field: `sections[${i}]`, message: err.message });
+        return;
+      }
+      throw err;
+    }
   });
 
   return { nodes, errors };
@@ -663,7 +702,7 @@ router.put('/pages/:pageId/sections', async (req, res) => {
     if (await refuseWithoutElementor(res, site)) return undefined;
 
     const brand = await loadBrandContext(pool, { tenantId, siteId });
-    const { nodes, errors } = buildNodes(incoming, brand);
+    const { nodes, errors } = buildNodes(incoming, brand, await widgetContextFor(site, brand));
     if (errors.length > 0) {
       return res.status(422).json({
         error: {
@@ -768,7 +807,7 @@ router.put('/pages/:pageId/draft', async (req, res) => {
     if (!site) return notFound(res, 'That website is not on your account.');
 
     const brand = await loadBrandContext(pool, { tenantId, siteId });
-    const { nodes, errors } = buildNodes(incoming, brand);
+    const { nodes, errors } = buildNodes(incoming, brand, await widgetContextFor(site, brand));
     if (errors.length > 0) {
       return res.status(422).json({
         error: {
@@ -940,7 +979,7 @@ router.post('/pages/:pageId/preview', async (req, res) => {
     // is looking at IS what publishing does. A form with no recipient is
     // refused here too — a preview that shows a form the save would reject
     // would send somebody to Publish for the error.
-    const { nodes, errors } = buildNodes(incoming, brand);
+    const { nodes, errors } = buildNodes(incoming, brand, await widgetContextFor(site, brand));
     if (errors.length > 0) {
       return res.status(422).json({
         error: {
@@ -2611,7 +2650,18 @@ router.post('/sections/swap', async (req, res) => {
       });
     }
 
-    const node = applyFields(built.node, kind, fields);
+    let node;
+    try {
+      node = applyFields(built.node, kind, fields, {
+        allowPro, iaWidgets: capability.iaWidgets ?? null, emailTo: String(brand?.email || ''),
+      });
+    } catch (err) {
+      // A widget this site cannot draw, named. Same rule as `buildNodes`.
+      if (err instanceof UnsupportedWidgetError || err?.code === 'WIDGET_NOT_ON_PLAN') {
+        return bad(res, 'WIDGET_NOT_ON_PLAN', err.message);
+      }
+      throw err;
+    }
     const [entry] = reduceToSectionList([node]);
     if (!entry?.editable) {
       return bad(res, 'SECTION_NOT_EDITABLE',
