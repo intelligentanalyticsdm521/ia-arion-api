@@ -411,26 +411,6 @@
         }
       }
     },
-    "counter": {
-      "title": "Counter",
-      "controls": {
-        "starting_number": {
-          "type": "number"
-        },
-        "ending_number": {
-          "type": "number"
-        },
-        "prefix": {
-          "type": "text"
-        },
-        "suffix": {
-          "type": "text"
-        },
-        "title": {
-          "type": "text"
-        }
-      }
-    },
     "accordion": {
       "title": "Accordion",
       "controls": {
@@ -475,26 +455,6 @@
           "type": "choose"
         },
         "testimonial_alignment": {
-          "type": "choose"
-        }
-      }
-    },
-    "star-rating": {
-      "title": "Star Rating",
-      "controls": {
-        "rating": {
-          "type": "number"
-        },
-        "rating_scale": {
-          "type": "select"
-        },
-        "title": {
-          "type": "text"
-        },
-        "star_style": {
-          "type": "select"
-        },
-        "align": {
           "type": "choose"
         }
       }
@@ -569,23 +529,6 @@
         },
         "infinite": {
           "type": "switcher"
-        }
-      }
-    },
-    "progress": {
-      "title": "Progress Bar",
-      "controls": {
-        "title": {
-          "type": "text"
-        },
-        "percent": {
-          "type": "slider"
-        },
-        "display_percentage": {
-          "type": "switcher"
-        },
-        "inner_text": {
-          "type": "text"
         }
       }
     },
