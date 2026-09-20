@@ -1,5 +1,243 @@
 {
   "widgets": {
+    "gallery": {
+      "title": "Gallery",
+      "controls": {
+        "gallery_type": {
+          "type": "select"
+        },
+        "gallery": {
+          "type": "gallery"
+        },
+        "gallery_layout": {
+          "type": "select"
+        },
+        "columns": {
+          "type": "number"
+        },
+        "gap": {
+          "type": "slider"
+        },
+        "aspect_ratio": {
+          "type": "select"
+        },
+        "open_lightbox": {
+          "type": "select"
+        },
+        "lazyload": {
+          "type": "switcher"
+        },
+        "overlay_background": {
+          "type": "switcher"
+        },
+        "overlay_title": {
+          "type": "select"
+        },
+        "overlay_description": {
+          "type": "select"
+        },
+        "image_border_radius": {
+          "type": "slider"
+        },
+        "image_border_width": {
+          "type": "slider"
+        },
+        "image_border_color": {
+          "type": "color"
+        }
+      }
+    },
+    "video-playlist": {
+      "title": "Video Playlist",
+      "controls": {
+        "playlist_title": {
+          "type": "text"
+        },
+        "playlist_title_tag": {
+          "type": "select"
+        },
+        "tabs": {
+          "type": "repeater"
+        },
+        "show_image_overlay": {
+          "type": "switcher"
+        },
+        "image_overlay": {
+          "type": "media"
+        },
+        "autoplay_on_load": {
+          "type": "switcher"
+        },
+        "autoplay_next": {
+          "type": "switcher"
+        },
+        "show_video_count": {
+          "type": "switcher"
+        },
+        "show_duration": {
+          "type": "switcher"
+        },
+        "show_thumbnail": {
+          "type": "switcher"
+        },
+        "tabs_alignment": {
+          "type": "choose"
+        },
+        "playlist_name_color": {
+          "type": "color"
+        },
+        "playlist_name_background": {
+          "type": "color"
+        },
+        "normal_color": {
+          "type": "color"
+        },
+        "normal_background": {
+          "type": "color"
+        }
+      }
+    },
+    "audio": {
+      "title": "SoundCloud",
+      "controls": {
+        "link": {
+          "type": "url"
+        },
+        "visual": {
+          "type": "select"
+        },
+        "sc_auto_play": {
+          "type": "switcher"
+        },
+        "sc_buying": {
+          "type": "switcher"
+        },
+        "sc_liking": {
+          "type": "switcher"
+        },
+        "sc_download": {
+          "type": "switcher"
+        },
+        "sc_show_artwork": {
+          "type": "switcher"
+        },
+        "sc_sharing": {
+          "type": "switcher"
+        },
+        "sc_show_comments": {
+          "type": "switcher"
+        },
+        "sc_show_playcount": {
+          "type": "switcher"
+        },
+        "sc_show_user": {
+          "type": "switcher"
+        },
+        "sc_color": {
+          "type": "color"
+        }
+      }
+    },
+    "lottie": {
+      "title": "Lottie",
+      "controls": {
+        "source": {
+          "type": "select"
+        },
+        "source_json": {
+          "type": "media"
+        },
+        "source_external_url": {
+          "type": "url"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "caption_source": {
+          "type": "select"
+        },
+        "caption": {
+          "type": "text"
+        },
+        "link_to": {
+          "type": "select"
+        },
+        "custom_link": {
+          "type": "url"
+        },
+        "trigger": {
+          "type": "select"
+        },
+        "loop": {
+          "type": "switcher"
+        },
+        "number_of_times": {
+          "type": "number"
+        },
+        "reverse_animation": {
+          "type": "switcher"
+        },
+        "renderer": {
+          "type": "select"
+        },
+        "lazyload": {
+          "type": "switcher"
+        },
+        "width": {
+          "type": "slider"
+        },
+        "opacity": {
+          "type": "slider"
+        },
+        "caption_align": {
+          "type": "choose"
+        },
+        "text_color": {
+          "type": "color"
+        }
+      }
+    },
+    "hotspot": {
+      "title": "Hotspot",
+      "controls": {
+        "image": {
+          "type": "media"
+        },
+        "image_size": {
+          "type": "select"
+        },
+        "hotspot": {
+          "type": "repeater"
+        },
+        "hotspot_animation": {
+          "type": "select"
+        },
+        "hotspot_sequenced_animation": {
+          "type": "switcher"
+        },
+        "tooltip_position": {
+          "type": "choose"
+        },
+        "tooltip_trigger": {
+          "type": "select"
+        },
+        "width": {
+          "type": "slider"
+        },
+        "style_hotspot_color": {
+          "type": "color"
+        },
+        "style_hotspot_size": {
+          "type": "slider"
+        },
+        "style_tooltip_text_color": {
+          "type": "color"
+        },
+        "style_tooltip_color": {
+          "type": "color"
+        }
+      }
+    },
     "heading": {
       "title": "Heading",
       "controls": {
@@ -426,20 +664,6 @@
           "type": "select"
         },
         "classic_posts_per_page": {
-          "type": "number"
-        }
-      }
-    },
-    "gallery": {
-      "title": "Gallery",
-      "controls": {
-        "gallery_type": {
-          "type": "select"
-        },
-        "gallery_layout": {
-          "type": "select"
-        },
-        "columns": {
           "type": "number"
         }
       }
