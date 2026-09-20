@@ -192,3 +192,123 @@ describe('a plan with no Pro widgets still gets something a visitor can read', (
     assert.equal(a, b);
   });
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+   THE DEEP PANEL — 2026-09-19, wave 2
+   ══════════════════════════════════════════════════════════════════════════
+
+   Testimonial's panel went from eleven controls to thirty-nine, and this row
+   from seven settings to seventy-four. The Portal's test asserts each key is
+   one Elementor has; `website-widget-map` asserts it against the machine-cut
+   fixture; these assert the two things neither of those can:
+
+     · a SELECT publishes a word the control offers, or nothing — never the
+       word that was stored, because the page engine drops it and the author
+       watched us accept a setting the site never got;
+     · the typography POPOVER is switched on only when the author touched that
+       part. Elementor ignores every size and weight under a popover it has
+       switched off, so forgetting this publishes a panel that looks edited and
+       is not; switching it on for an untouched part is the opposite mistake and
+       is just as silent.
+
+   FOUND BY A MUTATION THAT DID NOT GO RED. Breaking the popover rule on
+   2026-09-19 left every suite green, which is a guard that was not there. This
+   is it.
+*/
+describe('Testimonial publishes the deep panel, under Elementor own keys', () => {
+  const settings = (props) => EMITTERS.testimonial.settings(
+    { quote: 'Out before we opened.', attribution: 'A property manager', ...props }, CTX);
+
+  test('a part nobody touched has its typography popover OFF', () => {
+    // MUTATION: publish 'custom' always → red here.
+    const s = settings({});
+    for (const part of ['content', 'name', 'job']) {
+      assert.equal(s[`${part}_typography_typography`], '',
+        `${part}: a popover switched on with nothing in it is a panel that looks edited`);
+    }
+  });
+
+  test('a part the author touched has it ON, and only that part', () => {
+    // MUTATION: publish '' always → red here, and every size under it would be
+    // ignored by the page engine with no message anywhere.
+    const s = settings({ name_typography_font_size: 18 });
+    assert.equal(s.name_typography_typography, 'custom');
+    assert.equal(s.content_typography_typography, '');
+    assert.equal(s.job_typography_typography, '');
+  });
+
+  test('a DEVICE value alone is enough to switch the popover on', () => {
+    /* An author who only set a phone size would otherwise publish a phone size
+       under a popover Elementor has switched off — the setting is in the
+       document, on the site, and does nothing. */
+    assert.equal(settings({ content_typography_font_size_mobile: 15 }).content_typography_typography, 'custom');
+  });
+
+  test('a select publishes a word the control offers, or nothing at all', () => {
+    const s = settings({
+      content_typography_font_weight: 'heavy',
+      name_typography_text_transform: 'SHOUTY',
+      job_typography_font_style: 'slanty',
+      image_border_border: 'sparkly',
+    });
+    assert.equal(s.content_typography_font_weight, '');
+    assert.equal(s.name_typography_text_transform, '');
+    assert.equal(s.job_typography_font_style, '');
+    assert.equal(s.image_border_border, '');
+    const good = settings({
+      content_typography_font_weight: '700',
+      name_typography_text_transform: 'uppercase',
+      job_typography_font_style: 'italic',
+      image_border_border: 'solid',
+    });
+    assert.equal(good.content_typography_font_weight, '700');
+    assert.equal(good.name_typography_text_transform, 'uppercase');
+    assert.equal(good.job_typography_font_style, 'italic');
+    assert.equal(good.image_border_border, 'solid');
+  });
+
+  test('a slider is Elementor own {unit,size,sizes}, and an untouched one is EMPTY', () => {
+    /* `{size: 0}` is not the same as `{size: ""}`: zero is a real answer an
+       author can give, and the engine reads it as zero. An untouched control
+       has to publish the empty string or every page gets a 0px font. */
+    const s = settings({ content_typography_font_size: 22 });
+    assert.deepEqual(s.content_typography_font_size, { unit: 'px', size: 22, sizes: [] });
+    assert.deepEqual(s.name_typography_font_size, { unit: 'px', size: '', sizes: [] });
+    assert.deepEqual(settings({ image_size: 0 }).image_size, { unit: 'px', size: 0, sizes: [] });
+  });
+
+  test('line height publishes in em, because the panel stores a ratio', () => {
+    /* Elementor own desktop default unit for this control is px. 1.6px is a
+       line height of under two pixels on a live page; its tablet and mobile
+       defaults are em, which is the same reading as ours. */
+    assert.deepEqual(settings({ content_typography_line_height: 1.6 }).content_typography_line_height,
+      { unit: 'em', size: 1.6, sizes: [] });
+  });
+
+  test('a border is Elementor four-sided box, all four the same', () => {
+    assert.deepEqual(settings({ image_border_width: 3 }).image_border_width,
+      { unit: 'px', top: '3', right: '3', bottom: '3', left: '3', isLinked: true });
+    assert.deepEqual(settings({}).image_border_radius,
+      { unit: 'px', top: '', right: '', bottom: '', left: '', isLinked: true });
+  });
+
+  test('Alignment publishes all three devices, and reads the old spelling', () => {
+    const s = settings({ align: 'left', align_tablet: 'center', align_mobile: 'right' });
+    assert.equal(s.testimonial_alignment, 'start');
+    assert.equal(s.testimonial_alignment_tablet, 'center');
+    assert.equal(s.testimonial_alignment_mobile, 'end');
+    // A device nobody set is EMPTY — Elementor own "inherit the one above".
+    assert.equal(settings({}).testimonial_alignment_tablet, '');
+  });
+
+  test('every key it publishes is spelled the way the page engine spells it', () => {
+    /* The three the pattern would have got wrong, named out loud: the Content
+       part colour is `content_content_color`, not `content_text_color`. */
+    const s = settings({});
+    assert.ok('content_content_color' in s);
+    assert.equal('content_text_color' in s, false);
+    assert.ok('name_text_color' in s);
+    assert.ok('job_text_color' in s);
+  });
+});
+
