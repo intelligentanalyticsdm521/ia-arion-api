@@ -489,7 +489,12 @@
                   "header_size": "h2",
                   "align": "left",
                   "_ia_field": "content.blocks",
-                  "_ia_w": "heading"
+                  "_ia_w": "heading",
+                  "_ia_props": {
+                    "text": "How a storm runs",
+                    "level": "h2",
+                    "align": "left"
+                  }
                 }
               },
               {
@@ -500,7 +505,13 @@
                   "editor": "<p>We watch the forecast from Thursday.</p>\n<p>Crews roll at the trigger depth.</p>",
                   "align": "left",
                   "_ia_field": "content.blocks",
-                  "_ia_w": "paragraph"
+                  "_ia_w": "paragraph",
+                  "_ia_props": {
+                    "text": [
+                      "We watch the forecast from Thursday.",
+                      "Crews roll at the trigger depth."
+                    ]
+                  }
                 }
               },
               {
@@ -511,7 +522,14 @@
                   "editor": "<ul><li>Two-inch trigger</li><li>Salt on every visit</li><li>Photos on completion</li></ul>",
                   "align": "left",
                   "_ia_field": "content.blocks",
-                  "_ia_w": "list"
+                  "_ia_w": "list",
+                  "_ia_props": {
+                    "items": [
+                      "Two-inch trigger",
+                      "Salt on every visit",
+                      "Photos on completion"
+                    ]
+                  }
                 }
               }
             ],
@@ -550,7 +568,13 @@
                   "image_size": "large",
                   "caption": "Brookline Dental, 5am",
                   "_ia_field": "content.blocks",
-                  "_ia_w": "image"
+                  "_ia_w": "image",
+                  "_ia_props": {
+                    "url": "https://example.invalid/wp-content/uploads/storm.jpg",
+                    "alt": "A plow at dawn",
+                    "id": 301,
+                    "caption": "Brookline Dental, 5am"
+                  }
                 }
               },
               {
@@ -567,7 +591,12 @@
                   "align": "left",
                   "size": "md",
                   "_ia_field": "content.blocks",
-                  "_ia_w": "button"
+                  "_ia_w": "button",
+                  "_ia_props": {
+                    "label": "See our rates",
+                    "href": "#pricing",
+                    "align": "left"
+                  }
                 }
               },
               {
@@ -582,7 +611,8 @@
                     "sizes": []
                   },
                   "_ia_field": "content.blocks",
-                  "_ia_w": "divider"
+                  "_ia_w": "divider",
+                  "_ia_props": {}
                 }
               },
               {
@@ -596,7 +626,10 @@
                     "sizes": []
                   },
                   "_ia_field": "content.blocks",
-                  "_ia_w": "spacer"
+                  "_ia_w": "spacer",
+                  "_ia_props": {
+                    "height": 24
+                  }
                 }
               },
               {
@@ -607,7 +640,10 @@
                   "youtube_url": "https://www.youtube.com/watch?v=ia-fixture",
                   "video_type": "youtube",
                   "_ia_field": "content.blocks",
-                  "_ia_w": "video"
+                  "_ia_w": "video",
+                  "_ia_props": {
+                    "url": "https://www.youtube.com/watch?v=ia-fixture"
+                  }
                 }
               },
               {
@@ -622,7 +658,10 @@
                     "sizes": []
                   },
                   "_ia_field": "content.blocks",
-                  "_ia_w": "map"
+                  "_ia_w": "map",
+                  "_ia_props": {
+                    "address": "400 Locust St, Des Moines, IA"
+                  }
                 }
               }
             ],

@@ -35,8 +35,12 @@
  *     children come back INSIDE it" red
  *   · make `buildEmittedWidget` publish `spec.widget`        → "the real widget
  *     arrives" red
- *   · swallow `UnsupportedWidgetError` in `buildContentWidget` → "refused by
+ *   · swallow `UnsupportedWidgetError` in `buildEmittedWidget`  → "refused by
  *     name" red
+ *   · make the nine read only their own field names           → "a <kind> the
+ *     PANEL wrote reaches the website" red, six of them
+ *   · drop `_ia_props` from the nine                          → "the panel gets
+ *     its OWN keys back" red
  */
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -339,6 +343,9 @@ describe('4. a widget this site cannot draw is refused BY NAME', () => {
       (err) => {
         assert.equal(err.code, 'WIDGET_NOT_ON_PLAN');
         assert.match(err.message, /ARION Standard and above/);
+        // And it says WHICH widget, because a page with eleven things on it
+        // needs more than 'something here is not on your plan'.
+        assert.ok(err.message.startsWith(`${ELEMENTOR_WIDGETS[noFallback].label}: `), err.message);
         assert.doesNotMatch(err.message, /Elementor/i);
         return true;
       },
@@ -385,6 +392,63 @@ describe('5. the legacy nine are untouched', () => {
     const node = stampedTop(after)[0];
     assert.equal(node.id, id);
     assert.equal(node.settings[BLOCK_MARKER], 'heading');
+  });
+
+  /* ── THE PANEL'S SPELLING, on the nine ────────────────────────────────
+   * Found by DRIVING it against the dev website, 2026-09-19: a Button dropped
+   * from the widget panel published with no words on it. The panel's controls
+   * are the page engine's names (`text`, `link`, `image`, `space`,
+   * `header_size`, `icon_list`); these nine were written before the panel and
+   * their fields are ours (`label`, `href`, `url`, `height`, `level`, `items`).
+   * Same defect as the gate, one layer down. */
+  const PANEL_SPELLING = [
+    ['button', { text: 'Get a quote', link: '/quote' }, (s) => {
+      assert.equal(s.text, 'Get a quote');
+      assert.equal(s.link.url, '/quote');
+    }],
+    ['image', { image: { url: 'https://x.invalid/a.jpg', id: 44 }, alt: 'A lawn' }, (s) => {
+      assert.equal(s.image.url, 'https://x.invalid/a.jpg');
+      assert.equal(s.image.id, 44);
+    }],
+    ['video', { youtube_url: 'https://youtu.be/abc' }, (s) => assert.equal(s.youtube_url, 'https://youtu.be/abc')],
+    ['spacer', { space: 96 }, (s) => assert.equal(Number(s.space.size), 96)],
+    ['heading', { text: 'Hi', header_size: 'h3' }, (s) => {
+      assert.equal(s.title, 'Hi');
+      assert.equal(s.header_size, 'h3');
+    }],
+    ['list', { icon_list: [{ text: 'One' }, { text: 'Two' }] }, (s) => {
+      assert.equal(s.editor, '<ul><li>One</li><li>Two</li></ul>');
+    }],
+  ];
+
+  for (const [kind, props, check] of PANEL_SPELLING) {
+    test(`a ${kind} the PANEL wrote reaches the website with its values`, () => {
+      const node = stampedTop(applyFields(emptySection(), 'content',
+        { layout: 1, blocks: [{ kind, col: 0, ...props }] }, CTX))[0];
+      check(node.settings);
+    });
+  }
+
+  test('and the panel gets its OWN keys back, not ours — one answer, never two', () => {
+    const blocks = [
+      { kind: 'button', col: 0, text: 'Get a quote', link: '/quote' },
+      { kind: 'spacer', col: 0, space: 96 },
+    ];
+    const back = extractFields(applyFields(emptySection(), 'content', { layout: 1, blocks }, CTX), 'content');
+    assert.deepEqual(back.blocks, blocks);
+    // Not both spellings: a stale `label` beside a fresh `text` is an edit the
+    // next save would quietly throw away.
+    assert.equal('label' in back.blocks[0], false);
+    assert.equal('height' in back.blocks[1], false);
+  });
+
+  test('a page published BEFORE this change still reads, through the codec', () => {
+    const built = applyFields(emptySection(), 'content',
+      { layout: 1, blocks: [{ kind: 'button', col: 0, label: 'Old', href: '/old', align: 'left' }] }, CTX);
+    // Strip the props stamp — which is exactly what an older page has.
+    walk(built, (n) => { if (n.settings?.[PROPS_MARKER]) delete n.settings[PROPS_MARKER]; });
+    const back = extractFields(built, 'content');
+    assert.deepEqual(back.blocks, [{ kind: 'button', label: 'Old', href: '/old', align: 'left', col: 0 }]);
   });
 
   test('a divider keeps its own `style` prop — the reserved keys cannot collide', () => {
