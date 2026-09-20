@@ -248,6 +248,9 @@
         "header_size": {
           "type": "select"
         },
+        "link": {
+          "type": "url"
+        },
         "align": {
           "type": "choose"
         }
@@ -691,6 +694,215 @@
         },
         "align": {
           "type": "choose"
+        }
+      }
+    },
+    "blockquote": {
+      "title": "Blockquote",
+      "controls": {
+        "blockquote_skin": {
+          "type": "select"
+        },
+        "blockquote_content": {
+          "type": "textarea"
+        },
+        "author_name": {
+          "type": "text"
+        },
+        "alignment": {
+          "type": "choose"
+        },
+        "content_text_color": {
+          "type": "color"
+        },
+        "author_text_color": {
+          "type": "color"
+        },
+        "border_color": {
+          "type": "color"
+        },
+        "border_width": {
+          "type": "slider"
+        },
+        "box_background_color": {
+          "type": "color"
+        },
+        "box_padding": {
+          "type": "slider"
+        },
+        "quote_text_color": {
+          "type": "color"
+        },
+        "quote_size": {
+          "type": "slider"
+        }
+      }
+    },
+    "animated-headline": {
+      "title": "Animated Headline",
+      "controls": {
+        "headline_style": {
+          "type": "select"
+        },
+        "animation_type": {
+          "type": "select"
+        },
+        "marker": {
+          "type": "select"
+        },
+        "before_text": {
+          "type": "text"
+        },
+        "highlighted_text": {
+          "type": "text"
+        },
+        "rotating_text": {
+          "type": "textarea"
+        },
+        "after_text": {
+          "type": "text"
+        },
+        "loop": {
+          "type": "switcher"
+        },
+        "link": {
+          "type": "url"
+        },
+        "tag": {
+          "type": "select"
+        }
+      }
+    },
+    "text-path": {
+      "title": "Text Path",
+      "controls": {
+        "text": {
+          "type": "text"
+        },
+        "path": {
+          "type": "select"
+        },
+        "custom_path": {
+          "type": "media"
+        },
+        "link": {
+          "type": "url"
+        },
+        "align": {
+          "type": "choose"
+        },
+        "text_path_direction": {
+          "type": "select"
+        },
+        "show_path": {
+          "type": "switcher"
+        },
+        "size": {
+          "type": "slider"
+        },
+        "start_point": {
+          "type": "slider"
+        },
+        "text_color_normal": {
+          "type": "color"
+        },
+        "path_fill_normal": {
+          "type": "color"
+        },
+        "stroke_color_normal": {
+          "type": "color"
+        },
+        "stroke_width_normal": {
+          "type": "slider"
+        }
+      }
+    },
+    "table-of-contents": {
+      "title": "Table of Contents",
+      "controls": {
+        "title": {
+          "type": "text"
+        },
+        "html_tag": {
+          "type": "select"
+        },
+        "headings_by_tags": {
+          "type": "select2"
+        },
+        "marker_view": {
+          "type": "select"
+        },
+        "no_headings_message": {
+          "type": "text"
+        },
+        "word_wrap": {
+          "type": "switcher"
+        },
+        "minimize_box": {
+          "type": "switcher"
+        },
+        "minimized_on": {
+          "type": "select"
+        },
+        "hierarchical_view": {
+          "type": "switcher"
+        },
+        "collapse_subitems": {
+          "type": "switcher"
+        },
+        "background_color": {
+          "type": "color"
+        },
+        "border_color": {
+          "type": "color"
+        },
+        "border_width": {
+          "type": "slider"
+        }
+      }
+    },
+    "code-highlight": {
+      "title": "Code Highlight",
+      "controls": {
+        "language": {
+          "type": "select2"
+        },
+        "code": {
+          "type": "code"
+        },
+        "line_numbers": {
+          "type": "switcher"
+        },
+        "copy_to_clipboard": {
+          "type": "switcher"
+        },
+        "highlight_lines": {
+          "type": "text"
+        },
+        "word_wrap": {
+          "type": "switcher"
+        },
+        "theme": {
+          "type": "select"
+        },
+        "font_size": {
+          "type": "slider"
+        }
+      }
+    },
+    "read-more": {
+      "title": "Read More",
+      "controls": {
+        "link_text": {
+          "type": "text"
+        }
+      }
+    },
+    "sidebar": {
+      "title": "Sidebar",
+      "controls": {
+        "sidebar": {
+          "type": "select"
         }
       }
     }
