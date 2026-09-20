@@ -627,20 +627,6 @@
         }
       }
     },
-    "loop-grid": {
-      "title": "Loop Grid",
-      "controls": {
-        "_skin": {
-          "type": "select"
-        },
-        "columns": {
-          "type": "number"
-        },
-        "posts_per_page": {
-          "type": "number"
-        }
-      }
-    },
     "ia_mega_menu": {
       "title": "IA Mega Menu",
       "controls": {
