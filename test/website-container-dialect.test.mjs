@@ -249,7 +249,11 @@ describe('model → Elementor → model', () => {
     }
   });
 
-  test('an unstamped section is carried back byte for byte and never claims a kind', () => {
+  test('an unstamped section is carried back byte for byte, AND it opens', () => {
+    // B-168, 2026-09-22. The byte-for-byte half is unchanged and still the
+    // rule that matters. What changed is the other half: it used to come back
+    // `editable: false` with "Custom section — built on the site" over it, and
+    // it now comes back holding the author's own heading.
     const handBuilt = {
       id: 'hand01', elType: 'container',
       settings: { _title: 'Awards strip (built on the site)', container_type: 'flex' },
@@ -257,10 +261,11 @@ describe('model → Elementor → model', () => {
       isInner: false,
     };
     const [row] = reduceToSectionList([handBuilt]);
-    assert.equal(row.kind, null);
-    assert.equal(row.editable, false);
-    assert.equal(row.reason, 'custom');
-    assert.equal(row.label, 'Custom section — built on the site');
+    assert.equal(row.kind, 'content');
+    assert.equal(row.editable, true);
+    assert.equal(row.foreign, true);
+    assert.equal(row.label, 'Awards strip (built on the site)', 'their own name for it');
+    assert.equal(row.fields.blocks[0].title, 'County Build Awards 2025');
     assert.equal(JSON.stringify(row.node), JSON.stringify(handBuilt));
   });
 });
