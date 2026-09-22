@@ -20,6 +20,20 @@ export const SETTINGS_NOT_CONTROLS = [
      deliberately still written (`formPurpose.js` says why): the routing in
      `intelligent-analytics.php` reads it today. */
   'form_css_class',
+  /* THE POPOVER TOGGLES (B-168, 2026-09-22).
+     Elementor's group controls have a switch that says "this group is set" -
+     `typography_typography`, `text_shadow_text_shadow_type`,
+     `text_stroke_text_stroke_type`, `box_shadow_box_shadow_type`. The group's
+     CSS is only written behind `{{WRAPPER}}` when it is on, so it HAS to be
+     published; it is simply not in `elementor-widget-controls.json`, which was
+     scraped from the editor's panel where a popover toggle is chrome rather
+     than a control. `WIDGET_SETTINGS_KEYS.json`, which comes from
+     `get_stack()` including `style_controls`, DOES list them - and the check
+     that reads that file still holds every one of these to it. */
+  'typography_typography',
+  'text_shadow_text_shadow_type',
+  'text_stroke_text_stroke_type',
+  'box_shadow_box_shadow_type',
 ];
 
 export const WIDGET_CTX = {

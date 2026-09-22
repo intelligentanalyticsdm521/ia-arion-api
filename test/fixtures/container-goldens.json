@@ -485,9 +485,10 @@
                 "elType": "widget",
                 "widgetType": "heading",
                 "settings": {
+                  "_ia_widget": "heading",
                   "title": "How a storm runs",
                   "header_size": "h2",
-                  "align": "left",
+                  "align": "start",
                   "_ia_field": "content.blocks",
                   "_ia_w": "heading",
                   "_ia_props": {
@@ -502,8 +503,8 @@
                 "elType": "widget",
                 "widgetType": "text-editor",
                 "settings": {
-                  "editor": "<p>We watch the forecast from Thursday.</p>\n<p>Crews roll at the trigger depth.</p>",
-                  "align": "left",
+                  "_ia_widget": "paragraph",
+                  "editor": "<p>We watch the forecast from Thursday.</p><p>Crews roll at the trigger depth.</p>",
                   "_ia_field": "content.blocks",
                   "_ia_w": "paragraph",
                   "_ia_props": {
@@ -517,10 +518,67 @@
               {
                 "id": "64856e1-w-0-2",
                 "elType": "widget",
-                "widgetType": "text-editor",
+                "widgetType": "icon-list",
                 "settings": {
-                  "editor": "<ul><li>Two-inch trigger</li><li>Salt on every visit</li><li>Photos on completion</li></ul>",
-                  "align": "left",
+                  "_ia_widget": "list",
+                  "view": "traditional",
+                  "icon_list": [
+                    {
+                      "_id": "li0",
+                      "text": "Two-inch trigger",
+                      "selected_icon": {
+                        "value": "fas fa-check",
+                        "library": "fa-solid"
+                      },
+                      "link": {
+                        "url": "",
+                        "is_external": "",
+                        "nofollow": ""
+                      }
+                    },
+                    {
+                      "_id": "li1",
+                      "text": "Salt on every visit",
+                      "selected_icon": {
+                        "value": "fas fa-check",
+                        "library": "fa-solid"
+                      },
+                      "link": {
+                        "url": "",
+                        "is_external": "",
+                        "nofollow": ""
+                      }
+                    },
+                    {
+                      "_id": "li2",
+                      "text": "Photos on completion",
+                      "selected_icon": {
+                        "value": "fas fa-check",
+                        "library": "fa-solid"
+                      },
+                      "link": {
+                        "url": "",
+                        "is_external": "",
+                        "nofollow": ""
+                      }
+                    }
+                  ],
+                  "link_click": "full_width",
+                  "divider": "",
+                  "divider_style": "solid",
+                  "divider_weight": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "divider_color": "",
+                  "icon_color": "",
+                  "text_indent": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "text_color": "",
                   "_ia_field": "content.blocks",
                   "_ia_w": "list",
                   "_ia_props": {
@@ -560,13 +618,148 @@
                 "elType": "widget",
                 "widgetType": "image",
                 "settings": {
+                  "_ia_widget": "image",
                   "image": {
                     "url": "https://example.invalid/wp-content/uploads/storm.jpg",
-                    "id": 301,
-                    "alt": "A plow at dawn"
+                    "id": 301
                   },
                   "image_size": "large",
+                  "caption_source": "custom",
                   "caption": "Brookline Dental, 5am",
+                  "link_to": "none",
+                  "link": {
+                    "url": "",
+                    "is_external": "",
+                    "nofollow": ""
+                  },
+                  "open_lightbox": "default",
+                  "opacity": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "image_border_border": "",
+                  "image_border_color": "",
+                  "text_color": "",
+                  "caption_background_color": "",
+                  "caption_typography_font_weight": "",
+                  "align": "",
+                  "align_tablet": "",
+                  "align_mobile": "",
+                  "width": {
+                    "unit": "%",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "width_tablet": {
+                    "unit": "%",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "width_mobile": {
+                    "unit": "%",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "height": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "height_tablet": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "height_mobile": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "object-fit": "",
+                  "object-fit_tablet": "",
+                  "object-fit_mobile": "",
+                  "image_border_width": {
+                    "unit": "px",
+                    "top": "",
+                    "right": "",
+                    "bottom": "",
+                    "left": "",
+                    "isLinked": true
+                  },
+                  "image_border_width_tablet": {
+                    "unit": "px",
+                    "top": "",
+                    "right": "",
+                    "bottom": "",
+                    "left": "",
+                    "isLinked": true
+                  },
+                  "image_border_width_mobile": {
+                    "unit": "px",
+                    "top": "",
+                    "right": "",
+                    "bottom": "",
+                    "left": "",
+                    "isLinked": true
+                  },
+                  "image_border_radius": {
+                    "unit": "px",
+                    "top": "",
+                    "right": "",
+                    "bottom": "",
+                    "left": "",
+                    "isLinked": true
+                  },
+                  "image_border_radius_tablet": {
+                    "unit": "px",
+                    "top": "",
+                    "right": "",
+                    "bottom": "",
+                    "left": "",
+                    "isLinked": true
+                  },
+                  "image_border_radius_mobile": {
+                    "unit": "px",
+                    "top": "",
+                    "right": "",
+                    "bottom": "",
+                    "left": "",
+                    "isLinked": true
+                  },
+                  "caption_align": "",
+                  "caption_align_tablet": "",
+                  "caption_align_mobile": "",
+                  "caption_typography_font_size": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "caption_typography_font_size_tablet": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "caption_typography_font_size_mobile": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "caption_space": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "caption_space_tablet": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "caption_space_mobile": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
                   "_ia_field": "content.blocks",
                   "_ia_w": "image",
                   "_ia_props": {
@@ -582,14 +775,33 @@
                 "elType": "widget",
                 "widgetType": "button",
                 "settings": {
+                  "_ia_widget": "button",
+                  "button_type": "",
                   "text": "See our rates",
                   "link": {
                     "url": "#pricing",
                     "is_external": "",
                     "nofollow": ""
                   },
+                  "size": "sm",
+                  "selected_icon": {
+                    "value": "",
+                    "library": "fa-solid"
+                  },
+                  "icon_align": "row",
+                  "icon_indent": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
                   "align": "left",
-                  "size": "md",
+                  "typography_font_weight": "",
+                  "typography_text_transform": "",
+                  "button_text_color": "",
+                  "background_color": "",
+                  "border_color": "",
+                  "hover_color": "",
+                  "button_background_hover_color": "",
                   "_ia_field": "content.blocks",
                   "_ia_w": "button",
                   "_ia_props": {
@@ -604,12 +816,27 @@
                 "elType": "widget",
                 "widgetType": "divider",
                 "settings": {
+                  "_ia_widget": "divider",
                   "style": "solid",
+                  "look": "line",
+                  "text": "",
+                  "html_tag": "span",
+                  "icon": {
+                    "value": "fas fa-star",
+                    "library": "fa-solid"
+                  },
+                  "color": "#000",
                   "weight": {
                     "unit": "px",
-                    "size": 1,
+                    "size": "",
                     "sizes": []
                   },
+                  "text_color": "",
+                  "typography_font_weight": "",
+                  "text_align": "center",
+                  "icon_view": "default",
+                  "primary_color": "",
+                  "icon_align": "center",
                   "_ia_field": "content.blocks",
                   "_ia_w": "divider",
                   "_ia_props": {}
@@ -620,9 +847,10 @@
                 "elType": "widget",
                 "widgetType": "spacer",
                 "settings": {
+                  "_ia_widget": "spacer",
                   "space": {
                     "unit": "px",
-                    "size": "24",
+                    "size": 24,
                     "sizes": []
                   },
                   "_ia_field": "content.blocks",
@@ -637,8 +865,48 @@
                 "elType": "widget",
                 "widgetType": "video",
                 "settings": {
-                  "youtube_url": "https://www.youtube.com/watch?v=ia-fixture",
+                  "_ia_widget": "video",
                   "video_type": "youtube",
+                  "youtube_url": "https://www.youtube.com/watch?v=ia-fixture",
+                  "vimeo_url": "",
+                  "dailymotion_url": "",
+                  "hosted_url": {
+                    "url": "",
+                    "id": ""
+                  },
+                  "start": "",
+                  "end": "",
+                  "autoplay": "",
+                  "mute": "",
+                  "loop": "",
+                  "controls": "yes",
+                  "yt_privacy": "",
+                  "lazy_load": "",
+                  "color": "",
+                  "show_image_overlay": "",
+                  "image_overlay": {
+                    "url": "",
+                    "id": ""
+                  },
+                  "show_play_icon": "yes",
+                  "lightbox": "",
+                  "aspect_ratio": "169",
+                  "play_icon_color": "",
+                  "play_icon_size": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "play_icon_size_tablet": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
+                  "play_icon_size_mobile": {
+                    "unit": "px",
+                    "size": "",
+                    "sizes": []
+                  },
                   "_ia_field": "content.blocks",
                   "_ia_w": "video",
                   "_ia_props": {
@@ -651,6 +919,7 @@
                 "elType": "widget",
                 "widgetType": "google_maps",
                 "settings": {
+                  "_ia_widget": "map",
                   "address": "400 Locust St, Des Moines, IA",
                   "zoom": {
                     "unit": "px",

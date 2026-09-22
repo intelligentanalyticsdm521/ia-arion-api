@@ -381,15 +381,22 @@ describe('the free section — words, pictures, buttons, video', () => {
     assert.deepEqual(Object.keys(row.fields.style).sort(), ['background', 'headingFont', 'padding']);
   });
 
-  test('a bullet list round-trips AS a list, not as a paragraph with line breaks', () => {
+  test('a bullet list round-trips AS a list, and publishes as an Icon List', () => {
+    /* B-168 W-1, 2026-09-22. It used to publish a Text Editor holding a
+       `<ul>`, because the nine-row codec was the writer. The emitter is the
+       writer now and it publishes Elementor's OWN Icon List - the widget the
+       panel edits and the canvas draws. The points are the thing that has to
+       survive, and they do. */
     const node = emit('content');
     const fields = extractFields(node, 'content');
     const list = fields.blocks.find((b) => b.kind === 'list');
     assert.deepEqual(list.items, ['Two-inch trigger', 'Salt on every visit', 'Photos on completion']);
     const patched = applyFields(node, 'content', fields);
-    let html = '';
-    walk(patched, (n) => { if (n.settings?.[BLOCK_MARKER] === 'list') html = n.settings.editor; });
-    assert.match(html, /^<ul><li>/);
+    let published = null;
+    walk(patched, (n) => { if (n.settings?.[BLOCK_MARKER] === 'list') published = n; });
+    assert.equal(published.widgetType, 'icon-list');
+    assert.deepEqual(published.settings.icon_list.map((r) => r.text),
+      ['Two-inch trigger', 'Salt on every visit', 'Photos on completion']);
   });
 
   test('every content widget carries both stamps, and every column carries its index', () => {

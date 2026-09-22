@@ -33,6 +33,16 @@ import { MAXIMAL_WIDGET_PROPS, WIDGET_CTX, SETTINGS_NOT_CONTROLS }
   from './fixtures/widget-controls-input.mjs';
 
 const PIN = JSON.parse(readFileSync(path.join(process.cwd(), 'test', 'fixtures', 'elementor-widget-controls.json'), 'utf8'));
+/* THE SECOND FIXTURE, and the wider one (B-168, 2026-09-22).
+   `elementor-widget-controls.json` was scraped from the editor's PANEL, so
+   for several widgets it holds the Content tab and nothing else - heading
+   lists seven controls and has thirty-five more on its Style tab.
+   `WIDGET_SETTINGS_KEYS.json` comes from `Widget_Base::get_stack()`
+   INCLUDING `style_controls`, so it has them all. A key either fixture knows
+   is a real control; a key NEITHER knows is still refused by name, which is
+   what this check is for. */
+const STACK = JSON.parse(readFileSync(path.join(process.cwd(), 'test', 'fixtures', 'WIDGET_SETTINGS_KEYS.json'), 'utf8'));
+const stackKeys = (widgetType) => new Set(STACK.widgets?.[widgetType]?.keys || []);
 
 /** §11.13.3's standard set, in the shared vocabulary's own spellings. */
 const STANDARD_SET = {
@@ -168,7 +178,11 @@ describe('every key the emitter writes is a control the page engine has', () => 
       for (const [key, value] of Object.entries(emitted)) {
         if (SETTINGS_NOT_CONTROLS.includes(key)) continue;
         const control = pin.controls[key];
-        assert.ok(control, `${row.widgetType} has no control called “${key}”`);
+        if (!control) {
+          assert.ok(stackKeys(row.widgetType).has(key),
+            `${row.widgetType} has no control called “${key}” in either fixture`);
+          continue;
+        }
         // A select's VALUE has to be one the control offers, or the engine
         // drops it and the author watched us accept a setting that did nothing.
         if (control.options && typeof value === 'string' && value !== '') {

@@ -421,8 +421,17 @@ describe('5. the legacy nine are untouched', () => {
       assert.equal(s.title, 'Hi');
       assert.equal(s.header_size, 'h3');
     }],
+    /* B-168 W-1, 2026-09-22: a Bullet list publishes Elementor's own ICON LIST
+       now, not a Text Editor holding a `<ul>`. That is the widget the panel
+       edits, the widget the canvas draws and the widget the reader reads back;
+       the codec's `<ul>` was the only thing on the platform that called it
+       anything else. Both stored shapes still reach it - `icon_list` and the
+       plain `items` array. */
     ['list', { icon_list: [{ text: 'One' }, { text: 'Two' }] }, (s) => {
-      assert.equal(s.editor, '<ul><li>One</li><li>Two</li></ul>');
+      assert.deepEqual(s.icon_list.map((r) => r.text), ['One', 'Two']);
+    }],
+    ['list', { items: ['One', 'Two'] }, (s) => {
+      assert.deepEqual(s.icon_list.map((r) => r.text), ['One', 'Two']);
     }],
   ];
 
