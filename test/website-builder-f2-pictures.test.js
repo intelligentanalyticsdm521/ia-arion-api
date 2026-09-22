@@ -248,7 +248,11 @@ describe('the five everyday widgets publish the author, not a constant', () => {
   test('image: the picture, the link, the caption and the whole Style tab', () => {
     const out = EMITTERS.image.settings(FILLED.image, {});
     assert.equal(out.image.url, 'https://example.test/lawn.jpg');
-    assert.equal(out.image.id, '31');
+    /* A LIBRARY ID IS A NUMBER (B-168, 2026-09-22). Elementor stores it as
+       one, and the srcset the page engine builds is keyed on it; `text()`
+       turned `31` into `"31"`. A blank still stays blank - an address with
+       no library record behind it is a real case. */
+    assert.equal(out.image.id, 31);
     assert.equal(out.caption_source, 'custom');
     assert.equal(out.caption, 'Edged and cut');
     assert.equal(out.link_to, 'custom');
