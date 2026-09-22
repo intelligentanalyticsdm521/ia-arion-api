@@ -93,8 +93,13 @@ function stampedTop(section) {
 
 describe('1. the gate asks the ONE merged vocabulary', () => {
   test('the allowed set IS the union — legacy nine, the box, every emitter', () => {
+    /* `opaque` joined the union on 2026-09-22 (B-168). It is the one block
+       kind that is not a widget anybody can emit: it is a widget somebody
+       built on their own website that we have no row for, kept on the page and
+       written back byte for byte. It has to be ALLOWED or every save of every
+       page that has one would be refused — which is most real pages. */
     const expected = [...new Set([
-      ...listContentBlockKinds(), CONTAINER_BLOCK_KIND, ...listWidgetKinds(),
+      ...listContentBlockKinds(), CONTAINER_BLOCK_KIND, 'opaque', ...listWidgetKinds(),
     ])].sort();
     assert.deepEqual(listAllowedBlockKinds(), expected);
     // And it is bigger than the nine by a lot, which is the whole point.

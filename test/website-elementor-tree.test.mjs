@@ -445,11 +445,19 @@ describe('the catalogue gate — what BUILDER_WIDGET_CATALOG_2026-09-17 asks of 
     const { reduceToSectionList } = await import('../lib/websiteBuilder/sectionSchema.js');
     const { data } = pageToElementor([CHOOSE_YOUR_PLAN], PRO);
     const [row] = reduceToSectionList(data);
-    assert.equal(row.reason, 'tree');
+    /* WAS `reason: 'tree'` — one of two dead ends, and the one that existed
+       only to tell a client that a section we built was not somebody else's
+       while still refusing to let them edit it. Both are DELETED (B-168): the
+       section opens, holding what we put in it. */
+    assert.equal(row.reason, null);
+    assert.equal(row.editable, true);
     assert.notEqual(row.label, 'Custom section — built on the site');
-    // Somebody else's really is somebody else's.
+    assert.ok(row.fields.blocks.length > 0, 'and it comes back holding its widgets');
+    // Somebody else's opens too, and is never claimed as one of our archetypes.
     const [theirs] = reduceToSectionList([{ id: 'x', elType: 'container', settings: { _title: 'Awards' }, elements: [] }]);
-    assert.equal(theirs.reason, 'custom');
+    assert.equal(theirs.editable, true);
+    assert.equal(theirs.foreign, true);
+    assert.equal(theirs.handle, 'Awards', 'their title is carried, never turned into an ia: handle');
   });
 });
 
