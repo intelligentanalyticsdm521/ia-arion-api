@@ -276,7 +276,13 @@ describe('3. the opaque passthrough', () => {
     };
     const fields = readForeignFields(section);
     assert.deepEqual(fields.blocks.map((b) => b.kind), [OPAQUE_KIND, 'heading']);
-    fields.blocks[1].title = 'Changed';
+    /* The block carries BOTH spellings — Elementor's `title` and the panel's
+       `text` — and the panel's is the one the canvas writes and the one the
+       save asks for first. Setting the engine's name alone would be an edit
+       nobody made. */
+    assert.equal(fields.blocks[1].title, 'Ours to change');
+    assert.equal(fields.blocks[1].text, 'Ours to change');
+    fields.blocks[1].text = 'Changed';
     const out = applyForeignFields(section, fields, CTX);
     assert.equal(out.elements[0], section.elements[0], 'the one we cannot read did not move');
     assert.equal(out.elements[1].settings.title, 'Changed');
@@ -350,7 +356,7 @@ describe('4. a box is a box, whatever the engine calls it', () => {
       }],
     };
     const fields = readForeignFields(legacy);
-    fields.blocks[0].__children[0].title = 'Changed';
+    fields.blocks[0].__children[0].text = 'Changed';
     const out = applyForeignFields(legacy, fields, CTX);
     assert.deepEqual(out.elements[0].settings, { _column_size: 100, _inline_size: 50 });
     assert.equal(out.elements[0].elType, 'column');
@@ -426,9 +432,10 @@ describe('5. a real page, read and written back', () => {
     };
     list.forEach((s) => s.fields.blocks.forEach(hunt));
     assert.ok(target, 'the real page has a heading');
-    const was = target.title;
+    const was = target.text;
     assert.ok(was, 'and it has words');
-    target.title = 'Our workshop, renamed';
+    assert.equal(target.title, was, 'both spellings arrive, and they agree');
+    target.text = 'Our workshop, renamed';
 
     const after = list.map((s) => applyFields(s.node, s.kind, s.fields, CTX));
 
