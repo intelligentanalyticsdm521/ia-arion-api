@@ -71,7 +71,11 @@ async function loadSiteForTenant(pool, { tenantId, siteId }) {
 // ---------------------------------------------------------------------------
 // POST /arion/sites/:siteId/blocks/:kind  — generate a new draft block
 // ---------------------------------------------------------------------------
-router.post('/:kind', async (req, res) => {
+router.post('/:kind', async (req, res, next) => {
+  // `/assemble` is declared further down this file; Express matches routes in
+  // declaration order, so without this hand-off every assemble call answered
+  // 404 UNKNOWN_KIND "assemble" (walk defect arion-assemble-route-shadowed).
+  if (req.params.kind === 'assemble') return next();
   const tenantId = req.tenant?.tenantId;
   const userId = req.platformUser?.userId || null;
   const { siteId, kind } = req.params;
