@@ -293,9 +293,12 @@ router.get('/posts', async (req, res) => {
  * through exactly the plugin routes the Portal's own "New post" uses, which
  * is the one mechanism (lib/websiteBuilder/postComposer.js).
  *
- * Body: { title, content_html, excerpt?, categories?: string[], site_id? }
+ * Body: { title, content_html, excerpt?, categories?: string[], site_id?, post_id? }
  * Answers 201 with { ok, post_id, post_url, warning? }, or a real error
- * status — never a 200 carrying a failure in a field.
+ * status — never a 200 carrying a failure in a field. With `post_id` (the id
+ * a previous call answered) the same post is rewritten and the answer is 200
+ * — a newsletter published twice is one post, not two (register
+ * spark-newsletter-republish-creates-a-second-post, 2026-09-25).
  */
 router.post('/posts', async (req, res) => {
   const tenantId = req.tenant.tenantId;
@@ -303,6 +306,7 @@ router.post('/posts', async (req, res) => {
   const contentHtml = String(req.body?.content_html || '');
   const excerpt = req.body?.excerpt == null ? null : String(req.body.excerpt);
   const categories = Array.isArray(req.body?.categories) ? req.body.categories : [];
+  const existingPostId = Number(req.body?.post_id) || null;
 
   if (!title) {
     return res.status(400).json({ error: 'title_required', message: 'Give the article a title first.' });
@@ -317,7 +321,7 @@ router.post('/posts', async (req, res) => {
       });
     }
 
-    const result = await composePostFromHtml({ site, title, contentHtml, excerpt, categories });
+    const result = await composePostFromHtml({ site, title, contentHtml, excerpt, categories, existingPostId });
     if (!result.ok) {
       // 400 when WE refused it (an empty article, no title) — the caller can
       // fix that. 502 when the WEBSITE refused it, including a body refused
@@ -335,11 +339,12 @@ router.post('/posts', async (req, res) => {
       });
     }
 
-    return res.status(201).json({
+    return res.status(result.updated ? 200 : 201).json({
       ok: true,
       site_id: site.site_id,
       post_id: result.postId,
       post_url: result.postUrl,
+      updated: !!result.updated,
       warning: result.warning || null,
     });
   } catch (err) {

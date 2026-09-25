@@ -281,6 +281,55 @@ test('D-82: the summary and category are a finishing touch, not a reason to fail
   assert.match(res.warning, /summary|categor/i);
 });
 
+test('2026-09-25: republishing with the post id rewrites that post and makes no new one', async () => {
+  const seen = [];
+  const res = await composePostFromHtml({
+    site: { domain: 'example.test', site_token_raw: 'tok' },
+    title: 'Monthly update',
+    contentHtml: '<p>Second edition.</p>',
+    excerpt: 'Summary.',
+    categories: ['Newsletter'],
+    existingPostId: 3238,
+    client: {
+      createPage: async () => { throw new Error('a republish must not create a post'); },
+      writePageSections: async (site, id, payload) => {
+        seen.push(['sections', id, payload.status, payload.title]);
+        return { ok: true, status: 200, data: { page_id: id, permalink: 'https://example.test/monthly-update-3/' } };
+      },
+      writePageSettings: async (site, id, payload) => {
+        seen.push(['settings', id, (payload.categories || []).join(',')]);
+        return { ok: true, status: 200, data: {} };
+      },
+    },
+  });
+  assert.deepEqual(seen, [
+    ['sections', 3238, 'publish', 'Monthly update'],
+    ['settings', 3238, 'Newsletter'],
+  ]);
+  assert.equal(res.ok, true);
+  assert.equal(res.postId, 3238);
+  assert.equal(res.updated, true);
+  assert.equal(res.postUrl, 'https://example.test/monthly-update-3/');
+});
+
+// Mutation check for the test above: without the id the composer still creates.
+test('2026-09-25: without a post id the composer still creates a post (updated=false)', async () => {
+  let created = 0;
+  const res = await composePostFromHtml({
+    site: { domain: 'example.test', site_token_raw: 'tok' },
+    title: 'Monthly update',
+    contentHtml: '<p>First edition.</p>',
+    client: {
+      createPage: async () => { created += 1; return { ok: true, status: 201, data: { page_id: 11 } }; },
+      writePageSections: async (site, id) => ({ ok: true, status: 200, data: { page_id: id, permalink: 'https://example.test/monthly-update/' } }),
+      writePageSettings: async () => ({ ok: true, status: 200, data: {} }),
+    },
+  });
+  assert.equal(created, 1);
+  assert.equal(res.postId, 11);
+  assert.equal(res.updated, false);
+});
+
 test('D-82: a site with no way in is told so before anything is created', async () => {
   const res = await composePostFromHtml({
     site: null, title: 'x', contentHtml: '<p>y</p>',
@@ -310,7 +359,8 @@ test('D-82: whose fault it was decides the status, and a stranded draft is named
   // The draft left behind is named, so somebody can go and tidy it up.
   assert.match(route, /post_id: result\.postId \|\| null/);
   // A 201 never carries an error, and an error never rides on a 2xx.
-  assert.match(route, /return res\.status\(201\)\.json\(\{/);
+  // 2026-09-25: a republish (post_id given) answers 200, a new post 201.
+  assert.match(route, /return res\.status\(result\.updated \? 200 : 201\)\.json\(\{/);
 });
 
 test('D-82: the dead proxy is not resurrected, and nothing still calls it', () => {
