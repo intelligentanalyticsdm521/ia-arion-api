@@ -249,7 +249,11 @@ describe('model → Elementor → model', () => {
     }
   });
 
-  test('an unstamped section is carried back byte for byte and never claims a kind', () => {
+  test('an unstamped section is carried back byte for byte, AND it opens', () => {
+    // B-168, 2026-09-22. The byte-for-byte half is unchanged and still the
+    // rule that matters. What changed is the other half: it used to come back
+    // `editable: false` with "Custom section — built on the site" over it, and
+    // it now comes back holding the author's own heading.
     const handBuilt = {
       id: 'hand01', elType: 'container',
       settings: { _title: 'Awards strip (built on the site)', container_type: 'flex' },
@@ -257,10 +261,11 @@ describe('model → Elementor → model', () => {
       isInner: false,
     };
     const [row] = reduceToSectionList([handBuilt]);
-    assert.equal(row.kind, null);
-    assert.equal(row.editable, false);
-    assert.equal(row.reason, 'custom');
-    assert.equal(row.label, 'Custom section — built on the site');
+    assert.equal(row.kind, 'content');
+    assert.equal(row.editable, true);
+    assert.equal(row.foreign, true);
+    assert.equal(row.label, 'Awards strip (built on the site)', 'their own name for it');
+    assert.equal(row.fields.blocks[0].title, 'County Build Awards 2025');
     assert.equal(JSON.stringify(row.node), JSON.stringify(handBuilt));
   });
 });
@@ -376,15 +381,22 @@ describe('the free section — words, pictures, buttons, video', () => {
     assert.deepEqual(Object.keys(row.fields.style).sort(), ['background', 'headingFont', 'padding']);
   });
 
-  test('a bullet list round-trips AS a list, not as a paragraph with line breaks', () => {
+  test('a bullet list round-trips AS a list, and publishes as an Icon List', () => {
+    /* B-168 W-1, 2026-09-22. It used to publish a Text Editor holding a
+       `<ul>`, because the nine-row codec was the writer. The emitter is the
+       writer now and it publishes Elementor's OWN Icon List - the widget the
+       panel edits and the canvas draws. The points are the thing that has to
+       survive, and they do. */
     const node = emit('content');
     const fields = extractFields(node, 'content');
     const list = fields.blocks.find((b) => b.kind === 'list');
     assert.deepEqual(list.items, ['Two-inch trigger', 'Salt on every visit', 'Photos on completion']);
     const patched = applyFields(node, 'content', fields);
-    let html = '';
-    walk(patched, (n) => { if (n.settings?.[BLOCK_MARKER] === 'list') html = n.settings.editor; });
-    assert.match(html, /^<ul><li>/);
+    let published = null;
+    walk(patched, (n) => { if (n.settings?.[BLOCK_MARKER] === 'list') published = n; });
+    assert.equal(published.widgetType, 'icon-list');
+    assert.deepEqual(published.settings.icon_list.map((r) => r.text),
+      ['Two-inch trigger', 'Salt on every visit', 'Photos on completion']);
   });
 
   test('every content widget carries both stamps, and every column carries its index', () => {

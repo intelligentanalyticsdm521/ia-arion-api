@@ -266,7 +266,13 @@ describe('every widget declares what plan it needs', () => {
       assert.ok(tier, `${kind} has no tier`);
       assert.ok(tier === 'free' || tier === 'pro' || tier.startsWith('ia:'), `${kind}: ${tier}`);
       assert.ok(ELEMENTOR_WIDGETS[kind].widgetType, `${kind} names no page widget`);
-      assert.equal(typeof ELEMENTOR_WIDGETS[kind].settings, 'function', `${kind} has no settings`);
+      /* D-165: a row either writes one widget's settings, or BUILDS a tree of
+         free widgets (`node`) — §11.13.3's compositions. Exactly one of the
+         two, because a row with both has two answers to "what gets
+         published" and a row with neither publishes nothing. */
+      const row = ELEMENTOR_WIDGETS[kind];
+      const ways = [typeof row.settings === 'function', typeof row.node === 'function'].filter(Boolean);
+      assert.equal(ways.length, 1, `${kind} must have exactly one of settings() and node()`);
     }
   });
 
@@ -276,9 +282,31 @@ describe('every widget declares what plan it needs', () => {
   });
 
   test('the paid ones are the paid ones, and ours are ours', () => {
-    assert.deepEqual(proWidgetKinds(), ['card', 'form']);
-    assert.deepEqual(iaWidgetKinds(), [
-      { kind: 'catalog_card', product: 'oliver', widgetType: 'ia_product_cards' },
+    /* D-165 §11.13.3 — the whole paid panel is offered and refused by name on
+       Lite, and the IA list is the one the section names. Both lists are read
+       off the catalogue rather than typed anywhere else. */
+    /* LANDED (B-168): the eight families each brought Elementor's own paid
+       widgets with them, so this list is now the offer file's
+       `website.elementor_pro` as far as the publisher has emitters for it.
+       Elementor's own Reviews is `reviews` now, not `pro_reviews` - family F5
+       gave it Elementor's id and the IA twin keeps `ia_reviews`. Read off the
+       catalogue, never typed anywhere else. */
+    assert.deepEqual(proWidgetKinds(), [
+      'animated_headline', 'archive_posts', 'author_box', 'blockquote', 'call_to_action',
+      'card', 'code_highlight', 'countdown', 'facebook_embed', 'facebook_page', 'flip_box',
+      'form', 'hotspot', 'login', 'loop_grid', 'lottie', 'media_carousel', 'nav_menu',
+      'paypal_button', 'portfolio', 'post_comments', 'post_info', 'post_navigation',
+      'posts', 'price_list', 'price_table', 'pro_gallery', 'progress_tracker', 'reviews',
+      'search', 'share_buttons', 'sitemap', 'slides', 'stripe_button', 'table_of_contents',
+      'taxonomy_filter', 'template', 'testimonial_carousel', 'theme_archive_title',
+      'theme_page_title', 'theme_post_excerpt', 'theme_post_featured_image',
+      'theme_post_title', 'theme_site_logo', 'theme_site_title', 'video_playlist',
+    ]);
+    assert.deepEqual(iaWidgetKinds().map((w) => `${w.kind}:${w.product}`), [
+      'book_now:oliver', 'catalog_card:oliver', 'hours_location:lumen',
+      'ia_form:lumen', 'ia_mega_menu:arion', 'ia_mobile_menu:arion',
+      'ia_oliver_invoice:oliver', 'ia_posts:arion', 'ia_reviews:lumen',
+      'ia_social_links:arion', 'newsletter_signup:lumen', 'product_cards:oliver',
     ]);
   });
 
@@ -417,11 +445,19 @@ describe('the catalogue gate — what BUILDER_WIDGET_CATALOG_2026-09-17 asks of 
     const { reduceToSectionList } = await import('../lib/websiteBuilder/sectionSchema.js');
     const { data } = pageToElementor([CHOOSE_YOUR_PLAN], PRO);
     const [row] = reduceToSectionList(data);
-    assert.equal(row.reason, 'tree');
+    /* WAS `reason: 'tree'` — one of two dead ends, and the one that existed
+       only to tell a client that a section we built was not somebody else's
+       while still refusing to let them edit it. Both are DELETED (B-168): the
+       section opens, holding what we put in it. */
+    assert.equal(row.reason, null);
+    assert.equal(row.editable, true);
     assert.notEqual(row.label, 'Custom section — built on the site');
-    // Somebody else's really is somebody else's.
+    assert.ok(row.fields.blocks.length > 0, 'and it comes back holding its widgets');
+    // Somebody else's opens too, and is never claimed as one of our archetypes.
     const [theirs] = reduceToSectionList([{ id: 'x', elType: 'container', settings: { _title: 'Awards' }, elements: [] }]);
-    assert.equal(theirs.reason, 'custom');
+    assert.equal(theirs.editable, true);
+    assert.equal(theirs.foreign, true);
+    assert.equal(theirs.handle, 'Awards', 'their title is carried, never turned into an ia: handle');
   });
 });
 

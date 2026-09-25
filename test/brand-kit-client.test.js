@@ -137,7 +137,12 @@ describe("what a client's PAGE ships with is not our brand", () => {
   // somebody remembered to list — which is what stops the next move hiding it.
   const files = [
     ["lib/websiteBuilder/containerEmitters.js", "the Elementor JSON we publish"],
-    ["lib/websiteBuilder/sectionPreview.js", "the preview of an adopted section"],
+    // `sectionPreview.js` was the second entry here. It drew the before/after
+    // for an ADOPTED section, and adoption was deleted with the concept
+    // (B-168, 2026-09-22) — every section is editable, so there is nothing to
+    // adopt and no preview of it to paint in anybody's colours. The sweep
+    // below still holds the rule over the WHOLE builder, which is the check
+    // that mattered.
   ];
 
   for (const [rel, what] of files) {

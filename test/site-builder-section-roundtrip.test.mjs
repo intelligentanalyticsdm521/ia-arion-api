@@ -72,10 +72,18 @@ test('a page reduces to one entry per top-level section, in page order', () => {
   assert.deepEqual(list.map((s) => s.index), [0, 1, 2]);
   assert.equal(list[0].kind, 'hero');
   assert.equal(list[0].editable, true);
-  assert.equal(list[1].kind, null);
-  assert.equal(list[1].editable, false);
-  assert.equal(list[1].reason, 'custom');
-  assert.equal(list[1].label, 'Custom section — built on the site');
+  /* B-168, 2026-09-22: a section built in Elementor ON THE WEBSITE is no
+     longer a dead end. It is read into blocks by `elementorReader.js` and
+     comes back as what it now EDITS as — "Words and pictures" — with the
+     author's own name for it when Elementor has one. `editable: false` and
+     "Custom section — built on the site" are both gone from the codebase. */
+  assert.equal(list[1].kind, 'content');
+  assert.equal(list[1].editable, true);
+  assert.equal(list[1].reason, null);
+  assert.equal(list[1].foreign, true);
+  assert.equal(list[1].label, 'Awards strip (built in Elementor)');
+  assert.ok(Array.isArray(list[1].fields.blocks) && list[1].fields.blocks.length > 0,
+    'their widgets are read, not counted');
   assert.equal(list[2].kind, 'faq');
 });
 
@@ -145,13 +153,20 @@ test('an untouched section round-trips byte-equivalent', () => {
   assert.equal(JSON.stringify(rebuilt), before, 'the tree is identical after a no-op save');
 });
 
-test('a custom section is never rewritten, even when fields are sent for it', () => {
+test('a section built on the website is never patched through an archetype', () => {
   const list = reduceToSectionList([HAND_BUILT]);
-  assert.equal(list[0].fields, null);
-  // applyFields on a section with no kind is a no-op by construction: the save
-  // path never calls it, and calling it with a bogus kind changes nothing.
+  assert.ok(list[0].fields.blocks, 'it is read, not refused');
+  // THE TRAP THIS CLOSES (B-168): the entry now says `kind: 'content'`, and
+  // `applyFields`'s content branch rebuilds a section out of OUR `_ia_row` /
+  // `_ia_col` columns. Run on somebody else's page that would replace their
+  // layout with ours on the first save. `applyFields` asks `readsAsForeign`
+  // before it does anything, so every caller is covered and not just the save
+  // route. Mutation: drop that guard and this row goes red.
   const out = applyFields(HAND_BUILT, 'hero', { headline: 'Hijacked' });
   assert.equal(JSON.stringify(out), JSON.stringify(HAND_BUILT));
+  const asContent = applyFields(HAND_BUILT, 'content', list[0].fields);
+  assert.equal(JSON.stringify(asContent), JSON.stringify(HAND_BUILT),
+    'a no-op save through the content kind still changes nothing');
 });
 
 test('editing a headline changes that setting and nothing else', () => {
@@ -268,15 +283,22 @@ test('the handle tells us what a section is, and only for handles we minted', ()
   assert.equal(parseSectionHandle(undefined), null);
 });
 
-test('a section whose kind we no longer understand is treated as custom, not crashed on', () => {
+test('a section whose kind we no longer understand still opens, and is not crashed on', () => {
   const alien = { id: 'x1', elType: 'section', settings: { _title: 'ia:carousel:scratch:b1' }, elements: [] };
   const [entry] = reduceToSectionList([alien]);
-  assert.equal(entry.editable, false);
-  assert.equal(entry.reason, 'custom');
+  assert.equal(entry.editable, true);
+  assert.equal(entry.reason, null);
+  assert.equal(entry.foreign, true);
   assert.equal(entry.node, alien);
+  assert.deepEqual(entry.fields.blocks, [], 'an empty section reads as an empty list, not as an error');
 });
 
-test('one of ours built before the field markers existed is shown, but not editable', () => {
+test('one of ours built before the field markers existed opens as what it holds', () => {
+  // WAS `editable: false, reason: 'no_field_markers'` — the third dead end, and
+  // the one that caught a section of OURS whose markers had been stripped.
+  // `readsAsForeign` answers for it with the same mechanism as everything else
+  // (B-168): we cannot patch it through the hero bindings, and we CAN read its
+  // tree, so it opens holding its own heading.
   const old = {
     id: 'x2', elType: 'section', settings: { _title: 'ia:hero:scratch:b9' },
     elements: [{
@@ -285,10 +307,15 @@ test('one of ours built before the field markers existed is shown, but not edita
     }],
   };
   const [entry] = reduceToSectionList([old]);
-  assert.equal(entry.kind, 'hero');
-  assert.equal(entry.editable, false);
-  assert.equal(entry.reason, 'no_field_markers');
-  assert.equal(entry.fields, null);
+  assert.equal(entry.kind, 'content');
+  assert.equal(entry.editable, true);
+  assert.equal(entry.reason, null);
+  assert.equal(entry.fields.blocks.length, 1);
+  assert.equal(entry.fields.blocks[0].kind, 'container');
+  assert.equal(entry.fields.blocks[0].__children[0].title, 'Old hero',
+    'their words come back, not a count of them');
+  // ...and writing it straight back changes nothing at all.
+  assert.equal(JSON.stringify(applyFields(old, 'content', entry.fields)), JSON.stringify(old));
 });
 
 /* ── validation ────────────────────────────────────────────────────────── */

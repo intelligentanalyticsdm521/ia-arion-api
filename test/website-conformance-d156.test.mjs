@@ -103,7 +103,11 @@ describe('a widget is in exactly one of three states, and each says its own thin
   });
 
   test('one ownership question covers every widget that needs a product', () => {
-    assert.deepEqual(productsNeeded(), ['oliver']);
+    /* D-165 widened the panel to §11.13.3's IA list, so three products are
+       asked about now instead of one — in ONE query, which is what this test
+       is really guarding: the list is derived from the catalogue's own rows
+       and is never typed into a route. */
+    assert.deepEqual([...productsNeeded()].sort(), ['arion', 'lumen', 'oliver']);
   });
 
   test('no widget sentence names a vendor, and none says the bare word "locked"', () => {
@@ -354,8 +358,14 @@ describe('a card and a binding are spelled the way the three repos agreed', () =
   test('`_ia_source` is a MARKER, the same three strings in all three repos', () => {
     // handoff §3: never a schema object. A stored document that names a table
     // goes stale the day the table moves.
+    /* D-165 added four website markers (reviews, contacts, forms, booking) to
+       the same closed list, recorded in D165_HANDOFF_2026-09-19.md so the
+       other two repos can read them back. The SHAPE is what matters and it is
+       asserted below: a marker, never a schema object. */
     assert.deepEqual(IA_SOURCES, {
       catalogue: 'oliver:catalogue', location: 'lumen:locations', document: 'document',
+      reviews: 'lumen:reviews', contacts: 'lumen:contacts', forms: 'lumen:forms',
+      booking: 'oliver:booking',
     });
     for (const v of Object.values(IA_SOURCES)) {
       assert.ok(!/\./.test(v), `"${v}" looks like a schema object, not a marker`);

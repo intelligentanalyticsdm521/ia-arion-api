@@ -55,7 +55,16 @@
  *   GET    /pages/:pageId/proposals
  *   POST   /proposals/:proposalId/discard
  *
- * ADOPTION (Phase 3, W-5): a section built on the website itself can be taken
+ * ADOPTION IS GONE (B-168, 2026-09-22). It existed for one reason — a section
+ * built on the website itself could not be edited here, so the next best thing
+ * was to offer to REPLACE it with one of our archetypes. `elementorReader.js`
+ * reads every section, ours and theirs, so there is nothing left to adopt: the
+ * four routes, the 1,400-line mapper, its store and its before/after preview
+ * are all deleted. The `arion.site_section_adoption` table is LEFT IN PLACE —
+ * it holds what was done to five real sites and dropping it is a migration, not
+ * a refactor (feedback_grep_db_objects_before_dropping).
+ *
+ * WAS (Phase 3, W-5): a section built on the website itself could be taken
  * charge of, one at a time, never automatically, always previewed, always
  * reversible for 30 days from the original bytes we kept:
  *
@@ -73,15 +82,8 @@ import { loadBrandContext, BUSINESS_NAME_NOT_SET } from '../../lib/websiteBuilde
 import {
   reduceToSectionList, applyFields, validateFields, extractFields,
   sectionCatalog, sectionKindMeta, parseSectionHandle, swapItemRoles,
+  readsAsForeign, applyForeignFields,
 } from '../../lib/websiteBuilder/sectionSchema.js';
-import { renderAdoptionPreviewHtml } from '../../lib/websiteBuilder/sectionPreview.js';
-import {
-  analyseSection, analysePage, buildAdoptedSection, sectionFingerprint,
-  previewTools, ADOPT_MIN_CONFIDENCE, ADOPT_UNDO_DAYS,
-} from '../../lib/websiteBuilder/adoption.js';
-import {
-  recordAdoption, getAdoption, listAdoptions, markReverted, AdoptionTooBigError,
-} from '../../lib/websiteBuilder/adoptionStore.js';
 import { buildStarterSection } from '../../lib/websiteBuilder/starterSections.js';
 import {
   fetchPages, fetchPageSections, writePageSections, undoPage, createPage, sideloadMedia,
@@ -102,7 +104,7 @@ import { pluginPost } from '../../lib/pluginClient.js';
 // through the seams that already answer it — the site (`siteCapability`) and
 // `core.tenant_services` (`coreTenants`). No third copy of a tier table.
 import {
-  widgetCatalog, productsNeeded, ownedProductsFrom,
+  widgetCatalog, productsNeeded, ownedProductsFrom, UnsupportedWidgetError,
 } from '../../lib/websiteBuilder/elementorWidgets.js';
 import { tenantServiceOwnership } from '../../lib/coreTenants.js';
 import {
@@ -311,14 +313,13 @@ router.get('/pages', async (req, res) => {
           iaManaged: !!p.ia_managed,
           sectionCount: Number(p.section_count || 0),
           editableSectionCount: Number(p.editable_section_count || 0),
-          // Phase 3: an UPPER BOUND on how many of the rest could be made
-          // editable, from the website's own coarse widget census. A page with
-          // nothing editable but a candidate on it still opens — that is the
-          // one page a client most needs to open (found clicking the list).
-          // The exact answer costs a full read per section and arrives when
-          // the page is opened; the list words this as "up to N" so the two
-          // can differ without the list having lied.
-          adoptCandidateCount: Number(p.adopt_candidate_count || 0),
+          /* THE PLUGIN'S `adopt_candidate_count` IS NO LONGER PASSED ON.
+             It was an upper bound on how many sections built on the website
+             MIGHT be made editable, and the Pages list said "up to N of M may
+             be editable here" over it. Every section is editable now (B-168),
+             so the number answers a question nobody is asking and the sentence
+             it fed is deleted. The plugin still sends the field; nothing reads
+             it, and it goes when the plugin is next released. */
         })),
         pluginVersion: result.data?.plugin_version || null,
       },
@@ -430,30 +431,6 @@ router.get('/pages/:pageId/sections', async (req, res) => {
     const tree = Array.isArray(data.elementor_data) ? data.elementor_data : [];
     const sections = reduceToSectionList(tree);
 
-    /* --- Phase 3: which greyed rows could be made editable, and which
-     * editable rows got that way by adoption. ---------------------------- */
-    const capability = await getSiteCapability(site);
-    const { allowPro } = allowProFor(site, capability);
-    const view = analysePage(sections, { allowPro });
-    // The plugin has its own opinion, from its own widget census, and the two
-    // are compared rather than trusted: a row the Portal is about to offer
-    // that the plugin says it has never seen is a mirror drift, and the
-    // Phase 2 verifier's job is to catch exactly that.
-    const pluginRows = Array.isArray(data.sections) ? data.sections : [];
-
-    let adoptions = [];
-    try {
-      adoptions = await listAdoptions(pool, { tenantId, siteId, pageId });
-    } catch (err) {
-      // The note on a row is a nicety; the page must still open without it.
-      console.warn('[arion/pages:sections] adoption records unreadable:', err?.message);
-    }
-    const byHandle = new Map();
-    for (const row of adoptions) {
-      if (row.status !== 'adopted') continue;
-      if (!byHandle.has(row.handle)) byHandle.set(row.handle, row);
-    }
-
     /* D-05: the unpublished draft, if the author left one. `sections` below is
      * still WHAT IS LIVE — the two are sent side by side rather than one
      * overwriting the other, because "Live · draft saved, not published" is
@@ -473,31 +450,10 @@ router.get('/pages/:pageId/sections', async (req, res) => {
         modified: data.modified || null,
         canUndo: !!data.can_undo,
         undoCount: Number(data.snapshot_count || 0),
-        sections: sections.map((entry, i) => {
-          const row = view.rows[i] || {};
-          const pluginRow = pluginRows[i] || null;
-          return publicSection(entry, {
-            adoptable: !!row.adoptable,
-            adoptReason: row.reason || null,
-            adoptReasonText: row.reasonText || null,
-            adoptKind: row.kind || null,
-            adoptKindLabel: row.kindLabel || null,
-            adoptWhy: row.why || null,
-            adoptPreview: row.preview || null,
-            adoptConfidence: row.confidence ?? null,
-            adoptConfidenceLabel: row.confidenceLabel || null,
-            fingerprint: row.fingerprint || sectionFingerprint(entry.node),
-            // The plugin's own pre-grey hint, so the Portal can grey a row
-            // without asking arion-api to re-analyse it.
-            pluginAdoptable: pluginRow ? !!pluginRow.adoptable : null,
-            adoption: entry.editable ? publicAdoption(byHandle.get(entry.handle)) : null,
-          });
-        }),
-        adoption: {
-          customCount: view.customCount,
-          adoptableCount: view.adoptableCount,
-          undoDays: ADOPT_UNDO_DAYS,
-        },
+        // EVERY section, editable, ours and theirs alike (B-168). There is no
+        // second opinion to attach any more: no adoption view, no "this one is
+        // greyed but could be offered", no plugin pre-grey hint.
+        sections: sections.map((entry) => publicSection(entry)),
       },
       meta: { site_id: siteId, section_count: sections.length },
     });
@@ -509,13 +465,12 @@ router.get('/pages/:pageId/sections', async (req, res) => {
 /**
  * What the Portal sees. `node` rides along so a save round-trips untouched.
  *
- * `extra` carries the Phase 3 adoption view: whether a greyed row can be made
- * editable, and whether an editable one got that way by being adopted (so the
- * row can show the note and offer "Undo adoption"). It is optional so the two
- * other callers — `POST /sections`, which just built the thing — stay as they
- * were.
+ * The `extra` argument carried the Phase 3 adoption view — nine keys saying
+ * whether a greyed row could be offered as one of our archetypes. There are no
+ * greyed rows any more (B-168), so there is nothing to attach and the argument
+ * is gone with it.
  */
-function publicSection(entry, extra = null) {
+function publicSection(entry) {
   const out = {
     index: entry.index,
     handle: entry.handle,
@@ -533,23 +488,7 @@ function publicSection(entry, extra = null) {
     roleReview: entry.roleReview ?? null,
     node: entry.node,
   };
-  return extra ? { ...out, ...extra } : out;
-}
-
-/** The adoption record a row is carrying, in the shape the Portal renders. */
-function publicAdoption(row) {
-  if (!row) return null;
-  const at = row.adopted_at ? new Date(row.adopted_at) : null;
-  const undoUntil = at ? new Date(at.getTime() + ADOPT_UNDO_DAYS * 86_400_000) : null;
-  return {
-    adoptionId: String(row.adoption_id),
-    kind: row.kind || null,
-    confidence: row.confidence == null ? null : Number(row.confidence),
-    adoptedAt: at ? at.toISOString() : null,
-    adoptedBy: row.actor_email || null,
-    undoUntil: undoUntil ? undoUntil.toISOString() : null,
-    canUndo: !!(undoUntil && undoUntil.getTime() > Date.now()),
-  };
+  return out;
 }
 
 /* ==========================================================================
@@ -559,7 +498,32 @@ function publicAdoption(row) {
  * style and setting it picked up since we wrote it survives. A section we did
  * not author is passed straight back, byte for byte (SCOPE §3.3).
  * ======================================================================== */
-function buildNodes(incoming, brand = null) {
+/**
+ * What the WIDGET emitters need to know about this website, gathered once.
+ *
+ * B-168. A free section may now hold any widget the families publish, and some
+ * of those need a plan (`pro`) or one of our products (`ia:<product>`). The
+ * answer to "what does this business HAVE" is the one that already exists —
+ * `siteCapability` asks the site and `allowProFor` falls back to the tier — and
+ * it is handed to `applyFields`, never re-decided inside it.
+ *
+ * `ownedProducts` is deliberately not asked here: `lockSentence` treats null as
+ * "we could not ask", which locks nothing, and refusing a save because an
+ * ownership query was slow is the D-ARION-E defect with a new address. The pane
+ * already gates the ADD with the real ownership, and a widget the site cannot
+ * draw is still refused below, by name.
+ */
+async function widgetContextFor(site, brand = null) {
+  const capability = await getSiteCapability(site);
+  const { allowPro } = allowProFor(site, capability);
+  return {
+    allowPro,
+    iaWidgets: capability.iaWidgets ?? null,
+    emailTo: String(brand?.email || ''),
+  };
+}
+
+function buildNodes(incoming, brand = null, widgetCtx = {}) {
   const errors = [];
   const nodes = [];
 
@@ -575,9 +539,41 @@ function buildNodes(incoming, brand = null) {
     const parsed = parseSectionHandle(node?.settings?._title);
     const kind = parsed?.kind && sectionKindMeta(parsed.kind) ? parsed.kind : null;
 
-    // Custom section, or one of ours with nothing editable in it: carry it
-    // through exactly as it came.
-    if (!kind || !entry.fields || typeof entry.fields !== 'object') {
+    // Nothing was sent to change: carry it through exactly as it came.
+    if (!entry.fields || typeof entry.fields !== 'object') {
+      nodes.push({ handle: node?.settings?._title || null, node });
+      return;
+    }
+
+    /* A SECTION THE CLIENT BUILT ON THEIR OWN WEBSITE (B-168, 2026-09-22).
+     *
+     * It used to be carried through untouched because there was nothing we
+     * could do with it. It is now read into blocks by `elementorReader.js` and
+     * written back by the same file — and `readsAsForeign` is the SAME
+     * predicate `reduceToSectionList` used to decide how to read it, so the
+     * read and the write can never disagree about what this section is.
+     *
+     * A block the author did not touch is written back as the very node it was
+     * read from, so a page opened and published with no change reaches the
+     * website byte for byte as it left it. `test/website-elementor-reader
+     * .test.mjs` asserts that on the dev site's real Privacy Policy page. */
+    if (readsAsForeign(node)) {
+      try {
+        nodes.push({
+          handle: node?.settings?._title || null,
+          node: applyForeignFields(node, entry.fields, widgetCtx),
+        });
+      } catch (err) {
+        if (err instanceof UnsupportedWidgetError || err?.code === 'WIDGET_NOT_ON_PLAN') {
+          errors.push({ field: `sections[${i}]`, message: err.message });
+          return;
+        }
+        throw err;
+      }
+      return;
+    }
+
+    if (!kind) {
       nodes.push({ handle: node?.settings?._title || null, node });
       return;
     }
@@ -598,7 +594,21 @@ function buildNodes(incoming, brand = null) {
       }
       return;
     }
-    nodes.push({ handle: parsed.handle, node: applyFields(node, kind, addressed.fields) });
+    /* A WIDGET THIS SITE CANNOT DRAW IS REFUSED BY NAME, NOT SWALLOWED.
+     * `resolveWidget` throws `UnsupportedWidgetError` with its own plain
+     * sentence — "Available on ARION Standard and above", "we will switch it on
+     * for you" — and that sentence is what the author reads. Anything else is a
+     * real bug and still boils up to the route's 500, because a page that
+     * silently lost a widget is the green-toast-over-a-blank-page failure. */
+    try {
+      nodes.push({ handle: parsed.handle, node: applyFields(node, kind, addressed.fields, widgetCtx) });
+    } catch (err) {
+      if (err instanceof UnsupportedWidgetError || err?.code === 'WIDGET_NOT_ON_PLAN') {
+        errors.push({ field: `sections[${i}]`, message: err.message });
+        return;
+      }
+      throw err;
+    }
   });
 
   return { nodes, errors };
@@ -663,7 +673,7 @@ router.put('/pages/:pageId/sections', async (req, res) => {
     if (await refuseWithoutElementor(res, site)) return undefined;
 
     const brand = await loadBrandContext(pool, { tenantId, siteId });
-    const { nodes, errors } = buildNodes(incoming, brand);
+    const { nodes, errors } = buildNodes(incoming, brand, await widgetContextFor(site, brand));
     if (errors.length > 0) {
       return res.status(422).json({
         error: {
@@ -768,7 +778,7 @@ router.put('/pages/:pageId/draft', async (req, res) => {
     if (!site) return notFound(res, 'That website is not on your account.');
 
     const brand = await loadBrandContext(pool, { tenantId, siteId });
-    const { nodes, errors } = buildNodes(incoming, brand);
+    const { nodes, errors } = buildNodes(incoming, brand, await widgetContextFor(site, brand));
     if (errors.length > 0) {
       return res.status(422).json({
         error: {
@@ -940,7 +950,7 @@ router.post('/pages/:pageId/preview', async (req, res) => {
     // is looking at IS what publishing does. A form with no recipient is
     // refused here too — a preview that shows a form the save would reject
     // would send somebody to Publish for the error.
-    const { nodes, errors } = buildNodes(incoming, brand);
+    const { nodes, errors } = buildNodes(incoming, brand, await widgetContextFor(site, brand));
     if (errors.length > 0) {
       return res.status(422).json({
         error: {
@@ -993,473 +1003,6 @@ router.post('/pages/:pageId/preview', async (req, res) => {
     });
   } catch (err) {
     return boom(res, err, 'arion/pages:preview');
-  }
-});
-
-/* ==========================================================================
- * ADOPTION (Phase 3, decision W-5)
- * --------------------------------------------------------------------------
- * "Never give a client a section they cannot edit" is the 1A rule. Its mirror
- * on the five existing sites is: never leave a client a section they cannot
- * edit if we can honestly offer to change that.
- *
- * The offer is per section, previewed, opt-in, and reversible:
- *
- *   adopt-preview  reads the live page, guesses the archetype, re-emits it,
- *                  renders both sides, and WRITES NOTHING ANYWHERE.
- *   adopt          re-reads the live page (the preview may be minutes old),
- *                  proves the section is still the one that was previewed,
- *                  stores the ORIGINAL BYTES, then writes through the ordinary
- *                  save path — plugin snapshot, Undo ring, cache purge.
- *   undo           splices those exact bytes back at that exact position.
- *
- * There is deliberately no "adopt everything". The Portal offers a checklist
- * and each row is ticked, so every adoption is a decision somebody made about
- * a section they looked at.
- * ======================================================================== */
-
-/**
- * Read the live page and pull out one top-level section by index.
- *
- * Always a fresh read, never the tree the Portal is holding: the client's
- * browser may be minutes behind somebody editing in Elementor, and adoption
- * replaces a whole section.
- */
-async function loadLiveSection(site, pageId, index) {
-  const result = await fetchPageSections(site, pageId);
-  if (!result.ok) return { ok: false, plugin: result };
-  const data = result.data || {};
-  const tree = Array.isArray(data.elementor_data) ? data.elementor_data : [];
-  if (index < 0 || index >= tree.length) {
-    return { ok: false, code: 'SECTION_NOT_FOUND', message: 'That section is not on the page any more.' };
-  }
-  const sections = reduceToSectionList(tree);
-  return { ok: true, data, tree, sections, entry: sections[index], node: tree[index] };
-}
-
-/**
- * The index in the URL is a position in the page: 0..MAX-1, nothing else.
- * Digits only — `Number('')` and `Number(' ')` are both 0, and "adopt the
- * section at position nothing" must not resolve to "adopt the first one".
- */
-function readSectionIndex(raw) {
-  if (!/^\d{1,3}$/.test(String(raw ?? ''))) return null;
-  const n = Number(raw);
-  return n >= 0 && n < MAX_SECTIONS_PER_PAGE ? n : null;
-}
-
-/* ==========================================================================
- * GET /pages/:pageId/adoptions — what has been adopted on this page.
- * ======================================================================== */
-router.get('/pages/:pageId/adoptions', async (req, res) => {
-  const tenantId = req.tenant?.tenantId;
-  const { siteId } = req.params;
-  const pageId = readPageId(req.params.pageId);
-  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
-  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
-
-  try {
-    const pool = await getServicesPool();
-    const site = await loadSite(pool, tenantId, siteId);
-    if (!site) return notFound(res, 'That website is not on your account.');
-
-    const rows = await listAdoptions(pool, { tenantId, siteId, pageId });
-    return res.json({
-      data: {
-        adoptions: rows.map((r) => ({
-          ...publicAdoption(r),
-          handle: r.handle,
-          sectionIndex: r.section_index,
-          status: r.status,
-          revertedAt: r.reverted_at ? new Date(r.reverted_at).toISOString() : null,
-        })),
-        undoDays: ADOPT_UNDO_DAYS,
-      },
-      meta: { site_id: siteId, page_id: pageId, count: rows.length },
-    });
-  } catch (err) {
-    return boom(res, err, 'arion/pages:adoptions');
-  }
-});
-
-/* ==========================================================================
- * POST /pages/:pageId/sections/:index/adopt-preview
- *
- * WRITES NOTHING. Not to the website, not to our own tables. The one test
- * that matters here is the mutation test: break that and the suite goes red.
- * ======================================================================== */
-router.post('/pages/:pageId/sections/:index/adopt-preview', async (req, res) => {
-  const tenantId = req.tenant?.tenantId;
-  const { siteId } = req.params;
-  const pageId = readPageId(req.params.pageId);
-  const index = readSectionIndex(req.params.index);
-  const fixes = (req.body?.fixes && typeof req.body.fixes === 'object' && !Array.isArray(req.body.fixes))
-    ? req.body.fixes : null;
-
-  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
-  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
-  if (index === null) return bad(res, 'BAD_SECTION_INDEX', 'That section reference is not valid.');
-
-  try {
-    const pool = await getServicesPool();
-    const site = await loadSite(pool, tenantId, siteId);
-    if (!site) return notFound(res, 'That website is not on your account.');
-
-    const live = await loadLiveSection(site, pageId, index);
-    if (!live.ok) {
-      if (live.plugin) return pluginFailure(res, live.plugin, 'reading that section');
-      return bad(res, live.code, live.message);
-    }
-    if (live.entry.editable) {
-      return bad(res, 'ALREADY_EDITABLE', 'You can already edit that section here.');
-    }
-
-    const capability = await getSiteCapability(site);
-    const { allowPro } = allowProFor(site, capability);
-    const analysis = analyseSection(live.node, { allowPro });
-    const brand = await loadBrandContext(pool, { tenantId, siteId });
-
-    if (!analysis.adoptable) {
-      // Not an error — this is the honest answer, and the Portal shows it as
-      // the reason the row stays greyed. 200 with adoptable:false.
-      return res.json({
-        data: {
-          adoptable: false,
-          reason: analysis.reason,
-          reasonText: analysis.reasonText,
-          kind: analysis.kind,
-          kindLabel: analysis.label,
-          confidence: analysis.confidence,
-          confidenceLabel: analysis.confidenceLabel,
-          unmapped: analysis.unmapped,
-          fingerprint: sectionFingerprint(live.node),
-          html: null,
-          saved: false,
-        },
-        meta: { site_id: siteId, page_id: pageId, index, min_confidence: ADOPT_MIN_CONFIDENCE },
-      });
-    }
-
-    const built = buildAdoptedSection({ analysis, brand, blockId: crypto.randomUUID(), fixes });
-    if (!built.ok) return bad(res, built.code, built.message, built.errors ? { errors: built.errors } : {});
-
-    const html = renderAdoptionPreviewHtml({
-      node: live.node,
-      kind: built.kind,
-      fields: built.fields,
-      kindLabel: analysis.label,
-      warnings: analysis.warnings,
-      tools: previewTools,
-    }, brand);
-
-    return res.json({
-      data: {
-        adoptable: true,
-        kind: built.kind,
-        kindLabel: analysis.label,
-        why: analysis.why,
-        confidence: analysis.confidence,
-        confidenceLabel: analysis.confidenceLabel,
-        warnings: analysis.warnings,
-        unmapped: analysis.unmapped,
-        // What the client still has to fill in before this can be published —
-        // a picture's description, most often. The Portal renders one input
-        // per entry and sends them back as `fixes`.
-        needsInput: analysis.needsInput,
-        fields: built.fields,
-        dropped: built.dropped,
-        fingerprint: sectionFingerprint(live.node),
-        html,
-        /** Nothing has been written. The Portal shows this, and T-rows prove it. */
-        saved: false,
-      },
-      meta: { site_id: siteId, page_id: pageId, index, min_confidence: ADOPT_MIN_CONFIDENCE },
-    });
-  } catch (err) {
-    return boom(res, err, 'arion/pages:adopt-preview');
-  }
-});
-
-/* ==========================================================================
- * POST /pages/:pageId/sections/:index/adopt — do it.
- * Body: { fingerprint, fixes? }
- * ======================================================================== */
-router.post('/pages/:pageId/sections/:index/adopt', async (req, res) => {
-  const tenantId = req.tenant?.tenantId;
-  const { siteId } = req.params;
-  const pageId = readPageId(req.params.pageId);
-  const index = readSectionIndex(req.params.index);
-  const fingerprint = String(req.body?.fingerprint || '').trim();
-  const fixes = (req.body?.fixes && typeof req.body.fixes === 'object' && !Array.isArray(req.body.fixes))
-    ? req.body.fixes : null;
-
-  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
-  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
-  if (index === null) return bad(res, 'BAD_SECTION_INDEX', 'That section reference is not valid.');
-  // The fingerprint comes from the preview the client just looked at. Without
-  // it we would be adopting "whatever is at position 3 right now", which is a
-  // different section from the one they said yes to if anything moved.
-  if (!fingerprint) {
-    return bad(res, 'PREVIEW_REQUIRED', 'Have a look at the before-and-after first, then tap again.');
-  }
-
-  try {
-    const pool = await getServicesPool();
-    const site = await loadSite(pool, tenantId, siteId);
-    if (!site) return notFound(res, 'That website is not on your account.');
-
-    if (await refuseWithoutElementor(res, site)) return undefined;
-
-    const live = await loadLiveSection(site, pageId, index);
-    if (!live.ok) {
-      if (live.plugin) return pluginFailure(res, live.plugin, 'reading that section');
-      return bad(res, live.code, live.message);
-    }
-    if (live.entry.editable) {
-      return bad(res, 'ALREADY_EDITABLE', 'You can already edit that section here.');
-    }
-    if (sectionFingerprint(live.node) !== fingerprint) {
-      return res.status(409).json({
-        error: {
-          code: 'SECTION_CHANGED',
-          message: 'This section has changed on your website since you looked at it, so we have not '
-            + 'touched it. Open the before-and-after again and it will show you what is there now.',
-          status: 409,
-        },
-      });
-    }
-
-    const capability = await getSiteCapability(site);
-    const { allowPro } = allowProFor(site, capability);
-    const analysis = analyseSection(live.node, { allowPro });
-    if (!analysis.adoptable) {
-      return bad(res, 'NOT_ADOPTABLE', analysis.reasonText
-        || 'We cannot take charge of that section, so it is exactly as it was.');
-    }
-
-    const brand = await loadBrandContext(pool, { tenantId, siteId });
-    const adoptionId = crypto.randomUUID();
-    // `validate: true` only on the write path — the preview deliberately shows
-    // a section that is not yet publishable so the client can see what it needs.
-    const built = buildAdoptedSection({
-      analysis, brand, blockId: adoptionId, fixes, validate: true,
-    });
-    if (!built.ok) {
-      const status = built.code === 'CONTENT_NOT_VALID' ? 422 : 400;
-      return res.status(status).json({
-        error: { code: built.code, message: built.message, status },
-        ...(built.errors ? { errors: built.errors } : {}),
-      });
-    }
-
-    // A form's recipient, before anything is written — the same fail-loud rule
-    // the ordinary save obeys. A form that cannot be addressed is a lead in
-    // the bin, not a validation nicety (SCOPE §2.5).
-    const addressed = withFormRecipient(built.kind, built.fields, brand);
-    if (!addressed.ok) {
-      return res.status(422).json({
-        error: { code: 'NO_FORM_RECIPIENT', message: addressed.message, status: 422 },
-      });
-    }
-
-    /* --- the way back goes in FIRST -------------------------------------
-     * The plugin's Undo ring is whole-page, twenty deep and shared with every
-     * other save, so it cannot answer "put this one section back a fortnight
-     * later". This row can, and it is written before the page is touched: a
-     * section must never reach the website without its original bytes already
-     * stored (migration 061 explains the whole of it).
-     * ------------------------------------------------------------------- */
-    try {
-      await recordAdoption(pool, {
-        adoptionId, tenantId, siteId, pageId, sectionIndex: index,
-        handle: built.handle, kind: built.kind, confidence: analysis.confidence,
-        originalNode: live.node, adoptedNode: built.node,
-        unmapped: analysis.unmapped,
-        actorEmail: req.user?.email || null,
-      });
-    } catch (err) {
-      if (err instanceof AdoptionTooBigError) {
-        return bad(res, 'SECTION_TOO_BIG',
-          'That section is too big for us to keep a copy of, so we have not changed it. '
-          + 'Ask us to look at it instead.');
-      }
-      console.error('[arion/pages:adopt] could not store the way back:', err);
-      return res.status(500).json({
-        error: {
-          code: 'ADOPT_NOT_RECORDED',
-          message: 'We could not store a copy of this section to undo from, so we have not changed it.',
-          status: 500,
-        },
-      });
-    }
-
-    /* --- then the ordinary save path, unchanged --------------------------- */
-    const nodes = live.tree.map((node, i) => (
-      i === index
-        ? { handle: built.handle, node: built.node }
-        : { handle: node?.settings?._title || null, node }
-    ));
-
-    const result = await writePageSections(site, pageId, { sections: nodes });
-    if (!result.ok || result.data?.success === false) {
-      // The write did not land, so the adoption did not happen. Retire the
-      // record rather than leave a row claiming a section was adopted.
-      await markReverted(pool, { tenantId, siteId, adoptionId }).catch(() => {});
-      return pluginFailure(res, { ...result, ok: false, error: result.error || 'plugin_rejected' },
-        'taking charge of that section');
-    }
-
-    const purge = await pluginPost(site, '/purge-cache', {});
-
-    // Read it back through the ordinary read, and prove the thing we wanted
-    // actually appeared (feedback_assert_presence_not_just_absence).
-    const [entry] = reduceToSectionList([built.node]);
-
-    return res.status(201).json({
-      data: {
-        adoptionId,
-        pageId,
-        index,
-        kind: built.kind,
-        handle: built.handle,
-        confidence: analysis.confidence,
-        section: publicSection({ ...entry, index }, {
-          adoptable: false,
-          adoptReason: null,
-          adoptReasonText: null,
-          fingerprint: sectionFingerprint(built.node),
-          adoption: publicAdoption({
-            adoption_id: adoptionId,
-            kind: built.kind,
-            confidence: analysis.confidence,
-            adopted_at: new Date(),
-            actor_email: req.user?.email || null,
-          }),
-        }),
-        undoDays: ADOPT_UNDO_DAYS,
-        sectionsWritten: nodes.length,
-        cachePurged: !!purge.ok,
-        undoCount: Number(result.data?.snapshot_count || 0),
-      },
-      meta: { site_id: siteId },
-    });
-  } catch (err) {
-    return boom(res, err, 'arion/pages:adopt');
-  }
-});
-
-/* ==========================================================================
- * POST /pages/:pageId/adoptions/:adoptionId/undo — put the original back.
- *
- * Byte-identical. Not "something like it" — the stored JSON is spliced back in
- * at the position the adopted section now occupies, and the test asserts the
- * restored slice equals the original slice exactly.
- * ======================================================================== */
-router.post('/pages/:pageId/adoptions/:adoptionId/undo', async (req, res) => {
-  const tenantId = req.tenant?.tenantId;
-  const { siteId, adoptionId } = req.params;
-  const pageId = readPageId(req.params.pageId);
-  if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
-  if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
-  if (!/^[0-9a-f-]{36}$/i.test(String(adoptionId || ''))) {
-    return bad(res, 'BAD_ADOPTION_ID', 'That reference is not valid.');
-  }
-
-  try {
-    const pool = await getServicesPool();
-    const site = await loadSite(pool, tenantId, siteId);
-    if (!site) return notFound(res, 'That website is not on your account.');
-
-    const row = await getAdoption(pool, { tenantId, siteId, adoptionId });
-    if (!row || Number(row.page_id) !== pageId) {
-      return notFound(res, 'We have no record of taking charge of that section.');
-    }
-    if (row.status !== 'adopted') {
-      return res.status(409).json({
-        error: {
-          code: 'ALREADY_UNDONE',
-          message: 'That section has already been put back the way it was.',
-          status: 409,
-        },
-      });
-    }
-    const adoptedAt = new Date(row.adopted_at);
-    const expires = adoptedAt.getTime() + ADOPT_UNDO_DAYS * 86_400_000;
-    if (Number.isFinite(expires) && expires < Date.now()) {
-      return res.status(409).json({
-        error: {
-          code: 'UNDO_WINDOW_CLOSED',
-          message: `You can put a section back the way it was for ${ADOPT_UNDO_DAYS} days. `
-            + 'That window has passed, so ask us if you need it back.',
-          status: 409,
-        },
-      });
-    }
-
-    let original;
-    try {
-      original = JSON.parse(row.original_json);
-    } catch {
-      return res.status(500).json({
-        error: {
-          code: 'ORIGINAL_UNREADABLE',
-          message: 'We could not read the copy we kept, so nothing was changed. Please tell us about this.',
-          status: 500,
-        },
-      });
-    }
-
-    const read = await fetchPageSections(site, pageId);
-    if (!read.ok) return pluginFailure(res, read, 'reading that page');
-    const tree = Array.isArray(read.data?.elementor_data) ? read.data.elementor_data : [];
-
-    // Find the adopted section by its HANDLE first — the client may have
-    // reordered the page since — and only fall back to the index it had.
-    let at = tree.findIndex((n) => n?.settings?._title === row.handle);
-    if (at < 0 && Number(row.section_index) < tree.length) {
-      const candidate = tree[Number(row.section_index)];
-      if (candidate?.settings?._title === row.handle) at = Number(row.section_index);
-    }
-    if (at < 0) {
-      return res.status(409).json({
-        error: {
-          code: 'ADOPTED_SECTION_GONE',
-          message: 'That section is not on the page any more, so there is nothing to put back. '
-            + 'Use Undo last change if you have just removed it.',
-          status: 409,
-        },
-      });
-    }
-
-    const nodes = tree.map((node, i) => (
-      i === at
-        ? { handle: original?.settings?._title || null, node: original }
-        : { handle: node?.settings?._title || null, node }
-    ));
-
-    const result = await writePageSections(site, pageId, { sections: nodes });
-    if (!result.ok || result.data?.success === false) {
-      return pluginFailure(res, { ...result, ok: false, error: result.error || 'plugin_rejected' },
-        'putting that section back');
-    }
-
-    const moved = await markReverted(pool, { tenantId, siteId, adoptionId });
-    const purge = await pluginPost(site, '/purge-cache', {});
-
-    return res.json({
-      data: {
-        adoptionId,
-        pageId,
-        index: at,
-        restored: true,
-        recordUpdated: moved === 1,
-        cachePurged: !!purge.ok,
-        undoCount: Number(result.data?.snapshot_count || 0),
-      },
-      meta: { site_id: siteId },
-    });
-  } catch (err) {
-    return boom(res, err, 'arion/pages:adopt-undo');
   }
 });
 
@@ -2611,7 +2154,18 @@ router.post('/sections/swap', async (req, res) => {
       });
     }
 
-    const node = applyFields(built.node, kind, fields);
+    let node;
+    try {
+      node = applyFields(built.node, kind, fields, {
+        allowPro, iaWidgets: capability.iaWidgets ?? null, emailTo: String(brand?.email || ''),
+      });
+    } catch (err) {
+      // A widget this site cannot draw, named. Same rule as `buildNodes`.
+      if (err instanceof UnsupportedWidgetError || err?.code === 'WIDGET_NOT_ON_PLAN') {
+        return bad(res, 'WIDGET_NOT_ON_PLAN', err.message);
+      }
+      throw err;
+    }
     const [entry] = reduceToSectionList([node]);
     if (!entry?.editable) {
       return bad(res, 'SECTION_NOT_EDITABLE',
@@ -2927,6 +2481,6 @@ export const __test__ = {
   publicPageSettings, publicTemplates, publicSeo, publicUsage, TEMPLATE_LABELS, SEO_LIMITS,
   TOP_LEVEL_EL_TYPES, aiFailure, withFormRecipient, publicMediaItem,
   syncBookingButton, bookingPushed, BOOKING_PUSH_TTL_MS,
-  readSectionIndex, publicSection, publicAdoption, loadLiveSection,
+  publicSection,
 };
 

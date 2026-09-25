@@ -18,9 +18,11 @@ export const MAXIMAL_CONTAINER = {
   id: 'pin-row',
   type: 'container',
   layout: 'row',
+  direction: 'row-reverse',
   width: 'full',
+  contentWidthSize: 80,
   htmlTag: 'section',
-  justify: 'space-between',
+  justify: 'space-evenly',
   align: 'center',
   wrap: 'wrap',
   flex_size: 48,
@@ -28,23 +30,84 @@ export const MAXIMAL_CONTAINER = {
   flex_shrink: 0,
   alignSelf: 'stretch',
   order: 'start',
-  tablet: { layout: 'column', justify: 'center', align: 'flex-start', wrap: 'nowrap' },
+  tablet: {
+    layout: 'column', direction: 'column-reverse', justify: 'center', align: 'flex-start',
+    wrap: 'nowrap', contentWidthSize: 70, width: 'full',
+  },
   phone: { layout: 'column', justify: 'flex-start', align: 'stretch', wrap: 'wrap', columns: 1 },
   style: {
     padding: { top: 64, right: 20, bottom: 64, left: 20 },
     margin: { top: 0, right: 0, bottom: 24, left: 0 },
     gap: 24,
+    /* THE ROW HALF OF THE GAPS CONTROL (B-168, family F0). With it set, the
+       chain is UNLINKED and the emitter writes two numbers; without it, one
+       answers for both. Both paths are exercised — the grid below is linked. */
+    rowGap: 12,
     minHeight: 320,
-    background: '#F4F7F8',
     border: { style: 'solid', width: 1, color: '#DCE4E8' },
     radius: 10,
     shadow: 'strong',
     // All three "hide on this device" flags, because each is its own control.
     hidden: true,
-    tablet: { padding: { top: 40, right: 16, bottom: 40, left: 16 }, gap: 16, minHeight: 240, hidden: true },
-    phone: { padding: { top: 24, right: 12, bottom: 24, left: 12 }, gap: 12, minHeight: 180, hidden: true },
+    /* THE REST OF THE REFERENCE EDITOR'S CONTAINER PANEL (B-168, family F0).
+       Everything an author can now set on a box, so the pin extracts — and the
+       test asserts against — the keys the emitter can actually produce. */
+    contentWidth: 'full',
+    width: 80,
+    overflow: 'hidden',
+    background: {
+      type: 'classic', color: '#F4F7F8', image: 'https://example.invalid/bg.png',
+      position: 'top center', repeat: 'no-repeat', size: 'cover',
+    },
+    overlay: {
+      type: 'gradient', color: '#0B1C24', colorB: '#0C4A60', gradient: 'linear', angle: 135,
+      image: 'https://example.invalid/overlay.png', opacity: 0.4, blend: 'multiply',
+    },
+    shapeTop: {
+      shape: 'waves', color: '#FFFFFF', height: 80, width: 120,
+      flip: true, invert: true, aboveContent: true,
+    },
+    shapeBottom: { shape: 'tilt', color: '#F4F7F8', height: 60, width: 100 },
+    alignSelf: 'center',
+    order: 2,
+    selfWidth: 48,
+    position: 'absolute',
+    zIndex: 5,
+    cssId: 'prices',
+    cssClasses: 'tight two-up',
+    customCss: 'selector { outline: none }',
+    sticky: 'top',
+    stickyOn: ['desktop', 'tablet', 'phone'],
+    stickyOffset: 16,
+    tablet: {
+      padding: { top: 40, right: 16, bottom: 40, left: 16 },
+      gap: 16, rowGap: 8, minHeight: 240, hidden: true,
+      overflow: 'auto', zIndex: 4, alignSelf: 'start', order: 1,
+    },
+    phone: {
+      padding: { top: 24, right: 12, bottom: 24, left: 12 },
+      gap: 12, minHeight: 180, hidden: true,
+      overflow: 'hidden', zIndex: 3, alignSelf: 'end', order: 3,
+    },
   },
 };
+
+/**
+ * THE SECOND BACKGROUND SHAPES, which the maximal box cannot hold at once.
+ *
+ * A background is ONE of four, so a single node can only exercise one of them.
+ * These three are run through the emitter by the extract script and the pin
+ * test in exactly the same way, so `background_gradient_type`,
+ * `background_video_link` and `background_slideshow_gallery` are pinned rather
+ * than being three keys nobody checks.
+ */
+export const BACKGROUND_VARIANTS = [
+  { type: 'gradient', color: '#0B1C24', colorB: '#0C4A60', gradient: 'radial', angle: 45 },
+  { type: 'video', color: '#0B1C24', videoUrl: 'https://example.invalid/film.mp4', image: 'https://example.invalid/still.png' },
+  { type: 'slideshow', color: '#0B1C24', images: ['https://example.invalid/a.png', 'https://example.invalid/b.png'] },
+].map((background, i) => ({
+  id: `pin-bg-${i}`, type: 'container', layout: 'column', style: { background },
+}));
 
 /** The grid's own four, which a row never emits. */
 export const MAXIMAL_GRID = {
@@ -52,7 +115,11 @@ export const MAXIMAL_GRID = {
   type: 'container',
   layout: 'grid',
   columns: 3,
-  phone: { columns: 1 },
+  rows: 2,
+  autoFlow: 'column',
+  phone: { columns: 1, rows: 1, autoFlow: 'row' },
+  // Linked gaps — the other half of the chain the row above unlinks.
+  style: { gap: 24, tablet: { gap: 16 } },
 };
 
 /**
@@ -85,7 +152,11 @@ export function emittedContainerSettings(node) {
     ...Object.keys(layoutToSettings(node, 1)),
     ...Object.keys(layoutToSettings(MAXIMAL_GRID, 1)),
     ...Object.keys(flexItemSettings(node)),
-    ...Object.keys(styleToSettings(node.style)),
+    ...Object.keys(styleToSettings(node.style, { container: true })),
+    /* The three backgrounds one node cannot hold at once (B-168, family F0).
+       Run through the same emitter, so their keys are extracted and pinned
+       exactly like every other one rather than being the three nobody checks. */
+    ...BACKGROUND_VARIANTS.flatMap((v) => Object.keys(styleToSettings(v.style, { container: true }))),
   ]);
   return [...keys].sort();
 }
