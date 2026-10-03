@@ -633,7 +633,12 @@ router.put('/pages/:pageId/sections', async (req, res) => {
   if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
   if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
   if (!incoming) return bad(res, 'NO_SECTIONS', 'The page content did not arrive. Nothing was saved.');
-  if (incoming.length === 0) return bad(res, 'NO_SECTIONS', 'A page needs at least one section.');
+  // An EMPTY DRAFT IS A PAGE (2 Oct 2026). "Start from an empty page" makes a
+  // draft with nothing on it, and its first save is the name typed in the
+  // builder's bar; WordPress saves an empty page without a word. Only
+  // publishing needs something on the page — a blank live page is a mistake
+  // nobody means.
+  if (incoming.length === 0 && status === 'publish') return bad(res, 'NO_SECTIONS', 'Add something to the page before publishing it.');
   if (incoming.length > MAX_SECTIONS_PER_PAGE) {
     return bad(res, 'TOO_MANY_SECTIONS', `A page can hold up to ${MAX_SECTIONS_PER_PAGE} sections.`);
   }
@@ -767,7 +772,8 @@ router.put('/pages/:pageId/draft', async (req, res) => {
 
   if (!tenantId || !siteId) return bad(res, 'BAD_REQUEST', 'We could not work out which website you mean.');
   if (!pageId) return bad(res, 'BAD_PAGE_ID', 'That page reference is not valid.');
-  if (!incoming || incoming.length === 0) return bad(res, 'NO_SECTIONS', 'There is nothing to save yet.');
+  if (!incoming) return bad(res, 'NO_SECTIONS', 'The page content did not arrive. Nothing was saved.');
+  // An empty draft saves (2 Oct 2026): the name alone is worth keeping.
   if (incoming.length > MAX_SECTIONS_PER_PAGE) {
     return bad(res, 'TOO_MANY_SECTIONS', `A page can hold up to ${MAX_SECTIONS_PER_PAGE} sections.`);
   }

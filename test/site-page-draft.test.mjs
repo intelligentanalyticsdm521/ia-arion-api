@@ -18,6 +18,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   wouldUnpublish, UNPUBLISH_REFUSAL, saveDraft, getDraft, clearDraft, draftPageIds, MAX_DRAFT_BYTES,
@@ -99,6 +100,17 @@ function fakePool(answer) {
     },
   };
 }
+
+test('an EMPTY draft saves; only publishing needs something on the page (2 Oct 2026)', () => {
+  // "Start from an empty page" makes a draft with nothing on it, and its first
+  // save is the name typed in the builder. The old guard refused it
+  // ("A page needs at least one section"), so the name never reached the
+  // website.
+  const src = readFileSync(new URL('../routes/arion/pages.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /incoming\.length === 0\) return bad\(res, 'NO_SECTIONS', 'A page needs at least one section\.'\)/);
+  assert.match(src, /incoming\.length === 0 && status === 'publish'\) return bad\(res, 'NO_SECTIONS', 'Add something to the page before publishing it\.'\)/);
+  assert.doesNotMatch(src, /!incoming \|\| incoming\.length === 0\) return bad\(res, 'NO_SECTIONS', 'There is nothing to save yet\.'\)/, 'the local draft takes an empty page too');
+});
 
 test('saveDraft reports the time the row actually took', async () => {
   const pool = fakePool({ recordset: [{ saved_at: '2026-09-17T01:02:03.000Z' }] });
