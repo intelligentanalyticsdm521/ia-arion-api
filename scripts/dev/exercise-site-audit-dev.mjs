@@ -19,7 +19,12 @@
  * DEV ONLY. Refuses when WEBSITE_SITE_NAME is set or the SQL server is not
  * localhost. Speed is "not measured" for a local site: Google cannot reach it.
  *
- *   node scripts/dev/exercise-site-audit-dev.mjs [--url http://localhost:8084] [--server] [--api http://localhost:4003] [--keep]
+ * --owner-tenant <id> registers the throwaway caller for that business (a dev
+ * fixture business with ARION, e.g. the one VITE_DEV_TENANT pins) and also reads
+ * GET /arion/audit/runs and its /file as that business through dev auth;
+ * --other-tenant <id> (another dev business with ARION) proves it cannot see them.
+ *
+ *   node scripts/dev/exercise-site-audit-dev.mjs [--url http://localhost:8084] [--server] [--api http://localhost:4003] [--owner-tenant <id> [--other-tenant <id>]] [--keep]
  */
 import 'dotenv/config';
 import fs from 'node:fs';
@@ -93,7 +98,7 @@ if (!tables.recordset[0].a || !tables.recordset[0].b) { console.error('FAIL: mig
 
 const keyId = `wfk_dev${crypto.randomBytes(6).toString('hex')}`;
 const secret = crypto.randomBytes(24).toString('base64url');
-const ownerTenant = crypto.randomUUID();
+const ownerTenant = arg('owner-tenant', crypto.randomUUID());
 const callerId = await upsertCaller(pool, { keyId, label: 'Exercise caller (dev)', ownerTenantId: ownerTenant, secret, dailyLimit: 5, createdBy: 'exercise-site-audit-dev.mjs' });
 const stored = await pool.request().input('id', sql.UniqueIdentifier, callerId).query('SELECT secret_ciphertext FROM arion.site_audit_caller WHERE caller_id=@id');
 console.log(`caller ${keyId} registered; the stored secret is ${stored.recordset[0].secret_ciphertext.includes(secret) ? 'IN CLEAR (FAIL)' : 'encrypted'}`);
@@ -161,8 +166,26 @@ try {
     check(again.status === 200 && again.json?.status === 'done', `same website again today -> ${again.status} ${again.json?.status} (one audit per website per day)`);
   }
   const rows = await pool.request().input('c', sql.UniqueIdentifier, callerId)
-    .query('SELECT status, score, blob_path, callback_attempts, error_plain FROM arion.site_audit_run WHERE caller_id=@c ORDER BY created_at');
+    .query('SELECT run_id, status, score, blob_path, callback_attempts, error_plain FROM arion.site_audit_run WHERE caller_id=@c ORDER BY created_at');
   for (const r of rows.recordset) console.log(`  row: ${r.status} score=${r.score} attempts=${r.callback_attempts} ${r.blob_path || ''} ${r.error_plain || ''}`);
+  if (arg('owner-tenant')) {
+    const h = { 'x-dev-tenant': ownerTenant };
+    const list = await fetch(`${API}/arion/audit/runs`, { headers: h });
+    const body = await list.json().catch(() => null);
+    const mineRow = body?.data?.find((x) => String(x.run_id).toLowerCase() === String(rows.recordset[0]?.run_id || '').toLowerCase()) || body?.data?.[0];
+    check(list.status === 200 && Array.isArray(body?.data) && body.data.length >= 1, `owner GET /arion/audit/runs -> ${list.status}, ${body?.data?.length ?? 0} run(s)`);
+    if (mineRow?.file_path) {
+      const file = await fetch(`${API}${mineRow.file_path}`, { headers: h });
+      const bytes = Buffer.from(await file.arrayBuffer());
+      check(file.status === 200 && bytes.subarray(0, 4).toString('latin1') === '%PDF', `owner GET ${mineRow.file_path} -> ${file.status} ${file.headers.get('content-type')}`);
+    }
+    if (arg('other-tenant')) {
+      const other = await fetch(`${API}/arion/audit/runs`, { headers: { 'x-dev-tenant': arg('other-tenant') } });
+      const otherBody = await other.json().catch(() => null);
+      check(other.status === 200 && !(otherBody?.data || []).some((x) => rows.recordset.some((r) => String(r.run_id).toLowerCase() === String(x.run_id).toLowerCase())),
+        `another business (${arg('other-tenant')}) reads its list (${other.status}) and these runs are not in it`);
+    }
+  }
 } finally {
   listener.close();
   if (!KEEP) {

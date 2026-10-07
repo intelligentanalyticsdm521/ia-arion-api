@@ -979,3 +979,19 @@ describe('nothing belongs to one business', () => {
     }
   });
 });
+
+describe('page findings read naturally', () => {
+  const page = (over = {}) => ({ checks: { title: 'A good page title', titleOk: true, description: '', descriptionOk: false, h1Ok: true, canonical: true, imagesWithoutAlt: 0, hasBusinessSchema: true, ...over } });
+  const google = (pages) => scoreAudit({ crawl: { pages, sitemapPresent: true, homepage: null, robots: {} } }).sections.find((s) => s.key === 'google').findings;
+  test('one page read: "Your home page has…"', () => {
+    assert.ok(google([page()]).includes('Your home page has no description, so Google writes its own.'));
+  });
+  test('every page: "All 4 of your pages have…"', () => {
+    assert.ok(google([page(), page(), page(), page()]).includes('All 4 of your pages have no description, so Google writes its own.'));
+  });
+  test('some pages: singular and plural verbs', () => {
+    const ok = { description: 'A description long enough to count as a real description for Google.', descriptionOk: true };
+    assert.ok(google([page(), page(ok), page(ok)]).includes('1 of your 3 pages has no description, so Google writes its own.'));
+    assert.ok(google([page(), page(), page(ok)]).includes('2 of your 3 pages have no description, so Google writes its own.'));
+  });
+});
