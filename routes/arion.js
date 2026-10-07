@@ -57,6 +57,7 @@ import siteWebsiteRouter from './arion/website.js';
 import intelligenceRouter from './arion/intelligence.js';
 import contentAgentRouter from './arion/contentAgent.js';
 import arionAgentsRouter from './arion/agents.js';
+import siteAuditsRouter from './arion/siteAudits.js';
 import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } from '../lib/websiteBuilder/costGuard.js';
 import { signOAuthState } from '../lib/oauthState.js';
 import { attachAgencyContext, isAgencyCaller } from '../lib/agency.js';
@@ -128,6 +129,10 @@ router.use('/content-agent', contentAgentRouter);
 // arion.content_agent_tenant_config IS the product and nothing in the codebase
 // could create a row in it. See routes/arion/agents.js.
 router.use('/agents', arionAgentsRouter);
+
+// Website checks run by this business's registered audit tool (routes/audit.js
+// is the public, signed side). Scoped to the caller's owner business in SQL.
+router.use('/audit', siteAuditsRouter);
 
 // Cross-product plugin proxy — used by LUMEN-API for newsletter publishing.
 router.use('/plugin', pluginRouter);

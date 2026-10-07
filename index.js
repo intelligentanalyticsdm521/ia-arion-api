@@ -38,6 +38,7 @@ import provisioningRouter from './routes/provisioning.js';
 import pluginRouter from './routes/plugin.js';
 import argusRouter from './routes/argus.js';
 import intelligenceRouter from './routes/intelligence.js';
+import auditRouter from './routes/audit.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -79,6 +80,11 @@ app.use((req, res, next) => (req.method === 'OPTIONS' ? res.sendStatus(204) : ne
 // Mount the Stripe webhook BEFORE express.json so the router can apply raw-body
 // parsing internally (signature verification needs the byte-exact request body).
 app.use('/onboarding/webhook', onboardingWebhookRouter);
+
+// The website check (any agency's custom action, routes/audit.js). Also BEFORE
+// express.json: POST /audit/runs verifies a signature over the raw bytes, and
+// the router applies express.raw itself. GET /audit/files/:runId is keyed.
+app.use('/audit', auditRouter);
 
 app.use(express.json({ limit: '2mb' }));
 
