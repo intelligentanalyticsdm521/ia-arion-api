@@ -1,10 +1,14 @@
-// Put IA plugin 2.0.1 on each connected site now, over the platform's own
+// Put a built IA plugin zip on each connected site now, over the platform's own
 // Hostinger SSH + wp-cli path (arion-api lib/hostingerSsh.js; credentials come
 // from Key Vault inside the helper and are never printed here).
 //
-//   node push-plugin-2.0.1.mjs            dry run: reads version, status, onboarding flag per site
-//   node push-plugin-2.0.1.mjs --apply    uploads the zip, `wp plugin install <zip> --force`,
-//                                         keeps the plugin active and the onboarding flag as it was
+//   node scripts/_push_plugin_zip_over_ssh.mjs --zip=<path> --want=<version>            dry run: version, status, onboarding flag per site
+//   node scripts/_push_plugin_zip_over_ssh.mjs --zip=<path> --want=<version> --apply    uploads the zip, `wp plugin install <zip> --force`,
+//                                                                                        keeps the plugin active and the onboarding flag as it was
+//   --only=<domain>   one site
+//
+// --want must equal the version inside the zip's plugin header; the script reads
+// the header out of the zip and refuses a mismatch, so a stale zip never ships.
 //
 // Why not `--activate`: wp-cli's activate fires the activation hook, which
 // resets ia_onboarding_complete to 0 on a live client site. A plain --force
@@ -16,8 +20,10 @@ import { runWpCli, runSshCommand, uploadFileViaSftp } from 'file:///C:/dev/iadm/
 
 const APPLY = process.argv.includes('--apply');
 const ONLY = (process.argv.find((a) => a.startsWith('--only=')) || '').slice(7);
-const ZIP = 'C:/Users/brand/AppData/Local/Temp/claude/C--dev-claude-code/bbef46de-a9df-494a-b525-9e6fc924ecfe/scratchpad/plugin/intelligent-analytics-2.0.1.zip';
-const WANT = '2.0.1';
+const arg = (k) => (process.argv.find((a) => a.startsWith(`--${k}=`)) || '').slice(k.length + 3);
+const ZIP = arg('zip');
+const WANT = arg('want');
+if (!ZIP || !WANT) { console.error('usage: node scripts/_push_plugin_zip_over_ssh.mjs --zip=<path> --want=<version> [--apply] [--only=<domain>]'); process.exit(1); }
 const SITES = [
   'briarwoodsmiles.com',
   'rollinginitllc.com',
@@ -28,6 +34,15 @@ const SITES = [
 
 const buf = fs.readFileSync(ZIP);
 const sha = crypto.createHash('sha256').update(buf).digest('hex');
+// The version the zip carries: the plugin header line inside the archive. A zip
+// stores the main file uncompressed only rarely, so read it through unzip -p.
+{
+  const { execFileSync } = await import('node:child_process');
+  const head = execFileSync('unzip', ['-p', ZIP, 'intelligent-analytics/intelligent-analytics.php'], { maxBuffer: 64 * 1024 * 1024 }).toString('utf8').slice(0, 4000);
+  const m = head.match(/^\s*\*?\s*Version:\s*([0-9.]+)/m);
+  if (!m) { console.error('[push] the zip has no plugin Version header; refusing'); process.exit(1); }
+  if (m[1] !== WANT) { console.error(`[push] the zip says version ${m[1]} but --want is ${WANT}; refusing`); process.exit(1); }
+}
 console.log(`[push] zip ${buf.length} bytes sha256=${sha.slice(0, 16)}… want ${WANT} ${APPLY ? 'APPLY' : 'DRY RUN'}`);
 
 const out = (r) => String(r.stdout || '').trim();
@@ -47,7 +62,7 @@ for (const domain of SITES) {
     if (!APPLY) { summary.push(`${domain}: v${before.version} ${before.status}`); continue; }
     if (before.version === WANT) { summary.push(`${domain}: already ${WANT}`); continue; }
 
-    const remote = 'ia-plugin-2.0.1.zip';
+    const remote = `ia-plugin-${WANT}.zip`;
     await uploadFileViaSftp(buf, remote);
     const remoteSha = out(await runSshCommand(`sha256sum ~/${remote} | cut -d' ' -f1`));
     if (remoteSha !== sha) throw new Error(`upload sha mismatch (${remoteSha.slice(0, 12)}… vs ${sha.slice(0, 12)}…)`);
