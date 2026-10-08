@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 
 import { isContentAgentDisabled, KILL_SWITCH_ENV } from '../lib/contentAgent/config.js';
 import { runTick } from '../lib/contentAgent/tick.js';
+import { fakeJobsOn } from './helpers/team-job-fakes.mjs';
 
 // Every business here has ARION on; the product check has its own tests
 // (test/product-ownership.test.mjs). Without this the tick would open the real
@@ -90,13 +91,16 @@ test('a disabled tick reads NOTHING and queues NOTHING', async () => {
 
 test('with the switch off the tick does its normal work', async () => {
   // The mirror of the test above: the guard must not be a permanent stop.
+  // ARGUS employees phase 1: the first thing an enabled tick does is ask which
+  // jobs are on (the platform read, injected here), not read a config table.
   const pool = recordingPool([]);
-  const summary = await runTick({ ownership: ALL_ON, pool, env: {}, notify: async () => [] });
+  const jobsOn = fakeJobsOn({});
+  const summary = await runTick({ ownership: ALL_ON, pool, env: {}, jobsOn, notify: async () => [] });
   assert.equal(summary.disabled, false);
-  assert.match(pool.queries[0], /content_agent_tenant_config/, 'the first thing an enabled tick does is read who is enabled');
-  // config read + the 60% margin report that closes every tick
-  assert.equal(pool.queries.length, 2, `an enabled tick on an empty platform reads twice, got ${pool.queries.length}`);
-  assert.match(pool.queries[1], /content_agent_run_log/, 'the margin report closes the tick');
+  assert.equal(jobsOn.calls.length, 1, 'an enabled tick asks which jobs are on');
+  // nobody has a job on, so the only read is the 60% margin report that closes every tick
+  assert.equal(pool.queries.length, 1, `an enabled tick on an empty platform reads once, got ${pool.queries.length}`);
+  assert.match(pool.queries[0], /content_agent_run_log/, 'the margin report closes the tick');
 });
 
 test('the internal tick endpoint is behind the internal-token gate', async () => {

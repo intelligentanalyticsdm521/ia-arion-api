@@ -31,14 +31,19 @@ router.get('/status', (req, res) => {
   res.json({ status: 'ok', service: 'arion-api', timestamp: new Date().toISOString() });
 });
 
-// POST /internal/gbp-auto-reply-tick — Pro+ auto-reply run, triggered by the
-// arion-func timer. Drafts (metered) + posts replies to unreplied reviews
-// for opted-in sites. Idempotent; capped per site.
+// POST /internal/gbp-auto-reply-tick — the "Google review replies" job,
+// triggered by the arion-func timer. Drafts (metered) a reply to each new
+// review for businesses with the job on; replies wait for the owner unless the
+// job is Automatic and the review is at or above their star line. One reply
+// per review, ever; capped per site.
 router.post('/gbp-auto-reply-tick', requireIngestKey, async (req, res) => {
   try {
     const pool = await getServicesPool();
-    const { runGbpAutoReplyTick } = await import('../lib/gbpAutoReplyRunner.js');
-    const summary = await runGbpAutoReplyTick(pool, (m) => console.log(`[gbp-auto-reply] ${m}`));
+    // ARGUS employees phase 1: the web person's "Google review replies" job.
+    // Same path, so the arion-func timer does not change; the runner now holds
+    // every reply for the owner unless the job is Automatic (lib/gbpReplyRunner.js).
+    const { runReviewReplyTick } = await import('../lib/gbpReplyRunner.js');
+    const summary = await runReviewReplyTick(pool, (m) => console.log(`[review-replies] ${m}`));
     res.json({ ok: true, summary });
   } catch (err) {
     console.error('[internal:gbp-auto-reply-tick]', err);

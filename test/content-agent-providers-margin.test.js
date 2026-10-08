@@ -24,6 +24,7 @@ import {
   checkMargin, marginReport, MARGIN, MAX_COST_TO_PRICE_RATIO,
 } from '../lib/contentAgent/marginMonitor.js';
 import { runTick, haltTenant } from '../lib/contentAgent/tick.js';
+import { fakeJobsOn, fakeBriefFor } from './helpers/team-job-fakes.mjs';
 import { HEALTH } from '../lib/contentAgent/serankingHealth.js';
 import { planSlides, slideHtml, esc, renderCarousel, MAX_RENDER_ATTEMPTS } from '../lib/contentAgent/carouselRenderer.js';
 import { AssetStoreNotConfigured, storeAsset, _resetClient } from '../lib/contentAgent/assetStore.js';
@@ -167,57 +168,58 @@ test('the founder report sorts worst margin first, unpriced on top', async () =>
 });
 
 // --- the tick ---------------------------------------------------------------
+// ARGUS employees phase 1: WHO runs is the jobs that are on (jobsOn), not the
+// old config row; the config row is optional agent state (the sticky breaker).
 
-const cfgRow = (tenantId, extra = {}) => ({
-  tenant_id: tenantId, site_id: null, slots_per_cycle: 1, content_types: 'blog_post',
-  keyword_provider: 'none', authority_stage: 'new', brand_voice: null,
-  protected_client_names_json: null, approved_client_names_json: null,
-  competitor_names_json: null, shipped_features_json: null,
+const agentRow = (tenantId, extra = {}) => ({
+  tenant_id: tenantId, site_id: null, keyword_provider: 'none', authority_stage: 'new',
   halted_at: null, halted_reason: null, ...extra,
 });
+const AGENT_ROWS = 'FROM arion\\.content_agent_tenant_config\\s+WHERE tenant_id IN';
 
-test('the tick runs enabled tenants and skips halted ones without touching them', async () => {
+test('the tick runs businesses with a job on and skips halted ones without touching them', async () => {
   const pool = fakePool({
-    'FROM arion\\.content_agent_tenant_config\\s+WHERE enabled = 1': [
-      cfgRow('t-live'),
-      cfgRow('t-halted', { halted_at: '2026-08-20T00:00:00Z', halted_reason: 'cost ceiling' }),
-    ],
+    [AGENT_ROWS]: [agentRow('t-halted', { halted_at: '2026-08-20T00:00:00Z', halted_reason: 'cost ceiling' })],
     'FROM arion\\.content_agent_tenant_config c': [],
   });
   const ranFor = [];
   const s = await runTick({ ownership: ALL_ON,
     pool,
+    jobsOn: fakeJobsOn({ 't-live': ['arion.blog_posts'], 't-halted': ['arion.blog_posts'] }),
+    briefFor: fakeBriefFor(),
     cycle: async ({ tenantId }) => { ranFor.push(tenantId); return { runId: 'r', status: 'completed', outcome: 'selected', drafted: 1, escalated: 0, costUsd: 0.09, alerts: [] }; },
     doResearch: async () => ({ provider: 'none', capabilities: CAPABILITIES.none, rows: [{ keyword: 'x' }], detail: 'test' }),
   });
-  assert.deepEqual(ranFor, ['t-live'], 'the halted tenant must do NO work');
+  assert.deepEqual(ranFor, ['t-live'], 'the halted business must do NO work');
   assert.equal(s.skippedHalted, 1);
   assert.equal(s.ran, 1);
 });
 
-test('an F8 outcome halts the tenant STICKILY via their config row', async () => {
+test('an F8 outcome halts the business STICKILY, creating its agent row when it has none', async () => {
   const pool = fakePool({
-    'FROM arion\\.content_agent_tenant_config\\s+WHERE enabled = 1': [cfgRow('t-spendy')],
+    [AGENT_ROWS]: [],
     'FROM arion\\.content_agent_tenant_config c': [],
   });
   await runTick({ ownership: ALL_ON,
     pool,
+    jobsOn: fakeJobsOn({ 't-spendy': ['arion.blog_posts'] }),
+    briefFor: fakeBriefFor(),
     cycle: async () => ({ runId: null, status: 'halted', outcome: 'cost_ceiling', drafted: 0, escalated: 0, costUsd: 9, alerts: [{ failure_mode: 'F8', code: 'cycle_ceiling_exceeded', message: 'over' }] }),
     doResearch: async () => ({ provider: 'none', capabilities: CAPABILITIES.none, rows: [], detail: 'test' }),
   });
   const halt = pool.queries.find((q) => /SET halted_at = SYSDATETIMEOFFSET/i.test(q.text));
-  assert.ok(halt, 'the halt must be WRITTEN to the config row, not just reported');
+  assert.ok(halt, 'the halt must be WRITTEN, not just reported');
   assert.match(halt.text, /halted_at IS NULL/i, 'idempotent — never overwrite an existing halt');
+  assert.match(halt.text, /WHEN NOT MATCHED THEN\s+INSERT/i, 'a business with no agent row still trips the breaker (F3)');
 });
 
-test('one tenant\'s failure never costs another tenant\'s cycle', async () => {
-  const pool = fakePool({
-    'FROM arion\\.content_agent_tenant_config\\s+WHERE enabled = 1': [cfgRow('t-boom'), cfgRow('t-fine')],
-    'FROM arion\\.content_agent_tenant_config c': [],
-  });
+test('one business\'s failure never costs another business\'s cycle', async () => {
+  const pool = fakePool({ [AGENT_ROWS]: [], 'FROM arion\\.content_agent_tenant_config c': [] });
   const ranFor = [];
   const s = await runTick({ ownership: ALL_ON,
     pool,
+    jobsOn: fakeJobsOn({ 't-boom': ['arion.blog_posts'], 't-fine': ['arion.blog_posts'] }),
+    briefFor: fakeBriefFor(),
     cycle: async ({ tenantId }) => {
       ranFor.push(tenantId);
       if (tenantId === 't-boom') throw new Error('kaboom');
@@ -225,17 +227,17 @@ test('one tenant\'s failure never costs another tenant\'s cycle', async () => {
     },
     doResearch: async () => ({ provider: 'none', capabilities: CAPABILITIES.none, rows: [{ keyword: 'x' }], detail: 'test' }),
   });
-  assert.ok(ranFor.includes('t-fine'), 'the healthy tenant still ran');
+  assert.ok(ranFor.includes('t-fine'), 'the healthy business still ran');
   assert.equal(s.failed, 1);
   assert.equal(s.ran, 1);
 });
 
 test('margin breaches surface as alerts in the tick summary', async () => {
   const pool = fakePool({
-    'FROM arion\\.content_agent_tenant_config\\s+WHERE enabled = 1': [],
+    [AGENT_ROWS]: [],
     'FROM arion\\.content_agent_tenant_config c': [{ tenant_id: 't-bad', price_usd_monthly: 100, cost_usd: 70 }],
   });
-  const s = await runTick({ ownership: ALL_ON, pool, cycle: async () => ({}), doResearch: async () => ({}) });
+  const s = await runTick({ ownership: ALL_ON, pool, jobsOn: fakeJobsOn({}), briefFor: fakeBriefFor(), cycle: async () => ({}), doResearch: async () => ({}) });
   assert.ok(s.alerts.some((a) => a.failure_mode === 'MARGIN'), 'the 60% breach must be un-missable in the summary');
 });
 

@@ -57,6 +57,7 @@ import siteWebsiteRouter from './arion/website.js';
 import intelligenceRouter from './arion/intelligence.js';
 import contentAgentRouter from './arion/contentAgent.js';
 import arionAgentsRouter from './arion/agents.js';
+import reviewRepliesRouter from './arion/reviewReplies.js';
 import siteAuditsRouter from './arion/siteAudits.js';
 import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } from '../lib/websiteBuilder/costGuard.js';
 import { signOAuthState } from '../lib/oauthState.js';
@@ -82,6 +83,9 @@ router.use('/sites/:siteId/plugin', requireArionTenantAdmin);
 // middleware lets every GET through untouched (reads are always allowed), so an
 // ordinary member can still SEE what the agent did on their own website.
 router.use('/agents', requireArionTenantAdmin);
+// The web person's review replies: approve / skip / run now are owner acts,
+// gated exactly like /agents.
+router.use('/review-replies', requireArionTenantAdmin);
 
 // SE Ranking cost gate (Brandon 2026-08-21): no SE Ranking API call for a site
 // without an active paid SEO add-on. Every /seo/* surface that reaches SE
@@ -129,6 +133,10 @@ router.use('/content-agent', contentAgentRouter);
 // arion.content_agent_tenant_config IS the product and nothing in the codebase
 // could create a row in it. See routes/arion/agents.js.
 router.use('/agents', arionAgentsRouter);
+
+// ARGUS employees phase 1 — Google review replies wait for the owner here
+// (approve re-reads Google first; skip; run now). See routes/arion/reviewReplies.js.
+router.use('/review-replies', reviewRepliesRouter);
 
 // Website checks run by this business's registered audit tool (routes/audit.js
 // is the public, signed side). Scoped to the caller's owner business in SQL.
@@ -6028,53 +6036,11 @@ router.post('/business/reviews/:reviewId/draft-reply', async (req, res) => {
   }
 });
 
-// --- GET /arion/business/reviews/auto-reply?siteId= ---
-router.get('/business/reviews/auto-reply', async (req, res) => {
-  const tenantId = req.tenant.tenantId;
-  const siteId = req.query.siteId;
-  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
-  try {
-    const pool = await getServicesPool();
-    const site = await getSiteForTenant(pool, tenantId, siteId);
-    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    res.json({
-      enabled: site.gbp_auto_reply === true || site.gbp_auto_reply === 1,
-      minStars: site.gbp_auto_reply_min_stars ?? 4,
-      tier: site.arion_tier,
-      allowed: meetsMinTier(site.arion_tier, 'pro'),
-    });
-  } catch (err) {
-    console.error('[arion/business/reviews/auto-reply:get]', err);
-    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
-  }
-});
-
-// --- PUT /arion/business/reviews/auto-reply?siteId= ---  (Pro+)
-router.put('/business/reviews/auto-reply', async (req, res) => {
-  const tenantId = req.tenant.tenantId;
-  const siteId = req.query.siteId;
-  if (!siteId) return res.status(400).json({ error: { code: 'MISSING_PARAM', message: 'siteId required', status: 400 } });
-  const enabled = req.body?.enabled === true;
-  const minStars = Math.max(1, Math.min(5, parseInt(req.body?.minStars, 10) || 4));
-  try {
-    const pool = await getServicesPool();
-    const site = await getSiteForTenant(pool, tenantId, siteId);
-    if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    if (enabled && !meetsMinTier(site.arion_tier, 'pro')) {
-      return res.status(402).json({ error: { code: 'TIER_LIMIT_REACHED', message: 'Auto-reply requires Pro tier or above', status: 402, upgrade: { current_tier: site.arion_tier, required_tier: 'pro' } } });
-    }
-    await pool.request()
-      .input('tenantId', sql.UniqueIdentifier, tenantId)
-      .input('siteId', sql.UniqueIdentifier, siteId)
-      .input('enabled', sql.Bit, enabled ? 1 : 0)
-      .input('minStars', sql.TinyInt, minStars)
-      .query('UPDATE arion.site SET gbp_auto_reply = @enabled, gbp_auto_reply_min_stars = @minStars WHERE tenant_id = @tenantId AND site_id = @siteId');
-    res.json({ enabled, minStars });
-  } catch (err) {
-    console.error('[arion/business/reviews/auto-reply:put]', err);
-    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
-  }
-});
+// GET/PUT /arion/business/reviews/auto-reply were deleted (ARGUS employees
+// phase 1, §G.2). The switch, the mode and "answer N stars and up by itself"
+// are the web person's "Google review replies" job now, written only through
+// platform-api PUT /me/team/jobs/arion.review_replies. The replies themselves
+// wait in Needs you: routes/arion/reviewReplies.js.
 
 // --- GET /arion/business/media?siteId=  (photos) ---
 router.get('/business/media', async (req, res) => {

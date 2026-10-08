@@ -188,7 +188,9 @@ test("the settings route is the only writer of the config row besides the halt",
   const route = fs.readFileSync(path.join(HERE, "..", "routes", "arion", "agents.js"), "utf8");
   assert.match(route, /MERGE arion\.content_agent_tenant_config/, "it must UPSERT — a business with no row is the normal start");
   assert.match(route, /price_usd_monthly/);
-  assert.match(route, /slots_per_cycle/);
+  // ARGUS employees phase 1: the posts per week are the job's (posts_per_week
+  // on core.team_job_setting), so this writer no longer touches slots_per_cycle.
+  assert.doesNotMatch(route, /slots_per_cycle/);
   // A price comes from CONFIGURATION, never from code. `cleanPrice` must never
   // hand back a number of its own: a default here would quietly become the real
   // price for every business nobody had priced (no-fabricated-catalog).
@@ -197,7 +199,7 @@ test("the settings route is the only writer of the config row besides the halt",
   assert.equal(/return\s+\d/.test(cleanPrice[0]), false,
     "cleanPrice returns a numeric literal, which is a fabricated price");
   assert.match(cleanPrice[0], /return null;/, "an empty price stays empty, and that is a real answer");
-  assert.match(route, /clampInt\(p\.posts_per_week, 1, 14/, "an absurd cadence is clamped");
+  assert.doesNotMatch(route, /p\.posts_per_week/, "the cadence is the job's now, refused here with where it lives");
 });
 
 test("an escalated draft is not approvable from the page, and says why", () => {

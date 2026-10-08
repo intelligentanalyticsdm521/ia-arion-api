@@ -158,8 +158,9 @@ test('the tick dispatches its alerts and records the outcome in the summary', as
     request: () => ({ input() { return this; }, async query() { return { recordset: [] }; } }),
   };
   const calls = [];
+  const { fakeJobsOn } = await import('./helpers/team-job-fakes.mjs');
   const summary = await runTick({ ownership: ALL_ON,
-    pool, env: {},
+    pool, env: {}, jobsOn: fakeJobsOn({}),
     notify: async ({ alerts }) => { calls.push(alerts); return [{ tenantId: TENANT_A, outcome: OUTCOME.SENT, count: 1 }]; },
   });
   assert.equal(calls.length, 1, 'the tick must hand its alerts to the notifier exactly once');

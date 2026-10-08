@@ -30,7 +30,13 @@
 import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
-import { recordSignal, SIGNAL_KIND, loadActiveProfile } from '../../lib/contentAgent/styleProfile.js';
+import { loadActiveProfile } from '../../lib/contentAgent/styleProfile.js';
+import { approveOutput, rejectOutput, DecisionRefused } from '../../lib/contentAgent/decisions.js';
+import { handoffSocial } from '../../lib/contentAgent/socialHandoff.js';
+import { businessTimeZone, nextDayAt } from '../../lib/businessTimeZone.js';
+import { briefFor } from '../../lib/teamSeam.js';
+import { checkContext, serviceNames } from '../../lib/jobChecks.js';
+import { personName } from './reviewReplies.js';
 import { checkCycleBudget } from '../../lib/contentAgent/costBreaker.js';
 import { publishApproved, PublishRefused } from '../../lib/contentAgent/publisher.js';
 import { notifyTenantAlerts } from '../../lib/contentAgent/alerts.js';
@@ -113,114 +119,74 @@ router.get('/queue', async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /arion/content-agent/queue/:id/approve
 // ---------------------------------------------------------------------------
-// Body: { body_markdown?, title?, meta_description?, note? }
+// Body: { body_markdown?, title?, meta_description?, note?, scheduled_for? }
 // Supplying edited text marks this 'edited' rather than 'approved'; the edited
 // text is what will publish (AC3) and the delta becomes a style signal.
+//
+// ARGUS employees phase 1 (§G.3): the decision is written by
+// lib/contentAgent/decisions.js approveOutput, the same writer the Automatic
+// path uses. Its UPDATE is guarded on the status it read (finding F2). An
+// ESCALATED draft is approved only with edits that pass every check again; a
+// social post needs `scheduled_for` and is handed to the social scheduler
+// right after the approval (lib/contentAgent/socialHandoff.js).
 router.post('/queue/:id/approve', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { id } = req.params;
-  if (!GUID_RE.test(id)) return fail(res, 400, 'BAD_REQUEST', 'output_id must be a GUID');
+  if (!GUID_RE.test(id)) return fail(res, 400, 'BAD_REQUEST', "That draft isn't waiting for you any more.");
 
-  const reviewer = req.user?.email || req.user?.oid || null;
-  const edited = {
+  const edits = {
     body_markdown: req.body?.body_markdown ?? null,
     title: req.body?.title ?? null,
     meta_description: req.body?.meta_description ?? null,
   };
   const note = req.body?.note ?? null;
+  const actor = personName(req);
 
   try {
     const pool = await getServicesPool();
 
-    // Read the current row, tenant-scoped. This both authorises the action and
-    // gives us the ORIGINAL text to diff against.
-    const cur = await pool.request()
+    // A social post is approved WITH a time, or not at all.
+    const kind = await pool.request()
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('id', sql.UniqueIdentifier, id)
-      .query(`
-        SELECT output_id, title, body_markdown, meta_description, review_status
-          FROM arion.content_agent_output
-         WHERE tenant_id = @tenantId AND output_id = @id`);
-
-    const row = cur.recordset[0];
-    // A row belonging to another tenant is indistinguishable from one that does
-    // not exist. That is deliberate — it leaks nothing.
-    if (!row) return fail(res, 404, 'NOT_FOUND', 'No such queue item for this tenant');
-
-    if (row.review_status === 'escalated') {
-      // AC2: an escalated unit must be cleared deliberately, not approved
-      // through the ordinary path where its flags might go unread.
-      return fail(res, 409, 'ESCALATED',
-        'This unit tripped an escalation rule and cannot be approved from the normal queue. Review its flags and clear it explicitly.');
-    }
-    if (row.review_status !== 'pending') {
-      return fail(res, 409, 'ALREADY_REVIEWED', `Already ${row.review_status}`);
+      .query('SELECT content_type FROM arion.content_agent_output WHERE tenant_id = @tenantId AND output_id = @id');
+    const contentType = kind.recordset[0]?.content_type || null;
+    const isSocial = contentType === 'social_post' || contentType === 'social_carousel';
+    const when = req.body?.scheduled_for ? new Date(req.body.scheduled_for) : null;
+    if (isSocial && (!when || Number.isNaN(when.getTime()))) {
+      return fail(res, 400, 'SCHEDULE_REQUIRED', 'Pick when it should go out.');
     }
 
-    const changed = (a, b) => b != null && String(a || '').trim() !== String(b).trim();
-    const bodyChanged = changed(row.body_markdown, edited.body_markdown);
-    const titleChanged = changed(row.title, edited.title);
-    const metaChanged = changed(row.meta_description, edited.meta_description);
-    const wasEdited = bodyChanged || titleChanged || metaChanged;
-
-    // AC3 — the FINAL column is what the publisher reads. Fall back to the
-    // original when nothing was edited so the publisher has one field to trust.
-    const finalBody = edited.body_markdown ?? row.body_markdown;
-
-    await pool.request()
-      .input('tenantId', sql.UniqueIdentifier, tenantId)
-      .input('id', sql.UniqueIdentifier, id)
-      .input('finalBody', sql.NVarChar(sql.MAX), finalBody)
-      .input('title', sql.NVarChar(500), edited.title ?? row.title)
-      .input('meta', sql.NVarChar(500), edited.meta_description ?? row.meta_description)
-      .input('status', sql.NVarChar(20), wasEdited ? 'edited' : 'approved')
-      .input('note', sql.NVarChar(sql.MAX), note)
-      .input('by', sql.NVarChar(256), reviewer)
-      .query(`
-        UPDATE arion.content_agent_output
-           SET body_markdown_final = @finalBody,
-               title = @title,
-               meta_description = @meta,
-               review_status = @status,
-               review_note = @note,
-               reviewed_by = @by,
-               approved_at = SYSDATETIMEOFFSET()
-         WHERE tenant_id = @tenantId AND output_id = @id`);
-
-    // --- the learning loop ---------------------------------------------------
-    // Every review outcome is evidence. An edit teaches the most, so it is
-    // recorded per changed field rather than as one lump.
-    if (wasEdited) {
-      const fields = [
-        ['body', row.body_markdown, edited.body_markdown, bodyChanged],
-        ['title', row.title, edited.title, titleChanged],
-        ['meta_description', row.meta_description, edited.meta_description, metaChanged],
-      ];
-      for (const [name, before, after, didChange] of fields) {
-        if (!didChange) continue;
-        await recordSignal(pool, {
-          tenantId,
-          outputId: id,
-          signalKind: SIGNAL_KIND.EDITED,
-          fieldName: name,
-          beforeText: before,
-          afterText: after,
-          reviewerNote: note,
-        });
-      }
-    } else {
-      await recordSignal(pool, {
-        tenantId, outputId: id, signalKind: SIGNAL_KIND.APPROVED_AS_IS, reviewerNote: note,
+    let decided;
+    try {
+      decided = await approveOutput(pool, {
+        tenantId, outputId: id, edits, note, actor,
+        loadCheckCtx: async () => {
+          const read = await briefFor(tenantId);
+          return read && read.ok === true && read.brief
+            ? checkContext(read.brief, { shippedFeatures: serviceNames(read.brief) })
+            : null;
+        },
       });
+    } catch (err) {
+      if (err instanceof DecisionRefused) return fail(res, err.status, err.code, err.message);
+      throw err;
+    }
+
+    let handoff = null;
+    if (isSocial) {
+      handoff = await handoffSocial(pool, { tenantId, outputId: id, scheduledFor: when.toISOString(), approvedBy: actor });
     }
 
     res.json({
       data: {
         output_id: id,
-        review_status: wasEdited ? 'edited' : 'approved',
+        review_status: decided.review_status,
         // AC8, stated in the response so a caller cannot assume publication.
         published: false,
-        note: 'Approved. Scheduling to WordPress is a separate step and has not happened yet — POST .../publish when you want it scheduled.',
+        ...(isSocial
+          ? { scheduled: !!handoff?.ok, scheduled_social_post_id: handoff?.post_id || null, words: handoff?.words || null }
+          : { words: 'Approved. It goes on your website when you press "Put it on your website".' }),
       },
     });
   } catch (err) {
@@ -230,42 +196,47 @@ router.post('/queue/:id/approve', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /arion/content-agent/queue/:id/reject
+// POST /arion/content-agent/queue/:id/schedule — "Try again" for a social post
+// whose hand-off to the scheduler failed. Idempotent on the scheduled post id.
+// Body: { scheduled_for? } — default tomorrow 10:00 on the business's clock.
 // ---------------------------------------------------------------------------
+router.post('/queue/:id/schedule', async (req, res) => {
+  const tenantId = req.tenant.tenantId;
+  const { id } = req.params;
+  if (!GUID_RE.test(id)) return fail(res, 400, 'BAD_REQUEST', "That post isn't waiting for you any more.");
+  try {
+    const pool = await getServicesPool();
+    let when = req.body?.scheduled_for ? new Date(req.body.scheduled_for) : null;
+    if (when && Number.isNaN(when.getTime())) return fail(res, 400, 'BAD_REQUEST', 'Pick when it should go out.');
+    if (!when) when = new Date(nextDayAt(await businessTimeZone(pool, tenantId), '10:00'));
+    const out = await handoffSocial(pool, { tenantId, outputId: id, scheduledFor: when.toISOString(), approvedBy: personName(req) });
+    if (!out.ok) return fail(res, 502, 'HANDOFF_FAILED', out.words);
+    res.json({ data: { output_id: id, scheduled_social_post_id: out.post_id, status: out.status || null, words: out.words } });
+  } catch (err) {
+    console.error('[contentAgent:schedule]', err);
+    fail(res, 500, 'INTERNAL_ERROR', err.message);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /arion/content-agent/queue/:id/reject   Body: { reason? }
+// ---------------------------------------------------------------------------
+// "Skip" on the Needs-you card. The reason is optional now (§F.1: "Why?
+// (optional — it helps your team learn)"); the rejection is a learning signal
+// either way.
 router.post('/queue/:id/reject', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const { id } = req.params;
-  if (!GUID_RE.test(id)) return fail(res, 400, 'BAD_REQUEST', 'output_id must be a GUID');
-
-  const reason = String(req.body?.reason || '').trim();
-  // A rejection with no reason teaches the style loop nothing, which is most of
-  // the point of rejecting.
-  if (!reason) return fail(res, 400, 'REASON_REQUIRED', 'A rejection reason is required — it is what the agent learns from');
-
+  if (!GUID_RE.test(id)) return fail(res, 400, 'BAD_REQUEST', "That draft isn't waiting for you any more.");
   try {
     const pool = await getServicesPool();
-    const upd = await pool.request()
-      .input('tenantId', sql.UniqueIdentifier, tenantId)
-      .input('id', sql.UniqueIdentifier, id)
-      .input('reason', sql.NVarChar(sql.MAX), reason)
-      .input('by', sql.NVarChar(256), req.user?.email || req.user?.oid || null)
-      .query(`
-        UPDATE arion.content_agent_output
-           SET review_status = 'rejected', review_note = @reason,
-               reviewed_by = @by, approved_at = NULL
-         WHERE tenant_id = @tenantId AND output_id = @id
-           AND review_status IN ('pending','escalated');
-        SELECT @@ROWCOUNT AS affected;`);
-
-    if (!upd.recordset[0].affected) {
-      return fail(res, 404, 'NOT_FOUND', 'No such reviewable queue item for this tenant');
+    try {
+      const out = await rejectOutput(pool, { tenantId, outputId: id, reason: req.body?.reason ?? null, actor: personName(req) });
+      res.json({ data: out });
+    } catch (err) {
+      if (err instanceof DecisionRefused) return fail(res, err.status, err.code, err.message);
+      throw err;
     }
-
-    await recordSignal(pool, {
-      tenantId, outputId: id, signalKind: SIGNAL_KIND.REJECTED, reviewerNote: reason,
-    });
-
-    res.json({ data: { output_id: id, review_status: 'rejected' } });
   } catch (err) {
     console.error('[contentAgent:reject]', err);
     fail(res, 500, 'INTERNAL_ERROR', err.message);

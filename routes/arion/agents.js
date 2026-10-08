@@ -45,6 +45,8 @@ import { loadArionRuns } from '../../lib/agents/runs.js';
 import { checkMargin } from '../../lib/contentAgent/marginMonitor.js';
 import { runTick } from '../../lib/contentAgent/tick.js';
 import { isContentAgentDisabled, KILL_SWITCH_ENV } from '../../lib/contentAgent/config.js';
+import { jobsOn as seamJobsOn } from '../../lib/teamSeam.js';
+import { CONTENT_JOBS } from '../../lib/jobChecks.js';
 
 const router = Router({ mergeParams: true });
 
@@ -66,14 +68,7 @@ function cleanPrice(v, current) {
   return Math.round(n * 100) / 100;
 }
 
-const CONTENT_TYPES = ['blog_post', 'social_post', 'social_carousel'];
 const PROVIDERS = ['auto', 'se_ranking', 'rankmath', 'none'];
-
-function cleanContentTypes(v, current) {
-  if (v == null) return current;
-  const list = String(v).split(',').map((s) => s.trim()).filter((s) => CONTENT_TYPES.includes(s));
-  return list.length ? [...new Set(list)].join(',') : current;
-}
 
 // ---------------------------------------------------------------------------
 // WHAT A PUT MAY NAME — one list, read by the writer AND by the refusal.
@@ -92,10 +87,15 @@ function cleanContentTypes(v, current) {
 // and the fields are named from these two lists rather than typed into the
 // message — a field can never be accepted and unnamed, or named and unaccepted.
 const SETTINGS_SECTIONS = Object.freeze(['content']);
-const CONTENT_FIELDS = Object.freeze([
-  'enabled', 'posts_per_week', 'price_usd_monthly', 'content_types',
-  'keyword_provider', 'paused',
-]);
+// ARGUS employees phase 1 (§G.9): the on/off, the posts per week and which
+// kinds of post are the web person's JOBS now ("Blog posts", "Social posts"),
+// switched only through platform-api PUT /me/team/jobs/:jobKey. What stays here
+// is founder input and agent state: the price, the keyword source, and
+// clearing a sticky stop.
+const CONTENT_FIELDS = Object.freeze(['price_usd_monthly', 'keyword_provider', 'paused']);
+/** Fields that moved to the job, refused with where they live now. */
+const MOVED_FIELDS = Object.freeze(['enabled', 'posts_per_week', 'content_types']);
+const MOVED_WORDS = "That's set on the job now: ARGUS → Your team → The web person → Jobs.";
 
 /**
  * @returns {string|null} null when the body names something this route can act
@@ -120,6 +120,7 @@ function whyBodyIsUnusable(body) {
     }
     const fields = Object.keys(v);
     if (!fields.length) return `"${section}" named nothing to change. ${shape}`;
+    if (fields.some((f) => MOVED_FIELDS.includes(f))) return MOVED_WORDS;
     const unknownFields = fields.filter((f) => !CONTENT_FIELDS.includes(f));
     if (unknownFields.length) {
       return `"${section}" does not have ${unknownFields.map((f) => `"${f}"`).join(', ')}. ${shape}`;
@@ -135,10 +136,12 @@ router.get('/activity', async (req, res) => {
   try {
     const pool = await getServicesPool();
     const limit = clampInt(req.query.limit, 1, 200, 50);
+    // ?waiting=1 — Needs you: only the rows somebody can act on.
+    const waiting = String(req.query.waiting || '') === '1';
     // { data: { rows, escalated, meta } } — one envelope with the payload INSIDE
     // it, because the Portal's api helper strips a top-level `data` and a sibling
     // `meta` would be dropped on the floor (the payouts-page bug).
-    res.json({ data: await loadArionActivity(pool, req.tenant.tenantId, { limit }) });
+    res.json({ data: await loadArionActivity(pool, req.tenant.tenantId, { limit, waiting }) });
   } catch (err) {
     console.error('[arion/agents:activity]', err);
     fail(res, 500, 'INTERNAL_ERROR', err.message);
@@ -169,8 +172,7 @@ router.get('/runs', async (req, res) => {
 async function readSettings(pool, tenantId) {
   const r = await pool.request()
     .input('t', sql.UniqueIdentifier, tenantId)
-    .query(`SELECT enabled, slots_per_cycle, content_types, keyword_provider,
-                   authority_stage, price_usd_monthly, halted_at, halted_reason
+    .query(`SELECT keyword_provider, authority_stage, price_usd_monthly, halted_at, halted_reason
               FROM arion.content_agent_tenant_config WHERE tenant_id = @t`);
   const c = r.recordset[0] || {};
 
@@ -188,14 +190,13 @@ async function readSettings(pool, tenantId) {
     agents: [
       {
         ...ARION_AGENTS.content,
-        enabled: !!c.enabled,
+        // The on/off and posts per week are the jobs' now (platform-api
+        // GET /me/team/web); this read reports agent state only.
         paused: !!c.halted_at,
         paused_reason: c.halted_reason || null,
         settings: {
-          posts_per_week: c.slots_per_cycle == null ? 1 : Number(c.slots_per_cycle),
           // Dollars per month, or null. Null is a real answer.
           price_usd_monthly: c.price_usd_monthly == null ? null : Number(c.price_usd_monthly),
-          content_types: c.content_types || 'blog_post',
           keyword_provider: c.keyword_provider || 'auto',
           authority_stage: c.authority_stage || 'new',
         },
@@ -245,36 +246,27 @@ router.put('/settings', async (req, res) => {
 
     if (body.content && typeof body.content === 'object') {
       const p = body.content;
-      const enabled = typeof p.enabled === 'boolean' ? p.enabled : cur.enabled;
-      const slots = p.posts_per_week == null
-        ? cur.settings.posts_per_week
-        : clampInt(p.posts_per_week, 1, 14, cur.settings.posts_per_week);
       const price = cleanPrice(p.price_usd_monthly, cur.settings.price_usd_monthly);
-      const types = cleanContentTypes(p.content_types, cur.settings.content_types);
       const provider = PROVIDERS.includes(String(p.keyword_provider))
         ? String(p.keyword_provider) : cur.settings.keyword_provider;
       const clearHalt = p.paused === false;
 
       await pool.request()
         .input('t', sql.UniqueIdentifier, tenantId)
-        .input('enabled', sql.Bit, enabled ? 1 : 0)
-        .input('slots', sql.Int, slots)
         .input('price', sql.Decimal(10, 2), price)
-        .input('types', sql.NVarChar(200), types)
         .input('provider', sql.NVarChar(20), provider)
         .input('clearHalt', sql.Bit, clearHalt ? 1 : 0)
         .query(`
           MERGE arion.content_agent_tenant_config AS tgt
           USING (SELECT @t AS tenant_id) AS s ON tgt.tenant_id = s.tenant_id
           WHEN MATCHED THEN UPDATE SET
-            enabled = @enabled, slots_per_cycle = @slots, price_usd_monthly = @price,
-            content_types = @types, keyword_provider = @provider,
+            price_usd_monthly = @price, keyword_provider = @provider,
             halted_at = CASE WHEN @clearHalt = 1 THEN NULL ELSE tgt.halted_at END,
             halted_reason = CASE WHEN @clearHalt = 1 THEN NULL ELSE tgt.halted_reason END,
             updated_at = SYSDATETIMEOFFSET()
           WHEN NOT MATCHED THEN
-            INSERT (tenant_id, enabled, slots_per_cycle, price_usd_monthly, content_types, keyword_provider)
-            VALUES (@t, @enabled, @slots, @price, @types, @provider);`);
+            INSERT (tenant_id, price_usd_monthly, keyword_provider)
+            VALUES (@t, @price, @provider);`);
     }
 
     res.json({ data: await readSettings(pool, tenantId) });
@@ -300,40 +292,63 @@ router.put('/settings', async (req, res) => {
 // The kill switch is honoured here as well, and answers 503 rather than a
 // cheerful 200 with nothing in it.
 // ---------------------------------------------------------------------------
-router.post('/run', async (req, res) => {
-  const tenantId = req.tenant.tenantId;
-  try {
-    if (isContentAgentDisabled()) {
-      return fail(res, 503, 'AGENT_DISABLED',
-        `${KILL_SWITCH_ENV} is set — the agent did not run, read nothing and spent nothing.`);
-    }
-    const pool = await getServicesPool();
-    const cfg = await pool.request()
-      .input('t', sql.UniqueIdentifier, tenantId)
-      .query('SELECT enabled, halted_at, halted_reason FROM arion.content_agent_tenant_config WHERE tenant_id = @t');
-    const row = cfg.recordset[0];
-    if (!row) {
-      return fail(res, 409, 'NOT_ENABLED', 'This agent has never been switched on for this business. Turn it on first, and set what it costs.');
-    }
-    if (!row.enabled) {
-      return fail(res, 409, 'NOT_ENABLED', 'This agent is switched off for this business.');
-    }
-    if (row.halted_at) {
-      return fail(res, 409, 'HALTED', `It stopped itself on ${row.halted_at}: ${row.halted_reason}. Start it again first.`);
-    }
+/** Factory so a test can hand in fake readers; the default router uses the real ones. */
+export function makeRunHandler({ getPool = getServicesPool, jobsOn = seamJobsOn, tick = runTick } = {}) {
+  return async (req, res) => {
+    const tenantId = req.tenant.tenantId;
+    const jobKey = String(req.body?.job_key || '');
+    try {
+      if (isContentAgentDisabled()) {
+        return fail(res, 503, 'AGENT_DISABLED',
+          `${KILL_SWITCH_ENV} is set, so nothing ran, nothing was read and nothing was spent.`);
+      }
+      if (!CONTENT_JOBS.includes(jobKey)) {
+        return fail(res, 400, 'BAD_REQUEST', `Say which job to run: ${CONTENT_JOBS.join(' or ')}.`);
+      }
+      // Is THIS job on for THIS business? Unreadable = nothing runs (503).
+      const state = await jobsOn([jobKey], { tenantId });
+      if (!state || state.ok !== true || !(state.on instanceof Map)) {
+        return fail(res, 503, 'JOB_STATE_UNREADABLE', "ARGUS couldn't check whether that job is on, so nothing ran. Try again in a minute.");
+      }
+      const mine = state.on.get(String(tenantId).toUpperCase());
+      if (!(mine instanceof Map) || !mine.has(jobKey)) {
+        return fail(res, 409, 'JOB_OFF', 'That job is off. Switch it on first.');
+      }
+      const pool = await getPool();
+      const cfg = await pool.request()
+        .input('t', sql.UniqueIdentifier, tenantId)
+        .query('SELECT halted_at, halted_reason FROM arion.content_agent_tenant_config WHERE tenant_id = @t');
+      const row = cfg.recordset[0];
+      if (row?.halted_at) {
+        return fail(res, 409, 'HALTED', `It stopped itself on ${row.halted_at}: ${row.halted_reason}. Start it again first.`);
+      }
 
-    // The fleet tick, narrowed to one tenant by filtering the config load. One
-    // code path for a scheduled run and a hand-pressed run, so they cannot drift.
-    const summary = await runTick({
-      pool,
-      log: (m) => console.log(`[content-agent:run] ${m}`),
-      tenantFilter: tenantId,
-    });
-    res.json({ data: summary });
-  } catch (err) {
-    console.error('[arion/agents:run]', err);
-    fail(res, 500, 'INTERNAL_ERROR', err.message);
-  }
-});
+      // The fleet tick, narrowed to one business and one job. One code path for
+      // a scheduled run and a hand-pressed run, so they cannot drift.
+      const summary = await tick({
+        pool,
+        log: (m) => console.log(`[content-agent:run] ${m}`),
+        tenantFilter: tenantId,
+        jobKeys: [jobKey],
+        jobsOn,
+        triggerSource: 'manual',
+      });
+      res.json({ data: summary });
+    } catch (err) {
+      console.error('[arion/agents:run]', err);
+      fail(res, 500, 'INTERNAL_ERROR', err.message);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// POST /arion/agents/run { job_key } — "Run it now", THIS business, ONE job.
+// ---------------------------------------------------------------------------
+// It runs the tick for this business only — never the fleet — and only the
+// named job (arion.blog_posts or arion.social_posts). A job that is off is
+// refused (409) rather than quietly run: the switch is the job's, not this
+// button's. The kill switch answers 503 rather than a cheerful 200.
+// ---------------------------------------------------------------------------
+router.post('/run', makeRunHandler());
 
 export default router;

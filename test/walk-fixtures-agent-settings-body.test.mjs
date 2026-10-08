@@ -43,22 +43,29 @@ function loadValidator() {
   assert.ok(end > start, 'whyBodyIsUnusable must still be declared in routes/arion/agents.js');
   const body = src.slice(start, end + 2);
   // eslint-disable-next-line no-new-func
-  return new Function(`${body}\nreturn { whyBodyIsUnusable, SETTINGS_SECTIONS, CONTENT_FIELDS };`)();
+  return new Function(`${body}\nreturn { whyBodyIsUnusable, SETTINGS_SECTIONS, CONTENT_FIELDS, MOVED_FIELDS, MOVED_WORDS };`)();
 }
 
-const { whyBodyIsUnusable, SETTINGS_SECTIONS, CONTENT_FIELDS } = loadValidator();
+const { whyBodyIsUnusable, SETTINGS_SECTIONS, CONTENT_FIELDS, MOVED_FIELDS, MOVED_WORDS } = loadValidator();
 
 test('the shape the Portal actually sends is accepted', () => {
-  assert.equal(whyBodyIsUnusable({ content: { enabled: true } }), null);
-  assert.equal(whyBodyIsUnusable({ content: { posts_per_week: 3 } }), null);
   assert.equal(whyBodyIsUnusable({ content: { price_usd_monthly: 199 } }), null);
   assert.equal(whyBodyIsUnusable({ content: { paused: false } }), null);
   assert.equal(whyBodyIsUnusable({
-    content: {
-      enabled: true, posts_per_week: 2, price_usd_monthly: 49.5,
-      content_types: 'blog_post', keyword_provider: 'auto', paused: false,
-    },
+    content: { price_usd_monthly: 49.5, keyword_provider: 'auto', paused: false },
   }), null);
+});
+
+// ARGUS employees phase 1 (§G.9): the switch, the posts per week and the kinds
+// of post are the web person's jobs now. Sending them here is refused with the
+// sentence that says where they live, never accepted and quietly ignored.
+test('the moved fields are refused with where they live now', () => {
+  assert.deepEqual([...MOVED_FIELDS], ['enabled', 'posts_per_week', 'content_types']);
+  for (const f of MOVED_FIELDS) {
+    assert.equal(whyBodyIsUnusable({ content: { [f]: f === 'content_types' ? 'blog_post' : 1 } }), MOVED_WORDS, f);
+  }
+  assert.equal(MOVED_WORDS, "That's set on the job now: ARGUS → Your team → The web person → Jobs.");
+  for (const f of MOVED_FIELDS) assert.ok(!CONTENT_FIELDS.includes(f), `${f} must not be accepted any more`);
 });
 
 test('THE ONE FROM THE WALK — a body that names no known section is refused, not answered 200', () => {
@@ -85,14 +92,14 @@ test('an empty section, a null section and an array section are all refused', ()
 });
 
 test('a misspelt field INSIDE the section is refused too — the same silent no-op one level down', () => {
-  const why = whyBodyIsUnusable({ content: { posts_per_wek: 5 } });
-  assert.ok(why, '{ content: { posts_per_wek } } used to save nothing and answer 200');
-  assert.match(why, /posts_per_wek/);
-  assert.match(why, /posts_per_week/, 'and the refusal spells the real one out');
+  const why = whyBodyIsUnusable({ content: { keyword_provder: 'auto' } });
+  assert.ok(why, '{ content: { keyword_provder } } used to save nothing and answer 200');
+  assert.match(why, /keyword_provder/);
+  assert.match(why, /keyword_provider/, 'and the refusal spells the real one out');
 });
 
 test('an extra key ALONGSIDE a good section is refused rather than silently dropped', () => {
-  assert.ok(whyBodyIsUnusable({ content: { enabled: true }, enabled: false }));
+  assert.ok(whyBodyIsUnusable({ content: { paused: false }, enabled: false }));
 });
 
 test('the two lists are the writer\'s lists, not a second copy', () => {

@@ -2,8 +2,8 @@
 // ARION has ended (scope SCOPE_ACCESS_FOLLOWS_SUBSCRIPTION_2026-10-07 §4.3).
 //
 // LOAD-BEARING ASSERTIONS:
-//   * product OFF  → the content agent never drafts for that business and GBP
-//     auto-reply never reads (or answers) its reviews; the summary names it;
+//   * product OFF  → the content agent never drafts for that business and the
+//     review replies job never reads (or answers) its reviews; the summary names it;
 //   * product ON   → the same runner still does the work (presence, not just
 //     absence);
 //   * UNREACHABLE  → every business runs exactly as before, reason at error.
@@ -27,7 +27,8 @@ process.env.PLATFORM_SQL_SERVER = '';
 const own = await import('../lib/productOwnership.js');
 const { filterOwned, checkOwnership, clearOwnershipCache } = own;
 const { runTick } = await import('../lib/contentAgent/tick.js');
-const { runGbpAutoReplyTick } = await import('../lib/gbpAutoReplyRunner.js');
+const { fakeJobsOn, fakeBriefFor } = await import('./helpers/team-job-fakes.mjs');
+const { runReviewReplyTick } = await import('../lib/gbpReplyRunner.js');
 
 const ON = '11111111-1111-4111-8111-111111111111';
 const OFF = '22222222-2222-4222-8222-222222222222';
@@ -143,20 +144,17 @@ test('filterOwned: failures are never cached', async () => {
 
 /* ── the content agent ──────────────────────────────────────────────────── */
 
-const cfgRow = (tenantId) => ({
-  tenant_id: tenantId, site_id: null, slots_per_cycle: 1, content_types: 'blog_post',
-  keyword_provider: 'none', authority_stage: 'new', brand_voice: null,
-  protected_client_names_json: null, approved_client_names_json: null,
-  competitor_names_json: null, shipped_features_json: null, halted_at: null, halted_reason: null,
-});
-
+// ARGUS employees phase 1: who runs is the jobs that are on (jobsOn); the
+// ownership check still runs right after, on the same businesses.
 async function contentTick(ownership) {
-  const pool = fakeServices([[/FROM arion\.content_agent_tenant_config\s+WHERE enabled = 1/, [cfgRow(ON), cfgRow(OFF)]]]);
+  const pool = fakeServices([]);
   const ranFor = [];
   const researchedFor = [];
   const logs = [];
   const summary = await runTick({
     pool, env: {}, ownership, log: (m) => logs.push(m), notify: async () => [],
+    jobsOn: fakeJobsOn({ [ON]: ['arion.blog_posts'], [OFF]: ['arion.blog_posts'] }),
+    briefFor: fakeBriefFor(),
     cycle: async ({ tenantId }) => { ranFor.push(tenantId); return { runId: 'r', status: 'completed', outcome: 'selected', drafted: 1, escalated: 0, costUsd: 0, alerts: [] }; },
     doResearch: async (_p, tenantId) => { researchedFor.push(tenantId); return { provider: 'none', rows: [], detail: 'test' }; },
   });
@@ -172,8 +170,8 @@ test('content agent: ARION off → no drafting, no research for that business; t
   assert.deepEqual(researchedFor, [ON]);
   assert.ok(!pool.calls.some((c) => Object.values(c.inputs).some((v) => String(v).toLowerCase() === OFF)), 'no statement for the ended business');
   assert.deepEqual(summary.productOff.skipped.map((s) => s.tenantId), [OFF]);
-  assert.equal(summary.productOff.skipped[0].note, 'ARION has ended for this business, so the content agent did not draft anything. It starts again after a re-subscribe.');
-  assert.ok(logs.some((m) => m.includes(OFF) && m.includes('did not draft anything')));
+  assert.equal(summary.productOff.skipped[0].note, "ARION has ended for this business, so the web person didn't write anything. It starts again after a re-subscribe.");
+  assert.ok(logs.some((m) => m.includes(OFF) && m.includes("didn't write anything")));
 });
 
 test('content agent: platform database unreachable → runs for every business as before', async () => {
@@ -189,25 +187,32 @@ test('content agent: the platform read throws → runs for every business as bef
   assert.deepEqual(ranFor.sort(), [ON, OFF].sort());
 });
 
-/* ── GBP auto-reply ─────────────────────────────────────────────────────── */
+/* ── Google review replies ──────────────────────────────────────────── */
+// ARGUS employees phase 1: the job is on for both businesses (jobsOn); the
+// ownership check still decides, right after, who is read.
 
 const site = (tenantId, n) => ({
   tenant_id: tenantId, site_id: `site-${n}`, arion_tier: 'pro', gbp_location_name: `locations/${n}`,
-  gbp_oauth_token_ref: `ref-${n}`, gbp_auto_reply_min_stars: 4,
+  gbp_oauth_token_ref: `ref-${n}`,
 });
 
 async function gbpTick(ownership) {
-  const pool = fakeServices([[/FROM arion\.site\s+WHERE gbp_auto_reply = 1/, [site(ON, 1), site(OFF, 2)]]]);
+  const pool = fakeServices([
+    [/FROM arion\.site\s+WHERE tenant_id IN/, [site(ON, 1), site(OFF, 2)]],
+    [/INSERT INTO arion\.gbp_reply_run/, [{ run_id: 'run-1' }]],
+  ]);
   const readFor = [];
   const logs = [];
-  const summary = await runGbpAutoReplyTick(pool, (m) => logs.push(m), {
+  const summary = await runReviewReplyTick(pool, (m) => logs.push(m), {
     ownership,
-    getReviews: async (ref) => { readFor.push(ref); return { reviews: [] }; },
+    jobsOn: fakeJobsOn({ [ON]: ['arion.review_replies'], [OFF]: ['arion.review_replies'] }),
+    briefFor: fakeBriefFor(),
+    api: { fetchReviews: async (ref) => { readFor.push(ref); return { reviews: [] }; }, replyToReview: async () => ({}) },
   });
   return { summary, readFor, logs };
 }
 
-test('GBP auto-reply: ARION off → that business\'s reviews are never read or answered', async () => {
+test('review replies: ARION off → that business\'s reviews are never read or answered', async () => {
   const log = quietLog();
   const { summary, readFor, logs } = await gbpTick(ownershipOver(fakePlatform({ rows: STANDARD_ROWS }), log));
   assert.deepEqual(readFor, ['ref-1'], 'the business with ARION is still answered');
@@ -217,20 +222,20 @@ test('GBP auto-reply: ARION off → that business\'s reviews are never read or a
   assert.ok(logs.some((m) => m.includes(OFF)));
 });
 
-test('GBP auto-reply: platform database unreachable → runs for every business as before', async () => {
+test('review replies: platform database unreachable → runs for every business as before', async () => {
   const { summary, readFor } = await gbpTick(ownershipUnreachable(quietLog()));
-  assert.deepEqual(readFor, ['ref-1', 'ref-2']);
+  assert.deepEqual(readFor.sort(), ['ref-1', 'ref-2']);
   assert.equal(summary.productOff.undecided, true);
 });
 
-test('GBP auto-reply: the platform read throws → runs for every business as before', async () => {
+test('review replies: the platform read throws → runs for every business as before', async () => {
   const { readFor } = await gbpTick(ownershipOver(fakePlatform({ fail: 'boom' }), quietLog()));
-  assert.deepEqual(readFor, ['ref-1', 'ref-2']);
+  assert.deepEqual(readFor.sort(), ['ref-1', 'ref-2']);
 });
 
 test('both runners default to the real check (no stub on the seam)', async () => {
   const { readFileSync } = await import('node:fs');
-  for (const f of ['lib/contentAgent/tick.js', 'lib/gbpAutoReplyRunner.js']) {
+  for (const f of ['lib/contentAgent/tick.js', 'lib/gbpReplyRunner.js']) {
     const src = readFileSync(new URL(`../${f}`, import.meta.url), 'utf8');
     assert.match(src, /ownership = checkOwnership/, `${f} must default to checkOwnership`);
   }
@@ -262,9 +267,9 @@ test('content agent, mode unset: the ended business is drafted for exactly as be
   assert.equal(summary.productOff.mode, 'dry_run');
 });
 
-test("GBP auto-reply, mode unset: the ended business's reviews are read exactly as before", async () => {
+test("review replies, mode unset: the ended business's reviews are read exactly as before", async () => {
   const { summary, readFor } = await gbpTick(ownershipWithMode(fakePlatform({ rows: STANDARD_ROWS }), quietLog(), {}));
-  assert.deepEqual(readFor, ['ref-1', 'ref-2']);
+  assert.deepEqual(readFor.sort(), ['ref-1', 'ref-2']);
   assert.deepEqual(summary.productOff.skipped, []);
   assert.deepEqual(summary.productOff.held.map((h) => h.tenantId), [OFF]);
 });
