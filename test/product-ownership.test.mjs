@@ -14,6 +14,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+// Most tests below are about what a timer does ONCE the switch is on: every
+// stop waits for ENTITLEMENT_SYNC_MODE to be exactly 'apply' (decision (a),
+// 2026-10-08). The dry-run half (mode unset: everything runs as before) is at
+// the end of this file and passes the mode explicitly. node --test runs each
+// file in its own process, so this does not leak.
+process.env.ENTITLEMENT_SYNC_MODE = 'apply';
 process.env.SQL_SERVER = '';
 process.env.SERVICES_SQL_SERVER = '';
 process.env.PLATFORM_SQL_SERVER = '';
@@ -230,4 +236,40 @@ test('both runners default to the real check (no stub on the seam)', async () =>
   }
   const lib = readFileSync(new URL('../lib/productOwnership.js', import.meta.url), 'utf8');
   assert.match(lib, /import\("\.\.\/db\/platformPool\.js"\)\)\.getPlatformPool/);
+});
+
+/* ── decision (a): nothing stops before ENTITLEMENT_SYNC_MODE=apply ─────── */
+
+// Production already has rows off (Briarwood Dental, Midwest Ag Services). On
+// push day, with the mode unset, every runner must behave exactly as before
+// the stream. These assert PRESENCE: the ended business IS run for.
+const ownershipWithMode = (platform, log, env) => (product, ids) =>
+  checkOwnership(product, ids, { getPlatformPool: async () => platform, log, env });
+
+test("timerStopsLive: only the exact word 'apply' lets a timer stop", () => {
+  assert.equal(own.timerStopsLive({ ENTITLEMENT_SYNC_MODE: 'apply' }), true);
+  for (const v of [undefined, '', 'dry_run', 'APPLY', ' apply', 'true']) {
+    assert.equal(own.timerStopsLive(v === undefined ? {} : { ENTITLEMENT_SYNC_MODE: v }), false, JSON.stringify(v));
+  }
+});
+
+test('content agent, mode unset: the ended business is drafted for exactly as before, and listed as held', async () => {
+  const { summary, ranFor, researchedFor } = await contentTick(ownershipWithMode(fakePlatform({ rows: STANDARD_ROWS }), quietLog(), {}));
+  assert.deepEqual(ranFor.sort(), [ON, OFF].sort());
+  assert.deepEqual(researchedFor.sort(), [ON, OFF].sort());
+  assert.deepEqual(summary.productOff.skipped, []);
+  assert.deepEqual(summary.productOff.held.map((h) => h.tenantId), [OFF]);
+  assert.equal(summary.productOff.mode, 'dry_run');
+});
+
+test("GBP auto-reply, mode unset: the ended business's reviews are read exactly as before", async () => {
+  const { summary, readFor } = await gbpTick(ownershipWithMode(fakePlatform({ rows: STANDARD_ROWS }), quietLog(), {}));
+  assert.deepEqual(readFor, ['ref-1', 'ref-2']);
+  assert.deepEqual(summary.productOff.skipped, []);
+  assert.deepEqual(summary.productOff.held.map((h) => h.tenantId), [OFF]);
+});
+
+test('mode apply passed explicitly: the same businesses are stopped (the switch is not stuck open)', async () => {
+  const { ranFor } = await contentTick(ownershipWithMode(fakePlatform({ rows: STANDARD_ROWS }), quietLog(), { ENTITLEMENT_SYNC_MODE: 'apply' }));
+  assert.deepEqual(ranFor, [ON]);
 });
