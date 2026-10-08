@@ -29,7 +29,7 @@ import {
 import { decideReply, runReviewReplyTick, markReply } from '../lib/gbpReplyRunner.js';
 import { makeReviewRepliesRouter } from '../routes/arion/reviewReplies.js';
 import { makeRunHandler } from '../routes/arion/agents.js';
-import { fakeEnabled, reviewsApi } from '../lib/gbpFake.js';
+import { fakeEnabled, reviewsApi, NOT_LIVE_WORDS } from '../lib/gbpFake.js';
 import { normaliseContentRow, normaliseReviewReplyRow, loadArionActivity, isWaiting } from '../lib/agents/activity.js';
 import { normaliseRunRow, normaliseReviewRunRow } from '../lib/agents/runs.js';
 import {
@@ -641,7 +641,7 @@ function routeWorld({ draft = {}, google = {}, briefRead = fakeBriefFor(brief({}
   });
   const api = () => ({
     fetchReviews: async () => { calls.fetched += 1; return google.error ? { error: 'down' } : { reviews: [{ reviewId: 'r1', replyComment: google.answered ? 'Already!' : null }] }; },
-    replyToReview: async (_t, _l, id, text) => { calls.posted.push({ id, text }); return google.refuse ? { error: 'no' } : { reply: {} }; },
+    replyToReview: async (_t, _l, id, text) => { calls.posted.push({ id, text }); return google.notLive ? { error: NOT_LIVE_WORDS } : google.refuse ? { error: 'no' } : { reply: {} }; },
   });
   const router = makeReviewRepliesRouter({ getPool: async () => pool, api, briefFor: briefRead, jobsOn: fakeJobsOn({ [T1]: ['arion.review_replies'] }), tick: async () => ({ ran: true }) });
   const call = async (method, url, body = {}) => {
@@ -696,6 +696,14 @@ test('a Google refusal leaves the reply failed with its sentence (502)', async (
   const res = await w.call('post', `/${DID}/approve`);
   assert.equal(res.statusCode, 502);
   assert.ok(w.pool.statements.some((x) => x.inputs.status === 'failed'));
+});
+
+test('on a machine that is not the live service, approve says so and marks nothing failed', async () => {
+  const w = routeWorld({ google: { notLive: true } });
+  const res = await w.call('post', `/${DID}/approve`);
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.error.message, NOT_LIVE_WORDS);
+  assert.equal(w.pool.statements.some((x) => x.inputs.status === 'failed'), false);
 });
 
 test('skip moves only a waiting reply', async () => {
