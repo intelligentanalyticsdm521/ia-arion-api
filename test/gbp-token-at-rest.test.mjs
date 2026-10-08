@@ -55,6 +55,11 @@ test('open fails CLOSED on a tampered value, a wrong key, a missing key or a mal
     [sealed, { GBP_TOKEN_KEY: 'c2hvcnQ=' }, 'a key that is not 32 bytes'],
     [`${SEALED_PREFIX}abc`, env, 'malformed'],
     [`${SEALED_PREFIX}${iv}:${tag}:`, env, 'empty ciphertext'],
+    // GCM would accept a shortened tag unless its length is pinned to 16 bytes
+    [`${SEALED_PREFIX}${iv}:${Buffer.from(tag, 'base64').subarray(0, 12).toString('base64')}:${ct}`, env, 'a tag cut to 12 bytes'],
+    [`${SEALED_PREFIX}${iv}:${Buffer.from(tag, 'base64').subarray(0, 8).toString('base64')}:${ct}`, env, 'a tag cut to 8 bytes'],
+    [`${SEALED_PREFIX}${iv}:${Buffer.from(tag, 'base64').subarray(0, 4).toString('base64')}:${ct}`, env, 'a tag cut to 4 bytes'],
+    [`${SEALED_PREFIX}${Buffer.from(iv, 'base64').subarray(0, 8).toString('base64')}:${tag}:${ct}`, env, 'an iv cut to 8 bytes'],
   ];
   for (const [value, e, label] of bad) {
     assert.throws(() => open(value, e), (err) => err instanceof GbpTokenUnreadable && err.message === UNREADABLE_WORDS, label);
