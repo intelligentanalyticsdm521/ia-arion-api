@@ -874,6 +874,7 @@ const STREAM_FILES = [
   'db/migrations/069_review_replies_and_citations.sql', 'db/migrations/later/070_drop_moved_agent_switches.sql',
   'db/migrations/071_review_reply_posting_and_held_reasons.sql',
   'db/migrations/072_plain_words_for_credit_prices.sql',
+  'db/migrations/073_plain_words_for_remaining_credit_prices.sql',
   'lib/jobChecks.js', 'lib/teamSeam.js', 'lib/businessTimeZone.js', 'lib/gbpReplyRunner.js', 'lib/gbpFake.js', 'lib/gbpAiReply.js',
   'lib/gbpIntake.js', 'lib/argus/suiteCeiling.js',
   'lib/contentAgent/tick.js', 'lib/contentAgent/runner.js', 'lib/contentAgent/drafting.js',
