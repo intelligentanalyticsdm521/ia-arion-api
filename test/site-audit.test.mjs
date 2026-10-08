@@ -1368,7 +1368,7 @@ describe('owner GET', () => {
 const AUDIT_FILES = [
   ...fs.readdirSync(path.join(REPO, 'lib/audit')).map((f) => `lib/audit/${f}`),
   'routes/audit.js', 'routes/arion/siteAudits.js', 'scripts/register-audit-caller.mjs', 'scripts/dev/exercise-site-audit-dev.mjs',
-  'db/migrations/067_site_audit.sql',
+  'db/migrations/067_site_audit.sql', 'db/migrations/068_site_audit_attempts_and_copies.sql',
 ];
 const stripComments = (src) => src
   .replace(/\/\*[\s\S]*?\*\//g, '')
