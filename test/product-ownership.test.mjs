@@ -114,6 +114,20 @@ test('filterOwned: a failed read or an empty answer is undecided and keeps every
   }
 });
 
+test('F11: the service key comes from ARION_SERVICE_KEY, the setting requireArionAccess reads', async () => {
+  const p = fakePlatform({ rows: { [ON]: { on: true } } });
+  const v = await filterOwned(p, 'arion', [ON], { log: quietLog(), env: { ARION_SERVICE_KEY: 'arion_web' } });
+  assert.equal(p.calls[0].inputs.product, 'arion_web');
+  assert.deepEqual(v.owned, [ON]);
+  assert.equal(own.serviceKeyFor('arion', {}), 'arion');
+});
+
+test('the note never says tenant and does not repeat the reason in brackets', () => {
+  const s = own.skipSentence('arion', false, 'the content agent did not draft anything');
+  assert.equal(s, "ARION isn't part of this business's plan, so the content agent did not draft anything.");
+  assert.doesNotMatch(s, /tenant|\(/i);
+});
+
 test('filterOwned: failures are never cached', async () => {
   const bad = fakePlatform({ fail: 'down' });
   await filterOwned(bad, 'arion', [ON], { log: quietLog() });
@@ -152,8 +166,8 @@ test('content agent: ARION off → no drafting, no research for that business; t
   assert.deepEqual(researchedFor, [ON]);
   assert.ok(!pool.calls.some((c) => Object.values(c.inputs).some((v) => String(v).toLowerCase() === OFF)), 'no statement for the ended business');
   assert.deepEqual(summary.productOff.skipped.map((s) => s.tenantId), [OFF]);
-  assert.equal(summary.productOff.skipped[0].note, 'ARION is off for this business (ARION is switched off), so nothing was run for it.');
-  assert.ok(logs.some((m) => m.includes(OFF) && m.includes('nothing was run')));
+  assert.equal(summary.productOff.skipped[0].note, 'ARION has ended for this business, so the content agent did not draft anything. It starts again after a re-subscribe.');
+  assert.ok(logs.some((m) => m.includes(OFF) && m.includes('did not draft anything')));
 });
 
 test('content agent: platform database unreachable → runs for every business as before', async () => {
@@ -193,7 +207,7 @@ test('GBP auto-reply: ARION off → that business\'s reviews are never read or a
   assert.deepEqual(readFor, ['ref-1'], 'the business with ARION is still answered');
   assert.equal(summary.sitesEligible, 1);
   assert.deepEqual(summary.productOff.skipped.map((s) => s.tenantId), [OFF]);
-  assert.match(summary.productOff.skipped[0].note, /^ARION is off for this business/);
+  assert.equal(summary.productOff.skipped[0].note, 'ARION has ended for this business, so no Google review was answered. It starts again after a re-subscribe.');
   assert.ok(logs.some((m) => m.includes(OFF)));
 });
 
