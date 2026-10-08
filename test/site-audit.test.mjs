@@ -16,6 +16,10 @@
  *   A6 one per day         -> "one audit per website per day"
  *   A7 key compare/expiry  -> "file links: ..." tests
  *   A8 no paid SEO import  -> "no lib/audit file imports the paid SEO or intelligence code"
+ *   (fixes of 7 Oct 2026) A3c-e IPv6 as bytes, R1-2 robots matcher, H1-4 HTML
+ *   scanner and entities, C1-2 contact check, B1-3 robots-blocked report,
+ *   W1-2 report words, L1 stable links, S1-4 slots and the cap, T1-3 lost
+ *   runs, D1-2 daily limit, K1 signed run id, P1-2 caller re-registration.
  */
 
 import test, { describe } from 'node:test';

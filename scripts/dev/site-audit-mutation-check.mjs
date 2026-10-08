@@ -178,7 +178,7 @@ const M = [
   { id: 'V13', name: 'no SMS path (an SMS sender added to the runner)', mustFail: 'the visitor is never texted',
     edits: [{ file: 'lib/audit/runner.js', from: 'export const RUN_CAP_MS = 5 * 60 * 1000;', to: 'export const RUN_CAP_MS = 5 * 60 * 1000;\nconst smsSender = null;' }] },
   { id: 'V14', name: 'a refused address is not knocked on twice', mustFail: 'is not retried',
-    edits: [{ file: 'lib/audit/runner.js', from: "retryIf: (err) => !(err instanceof SafeFetchRefused && ['bad_url', 'not_public', 'not_https'].includes(err.code)),", to: 'retryIf: () => true,' }] },
+    edits: [{ file: 'lib/audit/runner.js', from: "retryIf: (err) => !signal?.aborted && !(err instanceof SafeFetchRefused && ['bad_url', 'not_public', 'not_https'].includes(err.code)),", to: 'retryIf: () => true,' }] },
   { id: 'V15', name: 'only the visitor website and business name are kept', mustFail: 'a run is accepted, queued once and started',
     edits: [{ file: 'routes/audit.js', from: "          website: site,\n        }),", to: "          website: site,\n          email: msg.visitor?.email,\n        })," }] },
   { id: 'V16', name: "owner reads are scoped to the caller's owner business", mustFail: "only the caller's owner business sees its runs",
