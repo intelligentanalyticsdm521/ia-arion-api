@@ -394,6 +394,21 @@ describe('SSRF guard', () => {
     await assert.rejects(checkUrl('http://169.254.169.254/latest/meta-data', { env: {} }), (e) => e.code === 'not_public');
   });
 
+  test('IPv4 written as IPv6 (the hex form the URL parser makes) is refused', async () => {
+    // new URL('http://[::ffff:127.0.0.1]/') has hostname [::ffff:7f00:1]: test what the parser really hands over.
+    const typed = ['http://[::ffff:127.0.0.1]/', 'http://[::ffff:169.254.169.254]/', 'http://[::ffff:a9fe:a9fe]/', 'https://[::ffff:10.0.0.5]/',
+      'http://[::127.0.0.1]/', 'http://[::7f00:1]/', 'http://[64:ff9b::a9fe:a9fe]/', 'http://[64:ff9b:1::7f00:1]/', 'http://[2002:7f00:1::]/',
+      'http://[2001::1]/', 'http://[2001:db8::1]/', 'http://[100::1]/', 'http://[fec0::1]/'];
+    for (const t of typed) {
+      const url = normaliseSiteUrl(t);
+      assert.ok(url, `${t} is accepted as a website, so the guard must stop it`);
+      await assert.rejects(checkUrl(url, { env: {} }), (e) => e instanceof SafeFetchRefused && e.code === 'not_public', t);
+    }
+    for (const ip of ['::ffff:7f00:1', '::ffff:a9fe:a9fe', '::ffff:a00:5', '::7f00:1', '64:ff9b::a9fe:a9fe', '2002:7f00:1::']) assert.equal(isBlockedAddress(ip), true, ip);
+    // Presence: a public IPv6 site still passes.
+    assert.equal((await checkUrl('http://[2606:4700::1111]/', { env: {} })).address, '2606:4700::1111');
+  });
+
   test('a name that answers one public and one private address is refused', async () => {
     await assert.rejects(checkUrl('https://split.example/', { lookup: fakeLookup({ 'split.example': [PUBLIC_IP, '192.168.0.9'] }), env: {} }),
       (e) => e.code === 'not_public');
@@ -426,9 +441,13 @@ describe('SSRF guard', () => {
   describe('against a real local server', () => {
     const env = { AUDIT_ALLOW_LOCAL: 'true' };
     let srv;
+    let hits = 0;
     test('setup', async () => {
       const app = express();
       app.get('/redirect-private', (req, res) => res.redirect(302, 'http://internal.example/admin'));
+      app.get('/redirect-mapped-metadata', (req, res) => res.redirect(302, 'http://[::ffff:169.254.169.254]/latest/meta-data'));
+      app.get('/redirect-mapped-private', (req, res) => res.redirect(302, 'https://[::ffff:10.0.0.5]/'));
+      app.get('/internal-only', (req, res) => { hits += 1; res.type('html').send('<title>INTERNAL-ONLY</title>'); });
       app.get('/loop', (req, res) => res.redirect(302, '/loop'));
       app.get('/page', (req, res) => res.type('html').send('<html><title>ok</title></html>'));
       app.get('/hop', (req, res) => res.redirect(301, '/page'));
@@ -441,6 +460,18 @@ describe('SSRF guard', () => {
         safeFetch(`${srv.base}/redirect-private`, { env, lookup: fakeLookup({ 'internal.example': '10.20.30.40' }) }),
         (e) => e instanceof SafeFetchRefused && e.code === 'not_public' && /internal\.example/.test(e.detail),
       );
+    });
+    test('a redirect to a hex-mapped metadata or private address is refused at the hop', async () => {
+      for (const p of ['/redirect-mapped-metadata', '/redirect-mapped-private']) {
+        await assert.rejects(safeFetch(`${srv.base}${p}`, { env }), (e) => e instanceof SafeFetchRefused && e.code === 'not_public' && /->/.test(e.detail), p);
+      }
+    });
+    test('a typed [::ffff:127.0.0.1] website never connects to the loopback server', async () => {
+      const port = new URL(srv.base).port;
+      hits = 0;
+      await assert.rejects(safeFetch(`http://[::ffff:127.0.0.1]:${port}/internal-only`, { env: {} }),
+        (e) => e.code === 'not_public' && /::ffff:7f00:1 ->/.test(e.detail), 'refused for its ADDRESS, not only its port');
+      assert.equal(hits, 0, 'the internal page was never reached');
     });
     test('a safe redirect is followed and recorded', async () => {
       const r = await safeFetch(`${srv.base}/hop`, { env, htmlOnly: true });
