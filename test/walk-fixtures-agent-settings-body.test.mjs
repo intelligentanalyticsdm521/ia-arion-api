@@ -108,7 +108,7 @@ test('the two lists are the writer\'s lists, not a second copy', () => {
   // block reads off `p` must be on the list. This is what stops the refusal
   // sentence and the writer drifting apart.
   const writer = src.slice(src.indexOf("if (body.content && typeof body.content === 'object')"),
-    src.indexOf('res.json({ data: await readSettings(pool, tenantId) });', src.indexOf('router.put')));
+    src.indexOf('res.json({ data: await readSettings(pool, tenantId) });', src.indexOf('export const settingsWriteHandler')));
   assert.ok(writer.length > 200, 'the settings writer block must still be findable');
   for (const f of CONTENT_FIELDS) {
     assert.ok(writer.includes(`p.${f}`), `"${f}" is advertised but never read by the writer`);
@@ -120,9 +120,9 @@ test('the two lists are the writer\'s lists, not a second copy', () => {
 });
 
 test('the route wires the validator in BEFORE it touches the database', () => {
-  const put = src.slice(src.indexOf("router.put('/settings'"));
+  const put = src.slice(src.indexOf('export const settingsWriteHandler'));
   const guard = put.indexOf('whyBodyIsUnusable(body)');
-  const pool = put.indexOf('getServicesPool()');
+  const pool = put.indexOf('await getPool()');
   assert.ok(guard > 0, 'the PUT must call the validator');
   assert.ok(pool > 0);
   assert.ok(guard < pool, 'a body we cannot act on must be refused before a connection is taken');

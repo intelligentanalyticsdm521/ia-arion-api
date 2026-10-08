@@ -76,6 +76,9 @@ export function makeReviewRepliesRouter({
   jobsOn = seamJobsOn,
   briefFor = seamBriefFor,
   tick = runReviewReplyTick,
+  // The checks an edited reply runs again (EDIT_CHECKS); a test hands in one
+  // this runner can't run to prove the refusal names it in plain words.
+  editChecks = EDIT_CHECKS,
 } = {}) {
   const router = Router({ mergeParams: true });
 
@@ -140,7 +143,7 @@ export function makeReviewRepliesRouter({
       if (edited != null && edited.trim() !== String(row.reply_text).trim()) {
         const read = await briefFor(tenantId);
         if (!read || read.ok !== true || !read.brief) return fail(res, 503, 'BRIEF_UNREADABLE', WORDS.briefUnreadable);
-        const checked = runChecks(text, EDIT_CHECKS, checkContext(read.brief, { stars: row.star_rating, reviewText: row.review_text || '' }));
+        const checked = runChecks(text, editChecks, checkContext(read.brief, { stars: row.star_rating, reviewText: row.review_text || '' }));
         if (!checked.ok) return fail(res, 409, 'UNKNOWN_CHECK', RUN_WORDS.unknownCheck(checked.unknown[0]));
         if (checked.fired.length) return fail(res, 409, 'CHECK_FIRED', checked.fired[0].words);
       }

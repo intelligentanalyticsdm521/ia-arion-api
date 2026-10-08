@@ -48,8 +48,6 @@ import { isContentAgentDisabled, KILL_SWITCH_ENV } from '../../lib/contentAgent/
 import { jobsOn as seamJobsOn } from '../../lib/teamSeam.js';
 import { CONTENT_JOBS, dayWords } from '../../lib/jobChecks.js';
 
-const router = Router({ mergeParams: true });
-
 const fail = (res, status, code, message) =>
   res.status(status).json({ error: { code, message, status } });
 
@@ -132,9 +130,9 @@ function whyBodyIsUnusable(body) {
 // ---------------------------------------------------------------------------
 // GET /arion/agents/activity
 // ---------------------------------------------------------------------------
-router.get('/activity', async (req, res) => {
+export const activityHandler = (getPool = getServicesPool) => async (req, res) => {
   try {
-    const pool = await getServicesPool();
+    const pool = await getPool();
     const limit = clampInt(req.query.limit, 1, 200, 50);
     // ?waiting=1 — Needs you: only the rows somebody can act on.
     const waiting = String(req.query.waiting || '') === '1';
@@ -146,21 +144,21 @@ router.get('/activity', async (req, res) => {
     console.error('[arion/agents:activity]', err);
     fail(res, 500, 'INTERNAL_ERROR', SERVER_WORDS);
   }
-});
+};
 
 // ---------------------------------------------------------------------------
 // GET /arion/agents/runs
 // ---------------------------------------------------------------------------
-router.get('/runs', async (req, res) => {
+export const runsHandler = (getPool = getServicesPool) => async (req, res) => {
   try {
-    const pool = await getServicesPool();
+    const pool = await getPool();
     const limit = clampInt(req.query.limit, 1, 100, 20);
     res.json({ data: await loadArionRuns(pool, req.tenant.tenantId, { limit }) });
   } catch (err) {
     console.error('[arion/agents:runs]', err);
     fail(res, 500, 'INTERNAL_ERROR', SERVER_WORDS);
   }
-});
+};
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -206,15 +204,15 @@ async function readSettings(pool, tenantId) {
   };
 }
 
-router.get('/settings', async (req, res) => {
+export const settingsReadHandler = (getPool = getServicesPool) => async (req, res) => {
   try {
-    const pool = await getServicesPool();
+    const pool = await getPool();
     res.json({ data: await readSettings(pool, req.tenant.tenantId) });
   } catch (err) {
     console.error('[arion/agents:settings:get]', err);
     fail(res, 500, 'INTERNAL_ERROR', SERVER_WORDS);
   }
-});
+};
 
 // ---------------------------------------------------------------------------
 // PUT /arion/agents/settings
@@ -229,7 +227,7 @@ router.get('/settings', async (req, res) => {
 // `paused: true`: pausing is what `enabled: false` already means, and two
 // switches for one idea is how they end up disagreeing.
 // ---------------------------------------------------------------------------
-router.put('/settings', async (req, res) => {
+export const settingsWriteHandler = (getPool = getServicesPool) => async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const body = req.body || {};
   if (typeof body !== 'object' || Array.isArray(body)) {
@@ -240,7 +238,7 @@ router.put('/settings', async (req, res) => {
   const why = whyBodyIsUnusable(body);
   if (why) return fail(res, 400, 'BAD_REQUEST', why);
   try {
-    const pool = await getServicesPool();
+    const pool = await getPool();
     const before = await readSettings(pool, tenantId);
     const cur = before.agents[0];
 
@@ -274,7 +272,7 @@ router.put('/settings', async (req, res) => {
     console.error('[arion/agents:settings:put]', err);
     fail(res, 500, 'INTERNAL_ERROR', SERVER_WORDS);
   }
-});
+};
 
 // ---------------------------------------------------------------------------
 // POST /arion/agents/run — "Run it now"
@@ -393,6 +391,18 @@ export function makeRunHandler({ getPool = getServicesPool, jobsOn = seamJobsOn,
 // refused (409) rather than quietly run: the switch is the job's, not this
 // button's. The kill switch answers 503 rather than a cheerful 200.
 // ---------------------------------------------------------------------------
-router.post('/run', makeRunHandler());
+/**
+ * The router, with its pool, job reader and tick handed in (tests pass fakes;
+ * a store that throws must answer SERVER_WORDS, never the exception).
+ */
+export function makeAgentsRouter({ getPool = getServicesPool, jobsOn = seamJobsOn, tick = runTick } = {}) {
+  const router = Router({ mergeParams: true });
+  router.get('/activity', activityHandler(getPool));
+  router.get('/runs', runsHandler(getPool));
+  router.get('/settings', settingsReadHandler(getPool));
+  router.put('/settings', settingsWriteHandler(getPool));
+  router.post('/run', makeRunHandler({ getPool, jobsOn, tick }));
+  return router;
+}
 
-export default router;
+export default makeAgentsRouter();

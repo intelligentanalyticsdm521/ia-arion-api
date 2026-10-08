@@ -1138,6 +1138,104 @@
       ],
       "text": "A recent customer said \"Best lawn service in town, they were on time\" and voted us best in Texas.",
       "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said Best lawn service in town, they were on time, says Top Rated.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\", said Award Winning.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said Best lawn service in town, they were on time, says Voted Best.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"Best lawn service in town, they were on time\" - a happy customer who also called us award winning",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "A recent customer who voted us best in Texas said \"Best lawn service in town, they were on time\"",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers, an award-winning chef, said \"Best lawn service in town, they were on time\"",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "Voted best in Texas, one of our customers said \"Best lawn service in town, they were on time\"",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"Best lawn service in town, they were on time\" - a happy customer, voted best in Texas",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said Best lawn service in town, they were on time, said Pat, voted best.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\" and \"the most trusted crew around\".",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "She said \"Best lawn service in town, they were on time\" - a satisfied client.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\", said Pat Jones.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"Best lawn service in town, they were on time\" - a happy customer. Book your spring cleanup today!",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "Spring is here!\nOne of our customers said \"Best lawn service in town, they were on time\"",
+      "held": false
     }
   ],
   "hold_keyword_cases": {
@@ -1175,5 +1273,46 @@
     "best",
     "so"
   ],
-  "proof_rule": "A claim is allowed when it lies inside one allowed item, or is up to 3 lead-in words (proof_lead_in_words) IN FRONT of whole allowed items with nothing after them but punctuation or who said it (\"- a happy customer\", \"said Pat\"). Words after an allowed item are invented."
+  "proof_rule": "A proof match is judged by the whole sentence it sits in (a line break ends a sentence). Outside the allowed item(s) the only words allowed are: at the start, a subject (proof_subjects) immediately followed by its verb (proof_verbs) with nothing between them, then up to 3 lead-in words (proof_lead_in_words); at the very end, who said it (\"- a happy|satisfied|local|recent customer|client\", or \", said|says|wrote <Name>\" where the name is one or two capitalised words with no word from proof_claim_words). Anything after who said it, before the subject, between subject and verb, or between or after allowed items is invented and held. What is left must lie inside one allowed item, or be the lead-in words followed by whole allowed items.",
+  "proof_subjects": [
+    "one of our customers",
+    "one of our clients",
+    "a customer",
+    "a recent customer",
+    "a client",
+    "a recent client",
+    "our customer",
+    "our client",
+    "they",
+    "he",
+    "she"
+  ],
+  "proof_verbs": [
+    "said",
+    "says",
+    "told us",
+    "wrote"
+  ],
+  "proof_claim_words": [
+    "best",
+    "top",
+    "rated",
+    "award",
+    "winning",
+    "voted",
+    "star",
+    "stars",
+    "number",
+    "one",
+    "first",
+    "trusted",
+    "leading",
+    "certified",
+    "finest",
+    "premier",
+    "guaranteed",
+    "proven",
+    "results",
+    "#1"
+  ]
 }

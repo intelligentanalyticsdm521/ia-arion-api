@@ -120,6 +120,21 @@ test('proof: words AFTER an allowed quote are invented, whatever their number (t
   assert.equal(fired('One of our customers said award winning Best lawn service in town, they were on time.'), true);
 });
 
+test('proof: a claim word after said/says, words after who said it, words between subject and verb are held (the 15:33Z probes)', () => {
+  const allowed = ['Best lawn service in town, they were on time'];
+  const fired = (text) => !!CHECKS.no_invented_proof(text, { approvedProof: allowed });
+  assert.equal(fired('One of our customers said Best lawn service in town, they were on time, says Top Rated.'), true, 'One of our customers said Best lawn service in town, they were on time, says Top Rated.');
+  assert.equal(fired('One of our customers said "Best lawn service in town, they were on time", said Award Winning.'), true, 'One of our customers said "Best lawn service in town, they were on time", said Award Winning.');
+  assert.equal(fired('One of our customers said Best lawn service in town, they were on time, says Voted Best.'), true, 'One of our customers said Best lawn service in town, they were on time, says Voted Best.');
+  assert.equal(fired('"Best lawn service in town, they were on time" - a happy customer who also called us award winning'), true, '"Best lawn service in town, they were on time" - a happy customer who also called us award winning');
+  assert.equal(fired('A recent customer who voted us best in Texas said "Best lawn service in town, they were on time"'), true, 'A recent customer who voted us best in Texas said "Best lawn service in town, they were on time"');
+  assert.equal(fired('One of our customers, an award-winning chef, said "Best lawn service in town, they were on time"'), true, 'One of our customers, an award-winning chef, said "Best lawn service in town, they were on time"');
+  // Still passing: the plain quote, a lead-in, who said it by name.
+  assert.equal(fired('"Best lawn service in town, they were on time" - a happy customer.'), false, '"Best lawn service in town, they were on time" - a happy customer.');
+  assert.equal(fired('A recent customer said it best: Best lawn service in town, they were on time.'), false, 'A recent customer said it best: Best lawn service in town, they were on time.');
+  assert.equal(fired('One of our customers told us Best lawn service in town, they were on time, said Pat.'), false, 'One of our customers told us Best lawn service in town, they were on time, said Pat.');
+});
+
 test('hold words are whole words: praise is never held as a complaint', () => {
   for (const t of C.hold_keyword_cases.hold) assert.ok(HOLD_KEYWORDS.some((k) => holdWordHit(t, k)), `not held: ${t}`);
   for (const t of C.hold_keyword_cases.pass) assert.equal(HOLD_KEYWORDS.find((k) => holdWordHit(t, k)), undefined, `held: ${t}`);

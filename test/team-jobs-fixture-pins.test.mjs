@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import {
   PRICE_RE, OFFER_PATTERNS, SOCIAL_PROOF_PATTERNS, HOLD_KEYWORDS, RANKING_PATTERNS,
   CHECK_WORDS, SUPPORTED_ACTIONS, PLATFORM_CHECKS, RUNNER_REF, CHECKS,
-  PROOF_LEAD_IN_WORDS, PROOF_LEAD_SLACK_WORDS,
+  PROOF_LEAD_IN_WORDS, PROOF_LEAD_SLACK_WORDS, PROOF_SUBJECTS, PROOF_VERBS, PROOF_CLAIM_WORDS,
 } from '../lib/jobChecks.js';
 import { REQUIRED_BRIEF } from '../lib/contentAgent/tick.js';
 
@@ -37,6 +37,12 @@ test('the hold keywords are the fixture\'s', () => {
 test('the proof lead-in words and their limit are the fixture\'s', () => {
   assert.deepEqual([...PROOF_LEAD_IN_WORDS], C.proof_lead_in_words);
   assert.match(C.proof_rule, new RegExp(`up to ${PROOF_LEAD_SLACK_WORDS} lead-in words`));
+});
+
+test('the proof subjects, their verbs and the claim words a name may not hold are the fixture\'s', () => {
+  assert.deepEqual([...PROOF_SUBJECTS], C.proof_subjects);
+  assert.deepEqual([...PROOF_VERBS], C.proof_verbs);
+  assert.deepEqual([...PROOF_CLAIM_WORDS], C.proof_claim_words);
 });
 
 test('"What I never do" is the fixture\'s sentence for every check in the library', () => {
