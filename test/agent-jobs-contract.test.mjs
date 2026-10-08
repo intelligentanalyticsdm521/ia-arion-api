@@ -57,3 +57,17 @@ test('the stream-1 files in this repo name no business (comments out)', () => {
     for (const re of DEFECTS) assert.doesNotMatch(code, re, `${rel}: ${re}`);
   }
 });
+
+// platform-api's validator (lib/team/definition.js varProblem) runs the same
+// cases in its own copy of this fixture: what the job drawer says was saved is
+// what this runner uses. A var with no limits takes no value on either side.
+test('varInLimits agrees with the server on every shared var-limit case (test/fixtures/var-limit-cases.json)', async () => {
+  const { varInLimits } = await import('../lib/team/jobState.js');
+  const at = (name) => new URL(`./fixtures/${name}`, import.meta.url);
+  const text = fs.readFileSync(at('var-limit-cases.json'), 'utf8').split('\r\n').join('\n');
+  const want = fs.readFileSync(at('var-limit-cases.sha256'), 'utf8').trim();
+  assert.equal(crypto.createHash('sha256').update(text).digest('hex'), want, "this copy is platform-api's, byte for byte");
+  const cases = JSON.parse(text).cases;
+  assert.ok(Array.isArray(cases) && cases.length >= 10);
+  for (const c of cases) assert.equal(varInLimits(c.spec, c.value), c.ok, `${c.why}: ${JSON.stringify(c)}`);
+});

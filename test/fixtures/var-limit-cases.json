@@ -1,0 +1,236 @@
+{
+  "about": "The var limits a job setting is held to, as cases (CONTRACT_ARGUS_EMPLOYEES_PHASE1 §C.2, §D.4). platform-api lib/team/definition.js varProblem and the runners' lib/team/jobState.js varInLimits (arion-api, LUMEN) must answer every case the same way, so what the job drawer says was saved is what runs. Written in platform-api and copied byte-for-byte into arion-api and LUMEN test/fixtures/, with its sha256 beside it.",
+  "cases": [
+    {
+      "why": "an int inside its limits",
+      "spec": {
+        "type": "int",
+        "label": "Posts a week",
+        "min": 1,
+        "max": 3,
+        "default": 1
+      },
+      "value": 2,
+      "ok": true
+    },
+    {
+      "why": "an int above its highest",
+      "spec": {
+        "type": "int",
+        "label": "Posts a week",
+        "min": 1,
+        "max": 3,
+        "default": 1
+      },
+      "value": 4,
+      "ok": false
+    },
+    {
+      "why": "an int that is not whole",
+      "spec": {
+        "type": "int",
+        "label": "Posts a week",
+        "min": 1,
+        "max": 3,
+        "default": 1
+      },
+      "value": 1.5,
+      "ok": false
+    },
+    {
+      "why": "an int with no limits takes nothing",
+      "spec": {
+        "type": "int",
+        "label": "Posts a week",
+        "default": 1
+      },
+      "value": 500,
+      "ok": false
+    },
+    {
+      "why": "an int with no highest takes nothing",
+      "spec": {
+        "type": "int",
+        "label": "Posts a week",
+        "min": 1,
+        "default": 1
+      },
+      "value": 500,
+      "ok": false
+    },
+    {
+      "why": "stars inside 4..5",
+      "spec": {
+        "type": "stars",
+        "label": "Stars",
+        "min": 4,
+        "max": 5,
+        "default": 4
+      },
+      "value": 5,
+      "ok": true
+    },
+    {
+      "why": "stars below the floor",
+      "spec": {
+        "type": "stars",
+        "label": "Stars",
+        "min": 4,
+        "max": 5,
+        "default": 4
+      },
+      "value": 3,
+      "ok": false
+    },
+    {
+      "why": "stars with no highest takes nothing",
+      "spec": {
+        "type": "stars",
+        "label": "Stars",
+        "min": 4,
+        "default": 4
+      },
+      "value": 5,
+      "ok": false
+    },
+    {
+      "why": "a list inside its limits",
+      "spec": {
+        "type": "list",
+        "label": "Topics",
+        "max_items": 2,
+        "max_len": 5,
+        "default": []
+      },
+      "value": [
+        "ab",
+        "cd"
+      ],
+      "ok": true
+    },
+    {
+      "why": "a list with too many items",
+      "spec": {
+        "type": "list",
+        "label": "Topics",
+        "max_items": 2,
+        "max_len": 5,
+        "default": []
+      },
+      "value": [
+        "a",
+        "b",
+        "c"
+      ],
+      "ok": false
+    },
+    {
+      "why": "a list item too long",
+      "spec": {
+        "type": "list",
+        "label": "Topics",
+        "max_items": 2,
+        "max_len": 5,
+        "default": []
+      },
+      "value": [
+        "abcdef"
+      ],
+      "ok": false
+    },
+    {
+      "why": "a list item that is blank",
+      "spec": {
+        "type": "list",
+        "label": "Topics",
+        "max_items": 2,
+        "max_len": 5,
+        "default": []
+      },
+      "value": [
+        "  "
+      ],
+      "ok": false
+    },
+    {
+      "why": "a list with no limits takes nothing",
+      "spec": {
+        "type": "list",
+        "label": "Topics",
+        "default": []
+      },
+      "value": [
+        "a"
+      ],
+      "ok": false
+    },
+    {
+      "why": "a choice from its options",
+      "spec": {
+        "type": "choice",
+        "label": "Who",
+        "options": [
+          "auto",
+          "job"
+        ],
+        "default": "auto"
+      },
+      "value": "job",
+      "ok": true
+    },
+    {
+      "why": "a choice outside its options",
+      "spec": {
+        "type": "choice",
+        "label": "Who",
+        "options": [
+          "auto",
+          "job"
+        ],
+        "default": "auto"
+      },
+      "value": "invoice",
+      "ok": false
+    },
+    {
+      "why": "a choice with no options takes nothing",
+      "spec": {
+        "type": "choice",
+        "label": "Who",
+        "default": "auto"
+      },
+      "value": "auto",
+      "ok": false
+    },
+    {
+      "why": "a time of day",
+      "spec": {
+        "type": "time",
+        "label": "Time",
+        "default": "10:00"
+      },
+      "value": "09:30",
+      "ok": true
+    },
+    {
+      "why": "a time that isn't one",
+      "spec": {
+        "type": "time",
+        "label": "Time",
+        "default": "10:00"
+      },
+      "value": "25:00",
+      "ok": false
+    },
+    {
+      "why": "a kind of setting nobody knows",
+      "spec": {
+        "type": "colour",
+        "label": "Colour",
+        "default": "red"
+      },
+      "value": "red",
+      "ok": false
+    }
+  ]
+}
