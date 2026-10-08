@@ -22,6 +22,11 @@ import assert from 'node:assert/strict';
 import { isContentAgentDisabled, KILL_SWITCH_ENV } from '../lib/contentAgent/config.js';
 import { runTick } from '../lib/contentAgent/tick.js';
 
+// Every business here has ARION on; the product check has its own tests
+// (test/product-ownership.test.mjs). Without this the tick would open the real
+// platform pool to ask.
+const ALL_ON = async (product, ids) => ({ product, owned: [...ids], off: [], unknown: [], undecided: false, error: null });
+
 /** A pool that refuses to be used quietly: every query is recorded. */
 function recordingPool(recordset = []) {
   const pool = { queries: [] };
@@ -60,7 +65,7 @@ test('a disabled tick reads NOTHING and queues NOTHING', async () => {
   let cycleCalled = false;
   let notified = false;
 
-  const summary = await runTick({
+  const summary = await runTick({ ownership: ALL_ON,
     pool,
     env: { CONTENT_AGENT_DISABLED: 'true' },
     log: (m) => logs.push(m),
@@ -86,7 +91,7 @@ test('a disabled tick reads NOTHING and queues NOTHING', async () => {
 test('with the switch off the tick does its normal work', async () => {
   // The mirror of the test above: the guard must not be a permanent stop.
   const pool = recordingPool([]);
-  const summary = await runTick({ pool, env: {}, notify: async () => [] });
+  const summary = await runTick({ ownership: ALL_ON, pool, env: {}, notify: async () => [] });
   assert.equal(summary.disabled, false);
   assert.match(pool.queries[0], /content_agent_tenant_config/, 'the first thing an enabled tick does is read who is enabled');
   // config read + the 60% margin report that closes every tick

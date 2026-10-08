@@ -27,6 +27,11 @@ import {
 } from '../lib/contentAgent/alerts.js';
 import { GateUnavailable } from '../lib/notificationGate.js';
 
+// Every business here has ARION on; the product check has its own tests
+// (test/product-ownership.test.mjs). Without this the tick would open the real
+// platform pool to ask.
+const ALL_ON = async (product, ids) => ({ product, owned: [...ids], off: [], unknown: [], undecided: false, error: null });
+
 const TENANT_A = 'a0000001-0000-0000-0000-000000000001';
 const TENANT_B = 'b0000002-0000-0000-0000-000000000002';
 const ENV = { CONTENT_AGENT_ALERT_EMAIL: 'founder@example.invalid' };
@@ -153,7 +158,7 @@ test('the tick dispatches its alerts and records the outcome in the summary', as
     request: () => ({ input() { return this; }, async query() { return { recordset: [] }; } }),
   };
   const calls = [];
-  const summary = await runTick({
+  const summary = await runTick({ ownership: ALL_ON,
     pool, env: {},
     notify: async ({ alerts }) => { calls.push(alerts); return [{ tenantId: TENANT_A, outcome: OUTCOME.SENT, count: 1 }]; },
   });

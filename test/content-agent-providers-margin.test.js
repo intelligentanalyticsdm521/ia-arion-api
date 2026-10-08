@@ -28,6 +28,11 @@ import { HEALTH } from '../lib/contentAgent/serankingHealth.js';
 import { planSlides, slideHtml, esc, renderCarousel, MAX_RENDER_ATTEMPTS } from '../lib/contentAgent/carouselRenderer.js';
 import { AssetStoreNotConfigured, storeAsset, _resetClient } from '../lib/contentAgent/assetStore.js';
 
+// Every business here has ARION on; the product check has its own tests
+// (test/product-ownership.test.mjs). Without this the tick would open the real
+// platform pool to ask.
+const ALL_ON = async (product, ids) => ({ product, owned: [...ids], off: [], unknown: [], undecided: false, error: null });
+
 const T_A = 'a0000001-0000-0000-0000-000000000001';
 
 /** Pool answering by query shape. */
@@ -180,7 +185,7 @@ test('the tick runs enabled tenants and skips halted ones without touching them'
     'FROM arion\\.content_agent_tenant_config c': [],
   });
   const ranFor = [];
-  const s = await runTick({
+  const s = await runTick({ ownership: ALL_ON,
     pool,
     cycle: async ({ tenantId }) => { ranFor.push(tenantId); return { runId: 'r', status: 'completed', outcome: 'selected', drafted: 1, escalated: 0, costUsd: 0.09, alerts: [] }; },
     doResearch: async () => ({ provider: 'none', capabilities: CAPABILITIES.none, rows: [{ keyword: 'x' }], detail: 'test' }),
@@ -195,7 +200,7 @@ test('an F8 outcome halts the tenant STICKILY via their config row', async () =>
     'FROM arion\\.content_agent_tenant_config\\s+WHERE enabled = 1': [cfgRow('t-spendy')],
     'FROM arion\\.content_agent_tenant_config c': [],
   });
-  await runTick({
+  await runTick({ ownership: ALL_ON,
     pool,
     cycle: async () => ({ runId: null, status: 'halted', outcome: 'cost_ceiling', drafted: 0, escalated: 0, costUsd: 9, alerts: [{ failure_mode: 'F8', code: 'cycle_ceiling_exceeded', message: 'over' }] }),
     doResearch: async () => ({ provider: 'none', capabilities: CAPABILITIES.none, rows: [], detail: 'test' }),
@@ -211,7 +216,7 @@ test('one tenant\'s failure never costs another tenant\'s cycle', async () => {
     'FROM arion\\.content_agent_tenant_config c': [],
   });
   const ranFor = [];
-  const s = await runTick({
+  const s = await runTick({ ownership: ALL_ON,
     pool,
     cycle: async ({ tenantId }) => {
       ranFor.push(tenantId);
@@ -230,7 +235,7 @@ test('margin breaches surface as alerts in the tick summary', async () => {
     'FROM arion\\.content_agent_tenant_config\\s+WHERE enabled = 1': [],
     'FROM arion\\.content_agent_tenant_config c': [{ tenant_id: 't-bad', price_usd_monthly: 100, cost_usd: 70 }],
   });
-  const s = await runTick({ pool, cycle: async () => ({}), doResearch: async () => ({}) });
+  const s = await runTick({ ownership: ALL_ON, pool, cycle: async () => ({}), doResearch: async () => ({}) });
   assert.ok(s.alerts.some((a) => a.failure_mode === 'MARGIN'), 'the 60% breach must be un-missable in the summary');
 });
 
