@@ -180,6 +180,10 @@ export async function requireArionAccess(req, res, next) {
     // FAIL-OPEN on any error so a transient DB hiccup can never lock a tenant out.
     let tenantRole = "admin";
     let productDenied = false;
+    // true = the role could not be read at all, so a refused write is a
+    // transient failure of ours and never the owner's own account being
+    // read-only. The two say different things on screen.
+    let roleUnknown = false;
     try {
       const roleR = await platformPool
         .request()
@@ -197,9 +201,20 @@ export async function requireArionAccess(req, res, next) {
       if (rr.role === "user" || rr.role === "read_only") tenantRole = rr.role;
       if (rr.can_access === false || rr.can_access === 0) productDenied = true;
     } catch (e) {
-      console.warn("[requireArionAccess] role/product read failed; defaulting to admin/allow:", e.message);
-      tenantRole = "admin";
+      // FAIL TO READ-ONLY, NOT TO ADMIN (2026-10-08; the same fix FORGE took on
+      // 2026-09-30, forge-api middleware/requireForgeAccess.js). This used to
+      // grant admin when the role read FAILED, so a transient database error
+      // handed whoever was asking the right to write. Reads still work - a
+      // hiccup must never lock a paying business out of looking at its own
+      // data - but a write waits until we can actually check.
+      //
+      // This is NOT the same thing as the no-row default above, which is
+      // deliberately admin so existing users keep working. Here the question
+      // was asked and could not be answered.
+      console.warn("[requireArionAccess] role/product read failed; refusing writes until it can be read:", e.message);
+      tenantRole = "read_only";
       productDenied = false;
+      roleUnknown = true;
     }
     req.tenantRole = tenantRole;
     if (productDenied && !isFounderActingOnClient) {
@@ -210,6 +225,12 @@ export async function requireArionAccess(req, res, next) {
     }
     const isMutation = !["GET", "HEAD", "OPTIONS"].includes((req.method || "GET").toUpperCase());
     if (tenantRole === "read_only" && isMutation && !isFounderActingOnClient) {
+      if (roleUnknown) {
+        return res.status(503).json({
+          error: "access_check_unavailable",
+          details: "We couldn't check your access just now, so nothing was changed. Please try again in a minute.",
+        });
+      }
       return res.status(403).json({
         error: "read_only",
         details: "Your account has read-only access to this business.",
@@ -231,6 +252,11 @@ export async function requireArionAccess(req, res, next) {
     return next();
   } catch (err) {
     console.error("[requireArionAccess] error:", err);
-    return res.status(500).json({ error: "Failed to authorize ARION access", details: err.message });
+    // A sentence, never the exception: this used to return the SQL driver's
+    // own text to the screen.
+    return res.status(500).json({
+      error: "Failed to authorize ARION access",
+      details: "We couldn't check your access just now. Please try again in a minute.",
+    });
   }
 }
