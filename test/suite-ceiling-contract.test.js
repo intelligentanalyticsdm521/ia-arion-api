@@ -32,6 +32,7 @@ const CONTRACT = {
     "arion.social_copy",
     "arion.content_quality_scan",
     "arion.topic_selection",
+    "arion.review_reply",
     "spark.campaign_agent_draft",
     "spark.campaign_agent_scan",
     "spark.responder_classify",
@@ -57,14 +58,14 @@ test("the verdict vocabulary is closed and identical in every repo", () => {
   assert.deepEqual(Object.values(ceiling.VERDICT).sort(), [...CONTRACT.VERDICTS].sort());
 });
 
-test("the agent action list is exactly the ten actions the agents spend on", () => {
+test("the agent action list is exactly the eleven actions the agents spend on", () => {
   assert.deepEqual([...ceiling.AGENT_ACTIONS].sort(), [...CONTRACT.AGENT_ACTIONS].sort());
   // Field Ops must NOT be in it: its scorer is deterministic and spends nothing.
   assert.ok(!ceiling.AGENT_ACTIONS.some((a) => a.includes("fieldops")),
     "Field Ops has no priced action — a row for it would be a price for work that costs nothing");
   // Assist tools must NOT be in it: a business generating images must not have
   // its follow-up agent halted by its own image bill.
-  for (const notAnAgent of ["my_brand.image_generate", "my_brand.write_assist", "spark.subject_lines", "il.judge"]) {
+  for (const notAnAgent of ["my_brand.image_generate", "my_brand.write_assist", "my_brand.review_reply", "spark.subject_lines", "il.judge"]) {
     assert.ok(!ceiling.AGENT_ACTIONS.includes(notAnAgent),
       `${notAnAgent} is an assist action, not agent spend — including it would cap the wrong budget`);
   }

@@ -16,18 +16,23 @@
 // is stood down, not answered twice. When Google cannot be read, nothing is
 // posted (503): posting blind is how a review gets two replies.
 //
-// AN EDITED REPLY IS CHECKED AGAIN, every check except "3 stars or fewer
-// waits for you" (a person approving IS the asking). A check that fires
-// refuses with its sentence and nothing is posted.
+// AN EDITED REPLY IS CHECKED AGAIN, every check except the two holds that
+// exist to make a person look: "3 stars or fewer waits for you" and "a
+// complaint, a refund or anything legal waits for you". A person approving IS
+// the asking, and the second one reads the REVIEW, so keeping it would refuse
+// every edit to the replies that most need the owner's own words. A check
+// that fires refuses with its sentence and nothing is posted.
 //
-// THE STATUS MOVE IS GUARDED: `status IN ('held','failed')` and exactly one
-// row, or 409.
+// THE REPLY IS CLAIMED BEFORE IT IS POSTED: held/failed -> 'posting', guarded,
+// exactly one row. Two approvals at the same moment: one posts, the other is
+// told it was decided elsewhere and posts nothing. Then posted (or failed),
+// moved from 'posting' only.
 
 import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
 import { reviewsApi, NOT_LIVE_WORDS } from '../../lib/gbpFake.js';
-import { runReviewReplyTick, markReply, JOB_KEY } from '../../lib/gbpReplyRunner.js';
+import { runReviewReplyTick, markReply, claimReply, releaseReply, JOB_KEY, POSTING_STALE_MINUTES } from '../../lib/gbpReplyRunner.js';
 import { jobsOn as seamJobsOn, briefFor as seamBriefFor } from '../../lib/teamSeam.js';
 import { runChecks, PLATFORM_CHECKS, checkContext } from '../../lib/jobChecks.js';
 
@@ -40,7 +45,8 @@ export const WORDS = Object.freeze({
   googleUnreadable: "I couldn't check Google just now, so I didn't post. Try again in a minute.",
   googleRefused: "Google didn't take this reply, so it's still waiting for you. Try again.",
   briefUnreadable: "I couldn't read your business details to check your changes, so I didn't post. Try again in a minute.",
-  raced: 'That reply was decided somewhere else just now.',
+  raced: 'That reply was decided somewhere else just now, so I posted nothing.',
+  postedNotRecorded: "Your reply is on Google, but I couldn't record that here. It may still show as waiting; posting it again won't post it twice.",
   jobOff: 'Google review replies are off. Switch them on first.',
   jobUnreadable: "ARGUS couldn't check whether Google review replies are on, so nothing ran. Try again in a minute.",
   emptyBody: 'Write the reply first.',
@@ -52,8 +58,11 @@ export function personName(req) {
     || (Array.isArray(req.auth?.emails) ? req.auth.emails[0] : null) || req.user?.email || null;
 }
 
-/** The checks an edited reply runs again: the job's, minus the low-star hold. */
-export const EDIT_CHECKS = Object.freeze(PLATFORM_CHECKS[JOB_KEY].filter((c) => c !== 'low_star_review_asks'));
+/** The holds that exist to make a person look; a person approving has looked. */
+export const PERSON_IS_THE_ASK = Object.freeze(['low_star_review_asks', 'hold_complaint_legal_refund']);
+
+/** The checks an edited reply runs again: the job's, minus the two "ask a person" holds. */
+export const EDIT_CHECKS = Object.freeze(PLATFORM_CHECKS[JOB_KEY].filter((c) => !PERSON_IS_THE_ASK.includes(c)));
 
 /**
  * Factory so tests can hand in a fake pool, a fake Google and fake readers.
@@ -78,6 +87,11 @@ export function makeReviewRepliesRouter({
       const summary = await tick(pool, (m) => console.log(`[review-replies:run] ${m}`), {
         jobsOn, briefFor, tenantFilter: tenantId, triggerSource: 'manual',
       });
+      // A run that could not start says why, as a refusal, never as an empty 200.
+      const mineRun = (summary.runs || []).find((r) => String(r.tenantId).toUpperCase() === String(tenantId).toUpperCase());
+      if (mineRun && (mineRun.outcome === 'blocked' || mineRun.outcome === 'failed') && mineRun.words) {
+        return fail(res, 409, 'NOT_RUN', mineRun.words);
+      }
       res.json({ data: summary });
     } catch (err) {
       console.error('[review-replies:run]', err);
@@ -96,11 +110,14 @@ export function makeReviewRepliesRouter({
       const r = await pool.request()
         .input('id', sql.UniqueIdentifier, id)
         .input('t', sql.UniqueIdentifier, tenantId)
+        .input('stale', sql.Int, POSTING_STALE_MINUTES)
         .query(`SELECT d.draft_id, d.site_id, d.gbp_review_id, d.reply_text, d.star_rating, d.review_text,
                        d.status, s.gbp_oauth_token_ref, s.gbp_location_name
                   FROM arion.gbp_reply_draft d
                   JOIN arion.site s ON s.site_id = d.site_id AND s.tenant_id = d.tenant_id
-                 WHERE d.draft_id = @id AND d.tenant_id = @t AND d.status IN ('held','failed')`);
+                 WHERE d.draft_id = @id AND d.tenant_id = @t
+                   AND (d.status IN ('held','failed')
+                        OR (d.status = 'posting' AND d.decided_at < DATEADD(MINUTE, -@stale, SYSDATETIMEOFFSET())))`);
       const row = r.recordset[0];
       if (!row) return fail(res, 404, 'NOT_FOUND', WORDS.notWaiting);
 
@@ -111,7 +128,7 @@ export function makeReviewRepliesRouter({
       if (!data || data.error) return fail(res, 503, 'GOOGLE_UNREADABLE', WORDS.googleUnreadable);
       const live = (data.reviews || []).find((x) => String(x.reviewId) === String(row.gbp_review_id));
       if (live?.replyComment) {
-        await markReply(pool, { draftId: id, tenantId, status: 'stood_down', decidedBy: personName(req) });
+        await markReply(pool, { draftId: id, tenantId, status: 'stood_down', decidedBy: personName(req), from: row.status === 'posting' ? 'posting' : 'waiting' });
         return fail(res, 409, 'ALREADY_ANSWERED', WORDS.alreadyAnswered);
       }
 
@@ -125,18 +142,30 @@ export function makeReviewRepliesRouter({
         if (checked.fired.length) return fail(res, 409, 'CHECK_FIRED', checked.fired[0].words);
       }
 
-      // 3. Post, then move the status (guarded).
+      // 3. Claim it (guarded, exactly one row), THEN post, then move it on
+      //    from 'posting'. The loser of a race posts nothing.
+      const who = personName(req);
+      if (!(await claimReply(pool, { draftId: id, tenantId, decidedBy: who }))) return fail(res, 409, 'RACE', WORDS.raced);
+      const before = row.status === 'failed' ? 'failed' : 'held';
       let posted;
       try { posted = await google.replyToReview(row.gbp_oauth_token_ref, row.gbp_location_name, row.gbp_review_id, text); } catch (e) { posted = { error: e.message }; }
       if (!posted || posted.error) {
         // On a machine that is not the live service nothing is posted to Google
-        // (lib/gbpFake.js); say exactly that rather than blaming Google.
-        if (posted?.error === NOT_LIVE_WORDS) return fail(res, 409, 'NOT_LIVE', NOT_LIVE_WORDS);
-        await markReply(pool, { draftId: id, tenantId, status: 'failed', postError: WORDS.googleRefused });
+        // (lib/gbpFake.js); say exactly that rather than blaming Google, and
+        // give the reply back unchanged.
+        if (posted?.error === NOT_LIVE_WORDS) {
+          await releaseReply(pool, { draftId: id, tenantId, toStatus: before });
+          return fail(res, 409, 'NOT_LIVE', NOT_LIVE_WORDS);
+        }
+        await markReply(pool, { draftId: id, tenantId, status: 'failed', postError: WORDS.googleRefused, from: 'posting' });
         return fail(res, 502, 'GOOGLE_REFUSED', WORDS.googleRefused);
       }
-      const moved = await markReply(pool, { draftId: id, tenantId, status: 'posted', replyFinal: text, decidedBy: personName(req) });
-      if (!moved) return fail(res, 409, 'RACE', WORDS.raced);
+      const moved = await markReply(pool, { draftId: id, tenantId, status: 'posted', replyFinal: text, decidedBy: who, from: 'posting' });
+      if (!moved) {
+        // Google took it; only the record failed to move. Say what happened.
+        console.error(`[review-replies:approve] ${id}: posted on Google but the row did not move from posting`);
+        return fail(res, 500, 'NOT_RECORDED', WORDS.postedNotRecorded);
+      }
       res.json({ data: { draft_id: id, status: 'posted', words: 'Posted your reply on Google.' } });
     } catch (err) {
       console.error('[review-replies:approve]', err);
@@ -156,9 +185,12 @@ export function makeReviewRepliesRouter({
         .input('t', sql.UniqueIdentifier, tenantId)
         .input('reason', sql.NVarChar(500), reason)
         .input('by', sql.NVarChar(256), personName(req))
+        .input('stale', sql.Int, POSTING_STALE_MINUTES)
         .query(`UPDATE arion.gbp_reply_draft
                    SET status = 'skipped', skip_reason = @reason, decided_by = @by, decided_at = SYSDATETIMEOFFSET()
-                 WHERE draft_id = @id AND tenant_id = @t AND status IN ('held','failed');
+                 WHERE draft_id = @id AND tenant_id = @t
+                   AND (status IN ('held','failed')
+                        OR (status = 'posting' AND decided_at < DATEADD(MINUTE, -@stale, SYSDATETIMEOFFSET())));
                 SELECT @@ROWCOUNT AS affected;`);
       if (Number(r.recordset?.[0]?.affected) !== 1) return fail(res, 404, 'NOT_FOUND', WORDS.notWaiting);
       res.json({ data: { draft_id: id, status: 'skipped' } });

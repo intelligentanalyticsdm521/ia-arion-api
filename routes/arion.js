@@ -6021,6 +6021,8 @@ router.post('/business/reviews/:reviewId/draft-reply', async (req, res) => {
     const out = await draftReviewReply({
       pool, tenantId, userId: req.platformUser?.userId || null,
       review: { reviewId, reviewerName, starRating, comment },
+      // The owner's own button keeps the pre-flip fallback; the job does not.
+      unmeteredFallback: true,
     });
     if (out.ok) return res.json({ draft: out.draft, credits_charged: out.creditsCharged });
     if (out.code === 'insufficient_credits') {

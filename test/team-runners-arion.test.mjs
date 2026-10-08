@@ -16,6 +16,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
+import { WORDS as REVIEW_ROUTE_WORDS } from '../routes/arion/reviewReplies.js';
+import { RUN_WORDS as AGENTS_RUN_WORDS } from '../routes/arion/agents.js';
+import { HANDOFF_WORDS } from '../lib/contentAgent/socialHandoff.js';
+import { REVIEW_RUN_WORDS } from '../lib/gbpReplyRunner.js';
+import { NOT_LIVE_PUBLISH_WORDS } from '../lib/contentAgent/publisher.js';
 
 import { runTick, haltTenant, gateJob, briefInputs } from '../lib/contentAgent/tick.js';
 import { goesOutInAdvance, sendInAdvance } from '../lib/contentAgent/runner.js';
@@ -861,25 +867,60 @@ test('no code reads or writes the switches that moved to the jobs', () => {
 
 /* ══ 12. the defect test (§0.2) ═════════════════════════════════════════ */
 
+// EVERY file the build added or changed (§0.2), and each one must exist: a
+// listed file that is missing FAILS (a guard that skips what it cannot find
+// fails open). The cross-check below compares this list with git.
 const STREAM_FILES = [
   'db/migrations/069_review_replies_and_citations.sql', 'db/migrations/later/070_drop_moved_agent_switches.sql',
+  'db/migrations/071_review_reply_posting_and_held_reasons.sql',
   'lib/jobChecks.js', 'lib/teamSeam.js', 'lib/businessTimeZone.js', 'lib/gbpReplyRunner.js', 'lib/gbpFake.js', 'lib/gbpAiReply.js',
+  'lib/gbpIntake.js', 'lib/argus/suiteCeiling.js',
   'lib/contentAgent/tick.js', 'lib/contentAgent/runner.js', 'lib/contentAgent/drafting.js',
-  'lib/contentAgent/decisions.js', 'lib/contentAgent/socialHandoff.js',
+  'lib/contentAgent/decisions.js', 'lib/contentAgent/socialHandoff.js', 'lib/contentAgent/marginMonitor.js',
+  'lib/contentAgent/publisher.js',
   'lib/agents/activity.js', 'lib/agents/runs.js',
-  'routes/internal.js', 'routes/arion/contentAgent.js', 'routes/arion/agents.js', 'routes/arion/reviewReplies.js',
+  'routes/arion.js', 'routes/internal.js', 'routes/arion/contentAgent.js', 'routes/arion/agents.js', 'routes/arion/reviewReplies.js',
   'scripts/dev/gbp-fake.mjs', 'scripts/dev/exercise-team-jobs.mjs',
 ];
-// Pre-existing (finding F7), not this build's to fix; no new literal is added.
-const PRE_EXISTING = ["export const ATTRIBUTION_ORG = 'Intelligent Analytics';"];
+/** Deleted by this build (the old runner): must stay deleted. */
+const DELETED_FILES = ['lib/gbpAutoReplyRunner.js'];
+/** The commit before phase 1's first arion commit (c604526): the build's base. */
+const PHASE1_BASE = '84df57c';
+// Pre-existing lines (finding F7 and routes/arion.js's older product words),
+// not this build's to fix; exact lines only, so no new literal can hide here.
+const PRE_EXISTING = [
+  "export const ATTRIBUTION_ORG = 'Intelligent Analytics';",
+  "requiredAddon: x.seoAddon === true && !x.done ? 'Intelligent Analytics SEO package' : null,",
+  "return res.status(403).json({ error: { code: 'platform_entry', message: 'This entry is managed by Intelligent Analytics and cannot be removed here', status: 403 } });",
+];
 const DEFECT = [/Intelligent Analytics/i, /intelligentanalyticsdm/i, /ia-dm\.com/i,
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i,
   /Web Design/, /Website audit/i, /walkthrough/i, /Des Moines/i];
 
+test('every file on the build\'s list exists, and the deleted runner stays deleted', () => {
+  for (const f of STREAM_FILES) assert.ok(fs.existsSync(path.join(ROOT, f)), `${f} is on the list but missing`);
+  for (const f of DELETED_FILES) assert.equal(fs.existsSync(path.join(ROOT, f)), false, `${f} is back`);
+});
+
+test('the list holds every file git says the build changed (when git can answer)', (t) => {
+  let out;
+  try {
+    out = execFileSync('git', ['-C', ROOT, 'diff', '--name-only', PHASE1_BASE], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch (err) {
+    t.skip(`git cannot answer here (${String(err.message).split('\n')[0]}); the list above is still checked`);
+    return;
+  }
+  const changed = out.split('\n').map((s) => s.trim()).filter(Boolean)
+    .filter((f) => /^(lib|routes|workers|db)\//.test(f) || /^scripts\/dev\//.test(f) || f === 'index.js')
+    .filter((f) => !DELETED_FILES.includes(f));
+  const missing = changed.filter((f) => !STREAM_FILES.includes(f));
+  assert.deepEqual(missing, [], `changed but not on STREAM_FILES: ${missing.join(', ')}`);
+});
+
 test('no business\'s name, domain, id or words in the files this stream added or changed', () => {
   for (const f of STREAM_FILES) {
     const p = path.join(ROOT, f);
-    if (!fs.existsSync(p)) continue;
+    assert.ok(fs.existsSync(p), `${f} is missing`);
     const text = f.endsWith('.sql') ? fs.readFileSync(p, 'utf8').replace(/--.*$/gm, '') : stripComments(fs.readFileSync(p, 'utf8'));
     const lines = text.split('\n').filter((l) => !PRE_EXISTING.includes(l.trim()));
     for (const re of DEFECT) {
@@ -889,9 +930,19 @@ test('no business\'s name, domain, id or words in the files this stream added or
   }
 });
 
-test('the words an owner reads from these runners never say tenant, agent, playbook, or a vendor', () => {
-  const sentences = [...Object.values(HELD_WORDS), ...Object.values(RUN_WORDS).filter((v) => typeof v === 'string'), RUN_WORDS.unknownCheck('x'), RUN_WORDS.JOB_OFF('Blog posts')];
+test('the words an owner reads from these runners and routes never say tenant, agent, playbook, a job key, a setting or a vendor', () => {
+  const strings = (o) => Object.values(o).flatMap((v) => (typeof v === 'string' ? [v] : typeof v === 'function' ? [v('Blog posts', 'x')] : []));
+  const sentences = [
+    ...strings(HELD_WORDS), ...strings(RUN_WORDS), RUN_WORDS.unknownCheck('x'), RUN_WORDS.JOB_OFF('Blog posts'),
+    // The route and runner WORDS an owner reads (finding: a job key and an
+    // environment variable were in these, and nothing tested them).
+    ...strings(REVIEW_ROUTE_WORDS), ...strings(AGENTS_RUN_WORDS), ...strings(HANDOFF_WORDS), ...strings(REVIEW_RUN_WORDS),
+    NOT_LIVE_WORDS, NOT_LIVE_PUBLISH_WORDS,
+  ];
+  assert.ok(sentences.length > 50);
   for (const s of sentences) {
     assert.doesNotMatch(s, /\btenant\b|\bagent\b|playbook|guardrail|\bJSON\b|claude|anthropic|openai|haiku|sonnet/i, s);
+    assert.doesNotMatch(s, /\b(?:arion|spark|oliver)\.[a-z_]+/, `a job key on screen: ${s}`);
+    assert.doesNotMatch(s, /\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/, `a setting's name on screen: ${s}`);
   }
 });

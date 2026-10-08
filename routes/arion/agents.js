@@ -46,7 +46,7 @@ import { checkMargin } from '../../lib/contentAgent/marginMonitor.js';
 import { runTick } from '../../lib/contentAgent/tick.js';
 import { isContentAgentDisabled, KILL_SWITCH_ENV } from '../../lib/contentAgent/config.js';
 import { jobsOn as seamJobsOn } from '../../lib/teamSeam.js';
-import { CONTENT_JOBS } from '../../lib/jobChecks.js';
+import { CONTENT_JOBS, dayWords } from '../../lib/jobChecks.js';
 
 const router = Router({ mergeParams: true });
 
@@ -292,6 +292,35 @@ router.put('/settings', async (req, res) => {
 // The kill switch is honoured here as well, and answers 503 rather than a
 // cheerful 200 with nothing in it.
 // ---------------------------------------------------------------------------
+/**
+ * The sentences "Run it now" answers with. An owner reads them: the jobs'
+ * names, never their keys, and never a setting's name (§0.3).
+ */
+export const RUN_WORDS = Object.freeze({
+  disabled: 'The web person is switched off for every business right now, so nothing ran and nothing was spent.',
+  whichJob: 'Say which job to run: Blog posts or Social posts.',
+  unreadable: "ARGUS couldn't check whether that job is on, so nothing ran. Try again in a minute.",
+  off: 'That job is off. Switch it on first.',
+  halted: (when, why) => `It stopped itself${when ? ` on ${when}` : ''}: ${why}. Start it again first.`,
+});
+
+/**
+ * What "Run it now" sends back: THIS business's results only. The tick's
+ * summary is a fleet shape (margins, every alert, notifications); an owner
+ * route must never hand one business another business's id, price or spend.
+ */
+export function ownRunSummary(summary, tenantId) {
+  const T = String(tenantId).toUpperCase();
+  const mine = (x) => String(x?.tenantId || '').toUpperCase() === T;
+  return {
+    ran: Number(summary?.ran) || 0,
+    results: (summary?.results || []).filter(mine),
+    alerts: (summary?.alerts || []).filter((a) => mine(a) && a.failure_mode !== 'MARGIN')
+      .map(({ tenantId: _t, ...a }) => a),
+    ...(summary?.jobStateUnreadable ? { jobStateUnreadable: true, words: summary.words } : {}),
+  };
+}
+
 /** Factory so a test can hand in fake readers; the default router uses the real ones. */
 export function makeRunHandler({ getPool = getServicesPool, jobsOn = seamJobsOn, tick = runTick } = {}) {
   return async (req, res) => {
@@ -299,20 +328,20 @@ export function makeRunHandler({ getPool = getServicesPool, jobsOn = seamJobsOn,
     const jobKey = String(req.body?.job_key || '');
     try {
       if (isContentAgentDisabled()) {
-        return fail(res, 503, 'AGENT_DISABLED',
-          `${KILL_SWITCH_ENV} is set, so nothing ran, nothing was read and nothing was spent.`);
+        console.warn(`[arion/agents:run] ${KILL_SWITCH_ENV} is set; refused`);
+        return fail(res, 503, 'AGENT_DISABLED', RUN_WORDS.disabled);
       }
       if (!CONTENT_JOBS.includes(jobKey)) {
-        return fail(res, 400, 'BAD_REQUEST', `Say which job to run: ${CONTENT_JOBS.join(' or ')}.`);
+        return fail(res, 400, 'BAD_REQUEST', RUN_WORDS.whichJob);
       }
       // Is THIS job on for THIS business? Unreadable = nothing runs (503).
       const state = await jobsOn([jobKey], { tenantId });
       if (!state || state.ok !== true || !(state.on instanceof Map)) {
-        return fail(res, 503, 'JOB_STATE_UNREADABLE', "ARGUS couldn't check whether that job is on, so nothing ran. Try again in a minute.");
+        return fail(res, 503, 'JOB_STATE_UNREADABLE', RUN_WORDS.unreadable);
       }
       const mine = state.on.get(String(tenantId).toUpperCase());
       if (!(mine instanceof Map) || !mine.has(jobKey)) {
-        return fail(res, 409, 'JOB_OFF', 'That job is off. Switch it on first.');
+        return fail(res, 409, 'JOB_OFF', RUN_WORDS.off);
       }
       const pool = await getPool();
       const cfg = await pool.request()
@@ -320,7 +349,7 @@ export function makeRunHandler({ getPool = getServicesPool, jobsOn = seamJobsOn,
         .query('SELECT halted_at, halted_reason FROM arion.content_agent_tenant_config WHERE tenant_id = @t');
       const row = cfg.recordset[0];
       if (row?.halted_at) {
-        return fail(res, 409, 'HALTED', `It stopped itself on ${row.halted_at}: ${row.halted_reason}. Start it again first.`);
+        return fail(res, 409, 'HALTED', RUN_WORDS.halted(dayWords(row.halted_at), row.halted_reason));
       }
 
       // The fleet tick, narrowed to one business and one job. One code path for
@@ -333,7 +362,7 @@ export function makeRunHandler({ getPool = getServicesPool, jobsOn = seamJobsOn,
         jobsOn,
         triggerSource: 'manual',
       });
-      res.json({ data: summary });
+      res.json({ data: ownRunSummary(summary, tenantId) });
     } catch (err) {
       console.error('[arion/agents:run]', err);
       fail(res, 500, 'INTERNAL_ERROR', err.message);

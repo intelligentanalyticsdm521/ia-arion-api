@@ -647,23 +647,31 @@
   },
   "offer_patterns": [
     {
-      "source": "\\b\\d{1,2}%\\s*off\\b",
+      "source": "\\b\\d{1,3}\\s?(?:%|percent)\\s*off\\b",
       "flags": "i"
     },
     {
-      "source": "\\bfree\\s+(?:service|visit|consultation|estimate|inspection|month|upgrade)\\b",
+      "source": "(?<![\\w-])free\\s+(?!(?:to|up|time|from|and|or)\\b)[\\w][\\w-]*",
       "flags": "i"
     },
     {
-      "source": "\\b(?:discount|coupon|promo code|voucher)\\b",
+      "source": "\\b(?:discount(?:s|ed)?|coupons?|promo codes?|vouchers?)\\b",
       "flags": "i"
     },
     {
-      "source": "\\bsave\\s+\\$\\d+",
+      "source": "\\bsave\\s+(?:\\$\\d+|\\d{1,3}\\s?(?:%|percent))",
       "flags": "i"
     },
     {
-      "source": "\\bno charge\\b",
+      "source": "\\bno charge\\b|\\bon the house\\b|\\bcomplimentary\\b",
+      "flags": "i"
+    },
+    {
+      "source": "\\bhalf[\\s-](?:price|off)\\b",
+      "flags": "i"
+    },
+    {
+      "source": "\\bbuy\\s+one,?\\s+get\\s+one\\b|\\bbogo\\b",
       "flags": "i"
     }
   ],
@@ -980,5 +988,87 @@
     "oliver.quote_payment_followups": "b37854de86efd3fcaf38bac4cf15a292b4b70f7597460da1f05c67215eaff7ff",
     "oliver.crew_suggestions": "1bd3e7f3f3f81a48e8b29b58756829312bcdbf2ad9540b8bdb69ca0904ada99f",
     "oliver.review_asks": "580806c98358850b11acbd6e0ace3d00c1098388f4d1f338ff864793a7f93f54"
+  },
+  "offer_cases": {
+    "held_when_nothing_allowed": [
+      "Get a free website audit today",
+      "Free walkthrough this week",
+      "Half price this week",
+      "15 percent off",
+      "Buy one get one free",
+      "A free gift with every visit",
+      "20% off mowing",
+      "Save 10% when you book",
+      "Your first visit is on the house"
+    ],
+    "never_an_offer": [
+      "Feel free to call us",
+      "A stress-free lawn all summer",
+      "Free up your weekend",
+      "Free time is precious"
+    ],
+    "allowed_inside_its_own_words": {
+      "allowed": [
+        "free 15-minute walkthrough"
+      ],
+      "text": "Book your free 15-minute walkthrough today."
+    },
+    "invented_next_to_allowed": {
+      "allowed": [
+        "free 15-minute walkthrough"
+      ],
+      "text": "Book your free 15-minute walkthrough today, or a free website audit."
+    }
+  },
+  "proof_cases": [
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"Best lawn service in town, they were on time\" - a happy customer.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"Best lawn service in town, they were on time\" - a happy customer. \"They are the best crew in the whole state\" - a happy customer",
+      "held": true
+    },
+    {
+      "allowed": [
+        "They fixed my fence in one day"
+      ],
+      "text": "A recent customer said they fixed my fence in one day.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "They fixed my fence in one day"
+      ],
+      "text": "A recent customer said they fixed my fence in one day. A recent client told us we are the best roofer in the state.",
+      "held": true
+    },
+    {
+      "allowed": [],
+      "text": "One of our customers said we are the best in town.",
+      "held": true
+    }
+  ],
+  "hold_keyword_cases": {
+    "rule": "whole word or phrase; nothing touches its start; its end may carry s, es, ed, d, ing, er or ers (one doubled letter allowed before it)",
+    "hold": [
+      "I want a refund",
+      "Two refunds later",
+      "My lawyer will call",
+      "They complained twice",
+      "See you in court",
+      "We got scammed"
+    ],
+    "pass": [
+      "Very reliable and courteous crew",
+      "Pursuing a perfect lawn",
+      "They were courteous and prompt"
+    ]
   }
 }
