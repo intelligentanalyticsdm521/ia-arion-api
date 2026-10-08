@@ -752,6 +752,28 @@ describe('crawl', () => {
     assert.equal(s.sections.find((x) => x.key === 'leads').score, null);
     assert.notEqual(s.sections.find((x) => x.key === 'trust').score, null, 'security is still checked');
   });
+  test('robots disallow-all: the report scores only speed and security, as its note says', async () => {
+    const counter = {};
+    const r = await crawl('https://samtest.example/', { fetch: fakeSite({ robots: 'User-agent: *\nDisallow: /\n', counter }) });
+    assert.ok(!counter['HEAD https://samtest.example/sitemap.xml'] && !counter['GET https://samtest.example/sitemap.xml'], 'the sitemap is not fetched');
+    const s = scoreAudit({ crawl: r, psiMobile: { scores: { performance: 70, seo: 90 }, metrics: { lcp: { value: 4100 } }, opportunities: [{ id: 'server-response-time' }] } });
+    assert.deepEqual(s.notes, [ROBOTS_BLOCKED_SENTENCE]);
+    assert.deepEqual(s.sections.filter((x) => x.score != null).map((x) => x.key), ['speed', 'trust'], 'exactly the sections the note names');
+    const every = [...s.sections.flatMap((x) => x.findings), ...s.topFindings, s.summary_plain];
+    assert.ok(!every.some((f) => /sitemap|description|main heading|phones/i.test(f)), every.join(' | '));
+    // Presence: what WAS checked is still reported.
+    assert.ok(s.topFindings.some((f) => /wait about 4 seconds/.test(f)), s.topFindings.join(' | '));
+    assert.ok(s.topFindings.some((f) => /missing 3 of 5/.test(f)), s.topFindings.join(' | '));
+  });
+
+  test('robots disallowing the start page itself: that page is not read', async () => {
+    const counter = {};
+    const r = await crawl('https://samtest.example/private/area', { fetch: fakeSite({ counter }) });
+    assert.equal(r.robots.blocked, true);
+    assert.ok(!counter['GET https://samtest.example/private/area'], 'the disallowed start page is not fetched');
+    assert.equal(r.pages.length, 0);
+  });
+
 });
 
 // ---------------------------------------------------------------------------
