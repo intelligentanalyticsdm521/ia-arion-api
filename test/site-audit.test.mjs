@@ -31,7 +31,7 @@ import { Worker } from 'node:worker_threads';
 import { pathToFileURL } from 'node:url';
 
 import { sign, verify } from '../lib/audit/signature.js';
-import { AuditNotConfigured, callerKey, encryptSecret, decryptSecret } from '../lib/audit/callers.js';
+import { AuditNotConfigured, callerKey, encryptSecret, decryptSecret, planCallerUpsert, upsertCaller, CallerChangeRefused } from '../lib/audit/callers.js';
 import { safeFetch, checkUrl, isBlockedAddress, SafeFetchRefused } from '../lib/audit/safeFetch.js';
 import { parseRobots, isAllowed } from '../lib/audit/robots.js';
 import { pageChecks, securityHeaderChecks, contactChecks, anchorsOf } from '../lib/audit/checks.js';
@@ -220,6 +220,28 @@ describe('caller secrets (vault guard)', () => {
   test('AuditNotConfigured on a laptop without the key too (no placeholder key)', () => {
     assert.throws(() => callerKey({}), AuditNotConfigured);
     assert.throws(() => callerKey({ AUDIT_CALLER_KEY: Buffer.from('short').toString('base64') }), AuditNotConfigured);
+  });
+
+  test('re-registering a key id cannot quietly move it to another business or switch it back on', async () => {
+    const owner = crypto.randomUUID();
+    const existing = { key_id: 'wfk_abcd', owner_tenant_id: owner.toUpperCase(), status: 'active' };
+    assert.equal(planCallerUpsert(null, { ownerTenantId: owner }).action, 'insert');
+    assert.equal(planCallerUpsert(existing, { ownerTenantId: owner }).action, 'update', 'same owner (any case): replace the secret');
+    const moved = planCallerUpsert(existing, { ownerTenantId: crypto.randomUUID() });
+    assert.ok(moved.refuse instanceof CallerChangeRefused && moved.refuse.code === 'owner_change');
+    assert.match(moved.refuse.message, /Nothing was changed\. Re-run with --move-owner/);
+    assert.equal(planCallerUpsert(existing, { ownerTenantId: crypto.randomUUID(), moveOwner: true }).ownerChanged, true);
+    const off = { ...existing, status: 'revoked' };
+    assert.equal(planCallerUpsert(off, { ownerTenantId: owner }).refuse.code, 'inactive');
+    assert.equal(planCallerUpsert(off, { ownerTenantId: owner, reactivate: true }).action, 'update');
+
+    // upsertCaller itself refuses before it writes anything.
+    const queries = [];
+    const pool = { request() { const r = { input() { return r; }, async query(text) { queries.push(text); return { recordset: [existing] }; } }; return r; } };
+    await assert.rejects(upsertCaller(pool, { keyId: 'wfk_abcd', label: 'x', ownerTenantId: crypto.randomUUID(), secret: SECRET }, { AUDIT_CALLER_KEY: TEST_KEY }),
+      (e) => e instanceof CallerChangeRefused && e.code === 'owner_change');
+    assert.equal(queries.length, 1, 'only the read ran');
+    assert.doesNotMatch(queries[0], /UPDATE|INSERT/);
   });
   test('the secret is stored encrypted and comes back exactly', () => {
     const env = { AUDIT_CALLER_KEY: TEST_KEY };

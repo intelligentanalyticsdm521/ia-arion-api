@@ -7,9 +7,13 @@
  * Your own tools, which shows a key id (wfk_…) and, once, the secret. This
  * script stores the same pair here so both sides can sign and verify. Running
  * it again with the same --key-id replaces the secret ("Replace the secret").
+ * Running it again can NOT quietly move the key to another business (that
+ * would show one business's past checks to another) or switch a switched-off
+ * key back on: those need --move-owner or --reactivate, and the old and new
+ * owner are printed.
  *
  *   node scripts/register-audit-caller.mjs --label "<agency name>" --owner-tenant <business id> \
- *        --key-id wfk_… --secret-stdin [--daily-limit 50] [--confirm-server <sql host>]
+ *        --key-id wfk_… --secret-stdin [--daily-limit 50] [--move-owner] [--reactivate] [--confirm-server <sql host>]
  *
  * The secret is read from standard input (never an argument, so it stays out of
  * shell history) and stored encrypted under AUDIT_CALLER_KEY. It is never
@@ -18,7 +22,7 @@
  */
 import 'dotenv/config';
 import { getServicesPool } from '../db/servicesPool.js';
-import { upsertCaller, getCallerByKeyId, callerKey } from '../lib/audit/callers.js';
+import { upsertCaller, getCallerByKeyIdAnyStatus, callerKey, CallerChangeRefused } from '../lib/audit/callers.js';
 
 const argv = process.argv.slice(2);
 const arg = (n, d = null) => { const i = argv.indexOf(`--${n}`); return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : d; };
@@ -53,7 +57,17 @@ const secret = Buffer.concat(chunks).toString('utf8').trim();
 if (secret.length < 16) stop('The secret on standard input is missing or too short.');
 
 const pool = await getServicesPool();
-const before = await getCallerByKeyId(pool, keyId);
-const callerId = await upsertCaller(pool, { keyId, label, ownerTenantId: owner, secret, dailyLimit, createdBy: 'register-audit-caller.mjs' });
+const before = await getCallerByKeyIdAnyStatus(pool, keyId);
+let callerId;
+try {
+  callerId = await upsertCaller(pool, {
+    keyId, label, ownerTenantId: owner, secret, dailyLimit, createdBy: 'register-audit-caller.mjs',
+    moveOwner: argv.includes('--move-owner'), reactivate: argv.includes('--reactivate'),
+  });
+} catch (err) {
+  if (err instanceof CallerChangeRefused) stop(err.message);
+  throw err;
+}
 console.log(`${before ? 'Replaced the secret for' : 'Registered'} ${label} (key ${keyId}) on ${server}. caller_id=${callerId}, daily limit ${dailyLimit}.`);
+if (before) console.log(`Owner: ${before.owner_tenant_id} -> ${owner}${String(before.owner_tenant_id).toLowerCase() === owner.toLowerCase() ? ' (unchanged)' : ' (MOVED)'}. Status: ${before.status} -> active.`);
 process.exit(0);
