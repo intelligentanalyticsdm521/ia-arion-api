@@ -26,7 +26,7 @@
 import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
-import { reviewsApi } from '../../lib/gbpFake.js';
+import { reviewsApi, NOT_LIVE_WORDS } from '../../lib/gbpFake.js';
 import { runReviewReplyTick, markReply, JOB_KEY } from '../../lib/gbpReplyRunner.js';
 import { jobsOn as seamJobsOn, briefFor as seamBriefFor } from '../../lib/teamSeam.js';
 import { runChecks, PLATFORM_CHECKS, checkContext } from '../../lib/jobChecks.js';
@@ -129,6 +129,9 @@ export function makeReviewRepliesRouter({
       let posted;
       try { posted = await google.replyToReview(row.gbp_oauth_token_ref, row.gbp_location_name, row.gbp_review_id, text); } catch (e) { posted = { error: e.message }; }
       if (!posted || posted.error) {
+        // On a machine that is not the live service nothing is posted to Google
+        // (lib/gbpFake.js); say exactly that rather than blaming Google.
+        if (posted?.error === NOT_LIVE_WORDS) return fail(res, 409, 'NOT_LIVE', NOT_LIVE_WORDS);
         await markReply(pool, { draftId: id, tenantId, status: 'failed', postError: WORDS.googleRefused });
         return fail(res, 502, 'GOOGLE_REFUSED', WORDS.googleRefused);
       }

@@ -726,6 +726,11 @@ test('the review fake needs both locks; a set WEBSITE_SITE_NAME ignores the file
     assert.equal(fakeEnabled({ ARION_GBP_FAKE_FILE: file, WEBSITE_SITE_NAME: 'arion-api-prod' }), false);
     assert.equal(fakeEnabled({}), false);
     assert.equal(reviewsApi({ ARION_GBP_FAKE_FILE: file, WEBSITE_SITE_NAME: 'arion-api-prod' }).fake, false);
+    assert.equal(reviewsApi({ WEBSITE_SITE_NAME: 'arion-api-prod' }).readOnly, undefined, 'the live service posts');
+    // A machine that is neither the live service nor using the fake never posts to Google.
+    const devReal = reviewsApi({});
+    assert.equal(devReal.readOnly, true);
+    assert.match((await devReal.replyToReview('real-token', 'locations/x', 'r1', 'Thanks')).error, /only by the live service/);
     const api = reviewsApi({ ARION_GBP_FAKE_FILE: file });
     assert.equal(api.fake, true);
     assert.equal((await api.fetchReviews('t', 'locations/x')).reviews[0].replyComment, null);
