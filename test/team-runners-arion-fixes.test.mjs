@@ -512,3 +512,18 @@ test('a time-zone read that fails is logged, then the default is used', async ()
   assert.equal(errors.length, 1, 'the failed read was swallowed with no trace');
   assert.match(errors[0], /permission was denied/);
 });
+
+test('a hand-off that fails gives its claim back, so the card offers Try again', async () => {
+  const row = { output_id: 'o1', content_type: 'social_post', review_status: 'approved', body_markdown: 'Hi', scheduled_social_post_id: null };
+  const pool = handoffPool(row);
+  const out = await handoffSocial(pool, {
+    tenantId: T1, outputId: 'o1', scheduledFor: '2026-10-09T15:00:00Z', approvedBy: 'Dana', env: ENV,
+    fetchImpl: async () => { throw new Error('ECONNREFUSED'); }, timeZone: async () => 'America/Chicago',
+  });
+  assert.equal(out.ok, false);
+  const claimed = pool.statements.find((x) => /SET scheduled_social_post_id = @claim/.test(x.text));
+  const released = pool.statements.find((x) => /SET scheduled_social_post_id = NULL/.test(x.text));
+  assert.ok(released, 'the claim was left on the row: the post would never show Try again');
+  assert.equal(released.inputs.claim, claimed.inputs.claim, 'only its own claim is cleared');
+  assert.ok(pool.statements.some((x) => /handoff_error_plain = @err/.test(x.text)));
+});
