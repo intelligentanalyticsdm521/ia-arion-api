@@ -18,6 +18,7 @@ import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
 import { getSearchConsoleDates } from '../../lib/googleServices.js';
+import { siteSearchToken } from '../../lib/gbpTokenAtRest.js';
 import { plugin as pluginApi } from '../../lib/pluginClient.js';
 import { runAllArionIntelligence, ARION_INTEL_REPORTS } from '../../lib/intelligence/index.js';
 import { CACHE_TTL_MS, siteAgeMultiplier } from '../../lib/intelligence/utils.js';
@@ -57,7 +58,7 @@ async function buildIntelContext({ site, tenantId }) {
   // protocol + trailing slash) over a domain-derived URL.
   let gscDates = [];
   try {
-    const refreshToken = site?.gsc_oauth_token_ref || site?.gbp_oauth_token_ref || null;
+    const refreshToken = siteSearchToken(site);
     const siteUrl = site?.gsc_site_url || (site?.domain ? 'https://' + site.domain : null);
     if (refreshToken && siteUrl) {
       const gscRows = await getSearchConsoleDates(refreshToken, siteUrl, 90).catch((err) => {

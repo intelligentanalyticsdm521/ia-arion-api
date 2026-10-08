@@ -5,6 +5,7 @@ import sql from 'mssql';
 import crypto from 'node:crypto';
 import { getServicesPool } from '../db/servicesPool.js';
 import { getAccessToken } from '../lib/googleBusiness.js';
+import { open as openToken } from '../lib/gbpTokenAtRest.js';
 
 const TENANT_ID = '8c9527b9-8999-4b31-a306-f3d4ccc39fbd';
 
@@ -22,7 +23,7 @@ async function main() {
 
   if (!site?.gbp_oauth_token_ref) { console.log('No token'); process.exit(1); }
 
-  const tok = await getAccessToken(site.gbp_oauth_token_ref);
+  const tok = await getAccessToken(openToken(site.gbp_oauth_token_ref));
   if (!tok?.access_token) { console.log('Token refresh failed'); process.exit(1); }
   console.log('Got access token');
 

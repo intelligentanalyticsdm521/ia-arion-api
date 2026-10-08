@@ -8,6 +8,7 @@ import { getPlatformPool } from '../db/platformPool.js';
 // callback redirect (fire-and-forget).
 import { completeWalkthroughTaskByKindFor } from '../lib/walkthroughClient.js';
 import { verifyOAuthState, decodeGoogleIdTokenEmail } from '../lib/oauthState.js';
+import { storeGoogleRefreshToken } from '../lib/gbpTokenAtRest.js';
 
 const router = Router();
 
@@ -208,18 +209,8 @@ router.get('/google/callback', async (req, res) => {
   // Store refresh token and update connection flags in the database
   try {
     const pool = await getServicesPool();
-    await pool.request()
-      .input('tenantId', sql.UniqueIdentifier, tenantId)
-      .input('siteId', sql.UniqueIdentifier, siteId)
-      .input('refreshToken', sql.NVarChar(2000), refreshToken)
-      .query(`
-        UPDATE arion.site
-        SET gbp_oauth_token_ref = @refreshToken,
-            gbp_connected = 1,
-            gsc_connected = 1,
-            updated_at = GETUTCDATE()
-        WHERE tenant_id = @tenantId AND site_id = @siteId
-      `);
+    // Sealed at rest when the server holds the key (lib/gbpTokenAtRest.js).
+    await storeGoogleRefreshToken(pool, { tenantId, siteId, refreshToken });
 
     console.log(`[oauth/google/callback] Successfully stored refresh token for tenant=${tenantId} site=${siteId}`);
 

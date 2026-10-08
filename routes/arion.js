@@ -63,6 +63,7 @@ import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } fro
 import { signOAuthState } from '../lib/oauthState.js';
 import { attachAgencyContext, isAgencyCaller } from '../lib/agency.js';
 import { createSiteRequest, listSiteRequests, notifyFounderOfSiteRequest } from '../lib/siteRequests.js';
+import { hasSiteToken, siteRefreshToken } from '../lib/gbpTokenAtRest.js';
 
 const router = Router();
 
@@ -1025,9 +1026,9 @@ router.get('/website-analytics/:provider', async (req, res) => {
     const days = parseInt(req.query.days) || 28;
 
     // If provider is GOOGLE and site has a refresh token, call GA4 API
-    if (provider === 'GOOGLE' && site.gbp_oauth_token_ref) {
+    if (provider === 'GOOGLE' && hasSiteToken(site)) {
       try {
-        const gaData = await getAnalyticsData(site.gbp_oauth_token_ref, site.ga4_property_id || site.domain, days);
+        const gaData = await getAnalyticsData(siteRefreshToken(site), site.ga4_property_id || site.domain, days);
         if (gaData) {
           return res.json({
             site: toSiteSummary(site), provider, connected: true,
@@ -1300,10 +1301,10 @@ router.get('/sites/:siteId/gbp/locations', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    if (!site.gbp_connected || !site.gbp_oauth_token_ref) {
+    if (!site.gbp_connected || !hasSiteToken(site)) {
       return res.status(400).json({ error: { code: 'NOT_CONNECTED', message: 'Connect Google first', status: 400 } });
     }
-    const tokenData = await getAccessToken(site.gbp_oauth_token_ref).catch(() => null);
+    const tokenData = await getAccessToken(siteRefreshToken(site)).catch(() => null);
     if (!tokenData) return res.status(401).json({ error: { code: 'AUTH_EXPIRED', message: 'Google authorization expired — reconnect', status: 401 } });
 
     const { listAllGbpLocations } = await import('../lib/gbpApi.js');
@@ -1390,11 +1391,11 @@ router.post('/sites/:siteId/gbp/select-location', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    if (!site.gbp_oauth_token_ref) return res.status(400).json({ error: { code: 'NOT_CONNECTED', message: 'Connect Google first', status: 400 } });
+    if (!hasSiteToken(site)) return res.status(400).json({ error: { code: 'NOT_CONNECTED', message: 'Connect Google first', status: 400 } });
 
     // Verify the location is actually one this user can access — prevents
     // an attacker from setting an arbitrary location_name they don't own
-    const tokenData = await getAccessToken(site.gbp_oauth_token_ref).catch(() => null);
+    const tokenData = await getAccessToken(siteRefreshToken(site)).catch(() => null);
     if (!tokenData) return res.status(401).json({ error: { code: 'AUTH_EXPIRED', message: 'Google authorization expired', status: 401 } });
     const { listAllGbpLocations } = await import('../lib/gbpApi.js');
     const locations = await listAllGbpLocations(tokenData.access_token, site.domain);
@@ -1523,9 +1524,9 @@ router.post('/sites/:siteId/gbp/disconnect', async (req, res) => {
 async function getGbpBatchBContext(pool, tenantId, siteId, { requireLocation = true } = {}) {
   const site = await getSiteForTenant(pool, tenantId, siteId);
   if (!site) return { status: 404, code: 'NOT_FOUND', message: 'Site not found' };
-  if (!site.gbp_connected || !site.gbp_oauth_token_ref) return { status: 400, code: 'NOT_CONNECTED', message: 'Connect Google first' };
+  if (!site.gbp_connected || !hasSiteToken(site)) return { status: 400, code: 'NOT_CONNECTED', message: 'Connect Google first' };
   if (requireLocation && !site.gbp_location_name) return { status: 400, code: 'NO_LOCATION_SELECTED', message: 'No Google Business Profile listing is selected for this site yet' };
-  const tokenData = await getAccessToken(site.gbp_oauth_token_ref).catch(() => null);
+  const tokenData = await getAccessToken(siteRefreshToken(site)).catch(() => null);
   if (!tokenData) return { status: 401, code: 'AUTH_EXPIRED', message: 'Google authorization expired — reconnect' };
   return { site, accessToken: tokenData.access_token, locationName: site.gbp_location_name || null };
 }
@@ -4709,7 +4710,7 @@ router.get('/search/performance', async (req, res) => {
         const demo = await demoSearchPerformance(pool, site, period);
         if (demo) return res.json(demo);
       }
-      const refreshToken = site.gbp_oauth_token_ref;
+      const refreshToken = siteRefreshToken(site);
       if (!refreshToken) {
         return res.json({ provider, period, summary, breakdowns, error: 'Google not connected' });
       }
@@ -4825,7 +4826,7 @@ router.get('/search/url-inspection', async (req, res) => {
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
 
-    const refreshToken = site.gbp_oauth_token_ref;
+    const refreshToken = siteRefreshToken(site);
     if (!refreshToken) return res.json({ inspection: null, error: 'Google Search Console is not connected for this site. Connect it in Settings → Connected Accounts.' });
 
     const tokenData = await getAccessToken(refreshToken).catch(() => null);
@@ -4887,7 +4888,7 @@ router.post('/search/submit-url', async (req, res) => {
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
 
-    const refreshToken = site.gbp_oauth_token_ref;
+    const refreshToken = siteRefreshToken(site);
     const tokenData = refreshToken ? await getAccessToken(refreshToken).catch(() => null) : null;
     const siteUrl = tokenData?.access_token ? await resolveGscProperty(tokenData.access_token, site.domain) : 'https://' + site.domain;
 
@@ -5301,7 +5302,7 @@ router.get('/search/sitemaps', async (req, res) => {
     let sitemaps = [];
 
     if (provider === 'google') {
-      const refreshToken = site.gbp_oauth_token_ref;
+      const refreshToken = siteRefreshToken(site);
       if (!refreshToken) return res.json({ provider, sitemaps: [], error: 'Google not connected' });
       const tokenData = await getAccessToken(refreshToken).catch(() => null);
       if (!tokenData) return res.json({ provider, sitemaps: [], error: 'Failed to get access token' });
@@ -5736,7 +5737,7 @@ async function getGbpContext(pool, tenantId, siteId) {
   const site = await getSiteForTenant(pool, tenantId, siteId);
   if (!site) return { error: 'site_not_found', status: 404 };
   if (!site.gbp_connected) return { error: 'not_connected', site };
-  const refreshToken = site.gbp_oauth_token_ref;
+  const refreshToken = siteRefreshToken(site);
   if (!refreshToken) return { error: 'not_connected', site };
   const locationName = site.gbp_location_name || null;
   if (!locationName) return { error: 'gbp_location_not_selected', site };
@@ -6446,7 +6447,7 @@ router.post('/search/generate-sitemap', async (req, res) => {
     const domain = site.domain;
     if (!domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
 
-    const refreshToken = site.gbp_oauth_token_ref;
+    const refreshToken = siteRefreshToken(site);
     let tokenData = null;
     if (refreshToken) tokenData = await getAccessToken(refreshToken).catch(() => null);
 
@@ -7636,10 +7637,10 @@ router.get('/integrations/google/properties', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    if (!site.gbp_oauth_token_ref) return res.status(409).json({ error: { code: 'NOT_CONNECTED', message: 'Google not connected. Complete OAuth first.', status: 409 } });
+    if (!hasSiteToken(site)) return res.status(409).json({ error: { code: 'NOT_CONNECTED', message: 'Google not connected. Complete OAuth first.', status: 409 } });
 
     const { getAccessToken } = await import('../lib/googleBusiness.js');
-    const tokenData = await getAccessToken(site.gbp_oauth_token_ref);
+    const tokenData = await getAccessToken(siteRefreshToken(site));
     if (!tokenData) return res.status(502).json({ error: { code: 'TOKEN_ERROR', message: 'Failed to refresh Google token', status: 502 } });
     const accessToken = tokenData.access_token;
 
@@ -7851,7 +7852,7 @@ router.get('/analytics', async (req, res) => {
       const demo = await demoAnalytics(pool, site, period);
       if (demo) return res.json(demo);
     }
-    if (!site.gbp_oauth_token_ref || !site.ga4_property_id) {
+    if (!hasSiteToken(site) || !site.ga4_property_id) {
       return res.json({ connected: false, error: 'not_connected' });
     }
 
@@ -7864,7 +7865,7 @@ router.get('/analytics', async (req, res) => {
 
     // Get access token
     const { getAccessToken } = await import('../lib/googleBusiness.js');
-    const tokenData = await getAccessToken(site.gbp_oauth_token_ref);
+    const tokenData = await getAccessToken(siteRefreshToken(site));
     if (!tokenData || !tokenData.access_token) {
       return res.json({ connected: true, error: 'ga4_auth_expired' });
     }
@@ -8693,10 +8694,10 @@ router.post('/business-locations/sync', async (req, res) => {
         .query('SELECT TOP 1 site_id, domain, gbp_oauth_token_ref FROM arion.site WHERE tenant_id = @tenantId AND gbp_oauth_token_ref IS NOT NULL ORDER BY created_at');
       siteRow = r.recordset[0];
     }
-    if (!siteRow || !siteRow.gbp_oauth_token_ref) {
+    if (!siteRow || !hasSiteToken(siteRow)) {
       return res.status(400).json({ error: { code: 'NOT_CONNECTED', message: 'No Google-connected site for this tenant', status: 400 } });
     }
-    const tokenData = await getAccessToken(siteRow.gbp_oauth_token_ref).catch(() => null);
+    const tokenData = await getAccessToken(siteRefreshToken(siteRow)).catch(() => null);
     if (!tokenData) {
       return res.status(401).json({ error: { code: 'AUTH_EXPIRED', message: 'Google authorization expired — reconnect', status: 401 } });
     }

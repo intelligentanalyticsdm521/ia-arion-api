@@ -875,6 +875,8 @@ const STREAM_FILES = [
   'db/migrations/071_review_reply_posting_and_held_reasons.sql',
   'db/migrations/072_plain_words_for_credit_prices.sql',
   'db/migrations/073_plain_words_for_remaining_credit_prices.sql',
+  'db/migrations/074_room_for_sealed_google_tokens.sql',
+  'lib/gbpTokenAtRest.js', 'lib/demoData.js', 'lib/insightsSnapshot.js', 'routes/oauth.js', 'routes/arion/intelligence.js',
   'lib/jobChecks.js', 'lib/teamSeam.js', 'lib/businessTimeZone.js', 'lib/gbpReplyRunner.js', 'lib/gbpFake.js', 'lib/gbpAiReply.js',
   'lib/gbpIntake.js', 'lib/argus/suiteCeiling.js',
   'lib/contentAgent/tick.js', 'lib/contentAgent/runner.js', 'lib/contentAgent/drafting.js',
@@ -893,6 +895,20 @@ const PHASE1_BASE = '84df57c';
 const PRE_EXISTING = [
   "requiredAddon: x.seoAddon === true && !x.done ? 'Intelligent Analytics SEO package' : null,",
   "return res.status(403).json({ error: { code: 'platform_entry', message: 'This entry is managed by Intelligent Analytics and cannot be removed here', status: 403 } });",
+  // Older lines in files the sealed-token fix touched (lib/demoData.js demo
+  // fixtures, routes/oauth.js portal default and checklist call), listed so
+  // the files can be on STREAM_FILES; exact lines only.
+  "const city = site.city || 'Des Moines';",
+  "{ city: 'West Des Moines', sessions: round(totalSessions * 0.11) },",
+  "import { completeWalkthroughTaskByKindFor } from '../lib/walkthroughClient.js';",
+  "const portalUrl = process.env.PORTAL_URL || 'https://portal.intelligentanalyticsdm.com';",
+  "const walkthroughInternalToken =",
+  "process.env.LUMEN_WALKTHROUGH_SEED_TOKEN ||",
+  "process.env.WALKTHROUGH_SEED_INTERNAL_TOKEN ||",
+  "if (!walkthroughInternalToken) {",
+  "console.warn('[oauth/google/callback] LUMEN_WALKTHROUGH_SEED_TOKEN not set — skipping connect_gbp walkthrough completion');",
+  "completeWalkthroughTaskByKindFor(tenantId, 'connect_gbp', {",
+  "internalToken: walkthroughInternalToken,",
 ];
 const DEFECT = [/Intelligent Analytics/i, /intelligentanalyticsdm/i, /ia-dm\.com/i,
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i,

@@ -32,6 +32,7 @@ import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
 import { reviewsApi, NOT_LIVE_WORDS } from '../../lib/gbpFake.js';
+import { siteRefreshToken } from '../../lib/gbpTokenAtRest.js';
 import { runReviewReplyTick, markReply, claimReply, releaseReply, JOB_KEY, POSTING_STALE_MINUTES } from '../../lib/gbpReplyRunner.js';
 import { jobsOn as seamJobsOn, briefFor as seamBriefFor } from '../../lib/teamSeam.js';
 import { runChecks, PLATFORM_CHECKS, checkContext, RUN_WORDS } from '../../lib/jobChecks.js';
@@ -130,7 +131,7 @@ export function makeReviewRepliesRouter({
       // 1. Has somebody answered it on Google since? Never post blind.
       const google = api();
       let data;
-      try { data = await google.fetchReviews(row.gbp_oauth_token_ref, row.gbp_location_name); } catch (e) { data = { error: e.message }; }
+      try { data = await google.fetchReviews(siteRefreshToken(row), row.gbp_location_name); } catch (e) { data = { error: e.message }; }
       if (!data || data.error) return fail(res, 503, 'GOOGLE_UNREADABLE', WORDS.googleUnreadable);
       const live = (data.reviews || []).find((x) => String(x.reviewId) === String(row.gbp_review_id));
       if (live?.replyComment) {
@@ -154,7 +155,7 @@ export function makeReviewRepliesRouter({
       if (!(await claimReply(pool, { draftId: id, tenantId, decidedBy: who }))) return fail(res, 409, 'RACE', WORDS.raced);
       const before = row.status === 'failed' ? 'failed' : 'held';
       let posted;
-      try { posted = await google.replyToReview(row.gbp_oauth_token_ref, row.gbp_location_name, row.gbp_review_id, text); } catch (e) { posted = { error: e.message }; }
+      try { posted = await google.replyToReview(siteRefreshToken(row), row.gbp_location_name, row.gbp_review_id, text); } catch (e) { posted = { error: e.message }; }
       if (!posted || posted.error) {
         // On a machine that is not the live service nothing is posted to Google
         // (lib/gbpFake.js); say exactly that rather than blaming Google, and

@@ -14,6 +14,7 @@ import sql from 'mssql';
 import crypto from 'node:crypto';
 import { getServicesPool } from '../db/servicesPool.js';
 import { getSearchConsoleData, getSearchConsolePages, getBusinessProfile, getReviews, getPerformanceMetrics } from '../lib/googleServices.js';
+import { open as openToken } from '../lib/gbpTokenAtRest.js';
 import { listProjects, getProject, getKeywordRankings, getAuditSummary } from '../lib/seranking.js';
 
 const TENANT_ID = '8c9527b9-8999-4b31-a306-f3d4ccc39fbd';
@@ -24,7 +25,8 @@ async function getSitesWithTokens(pool) {
     .query(`SELECT site_id, tenant_id, domain, gbp_oauth_token_ref, gbp_connected, gsc_connected,
                    se_ranking_project_id, seo_addon_tier, ga4_property_id, gbp_place_id
             FROM arion.site WHERE tenant_id = @tenantId`);
-  return result.recordset;
+  // The stored token may be sealed (lib/gbpTokenAtRest.js): open it once here.
+  return result.recordset.map((s) => ({ ...s, gbp_oauth_token_ref: openToken(s.gbp_oauth_token_ref) }));
 }
 
 // ──────────────────────────────────────────────────────
