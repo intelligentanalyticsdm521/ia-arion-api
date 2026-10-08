@@ -878,7 +878,7 @@ const STREAM_FILES = [
   'db/migrations/074_room_for_sealed_google_tokens.sql',
   'lib/gbpTokenAtRest.js', 'lib/demoData.js', 'lib/insightsSnapshot.js', 'routes/oauth.js', 'routes/arion/intelligence.js',
   'lib/jobChecks.js', 'lib/teamSeam.js', 'lib/businessTimeZone.js', 'lib/gbpReplyRunner.js', 'lib/gbpFake.js', 'lib/gbpAiReply.js',
-  'lib/gbpIntake.js', 'lib/argus/suiteCeiling.js',
+  'lib/gbpIntake.js', 'lib/argus/suiteCeiling.js', 'lib/googleBusiness.js',
   'lib/contentAgent/tick.js', 'lib/contentAgent/runner.js', 'lib/contentAgent/drafting.js',
   'lib/contentAgent/decisions.js', 'lib/contentAgent/socialHandoff.js', 'lib/contentAgent/marginMonitor.js',
   'lib/contentAgent/publisher.js',

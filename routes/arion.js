@@ -63,7 +63,7 @@ import { loadCapConfig, upsertCapConfig, DEFAULT_SURFACE as AI_CAP_SURFACE } fro
 import { signOAuthState } from '../lib/oauthState.js';
 import { attachAgencyContext, isAgencyCaller } from '../lib/agency.js';
 import { createSiteRequest, listSiteRequests, notifyFounderOfSiteRequest } from '../lib/siteRequests.js';
-import { hasSiteToken, siteRefreshToken } from '../lib/gbpTokenAtRest.js';
+import { hasSiteToken, siteRefreshToken, GbpTokenUnreadable, tokenColumnsSql, hasSiteTokenSql } from '../lib/gbpTokenAtRest.js';
 
 const router = Router();
 
@@ -1286,6 +1286,27 @@ router.put('/my-business/:provider', async (req, res) => {
   }
 });
 
+/**
+ * The site's Google access token, for the Business Profile routes.
+ * { refusal } when the saved connection cannot be opened on this server (409
+ * gbp_token_unreadable, plain words, nothing sent to Google); otherwise
+ * { tokenData }, which is null when Google refused the refresh.
+ * Opening the token is wrapped HERE: siteRefreshToken throws before any promise
+ * exists, so a bare getAccessToken(siteRefreshToken(site)).catch() never sees it.
+ */
+export async function googleAccessForSite(site, refresh = getAccessToken) {
+  let refreshToken;
+  try {
+    refreshToken = siteRefreshToken(site);
+  } catch (err) {
+    if (err instanceof GbpTokenUnreadable) return { refusal: { status: 409, code: 'gbp_token_unreadable', message: err.message } };
+    throw err;
+  }
+  return { tokenData: await refresh(refreshToken).catch(() => null) };
+}
+
+const refusalBody = ({ status, code, message }) => ({ error: { code, message, status } });
+
 // --- GET /arion/sites/:siteId/gbp/locations ---
 // SECURITY: surfaces ALL accounts + locations the OAuth'd Google user
 // can access. Portal renders this as a picker.
@@ -1304,7 +1325,9 @@ router.get('/sites/:siteId/gbp/locations', async (req, res) => {
     if (!site.gbp_connected || !hasSiteToken(site)) {
       return res.status(400).json({ error: { code: 'NOT_CONNECTED', message: 'Connect Google first', status: 400 } });
     }
-    const tokenData = await getAccessToken(siteRefreshToken(site)).catch(() => null);
+    const access = await googleAccessForSite(site);
+    if (access.refusal) return res.status(409).json(refusalBody(access.refusal));
+    const { tokenData } = access;
     if (!tokenData) return res.status(401).json({ error: { code: 'AUTH_EXPIRED', message: 'Google authorization expired — reconnect', status: 401 } });
 
     const { listAllGbpLocations } = await import('../lib/gbpApi.js');
@@ -1395,7 +1418,9 @@ router.post('/sites/:siteId/gbp/select-location', async (req, res) => {
 
     // Verify the location is actually one this user can access — prevents
     // an attacker from setting an arbitrary location_name they don't own
-    const tokenData = await getAccessToken(siteRefreshToken(site)).catch(() => null);
+    const access = await googleAccessForSite(site);
+    if (access.refusal) return res.status(409).json(refusalBody(access.refusal));
+    const { tokenData } = access;
     if (!tokenData) return res.status(401).json({ error: { code: 'AUTH_EXPIRED', message: 'Google authorization expired', status: 401 } });
     const { listAllGbpLocations } = await import('../lib/gbpApi.js');
     const locations = await listAllGbpLocations(tokenData.access_token, site.domain);
@@ -1526,7 +1551,9 @@ async function getGbpBatchBContext(pool, tenantId, siteId, { requireLocation = t
   if (!site) return { status: 404, code: 'NOT_FOUND', message: 'Site not found' };
   if (!site.gbp_connected || !hasSiteToken(site)) return { status: 400, code: 'NOT_CONNECTED', message: 'Connect Google first' };
   if (requireLocation && !site.gbp_location_name) return { status: 400, code: 'NO_LOCATION_SELECTED', message: 'No Google Business Profile listing is selected for this site yet' };
-  const tokenData = await getAccessToken(siteRefreshToken(site)).catch(() => null);
+  const access = await googleAccessForSite(site);
+  if (access.refusal) return access.refusal;
+  const { tokenData } = access;
   if (!tokenData) return { status: 401, code: 'AUTH_EXPIRED', message: 'Google authorization expired — reconnect' };
   return { site, accessToken: tokenData.access_token, locationName: site.gbp_location_name || null };
 }
@@ -8686,18 +8713,20 @@ router.post('/business-locations/sync', async (req, res) => {
       const r = await pool.request()
         .input('tenantId', sql.UniqueIdentifier, tenantId)
         .input('siteId', sql.UniqueIdentifier, siteId)
-        .query('SELECT site_id, domain, gbp_oauth_token_ref FROM arion.site WHERE tenant_id = @tenantId AND site_id = @siteId');
+        .query(`SELECT site_id, domain, ${tokenColumnsSql()} FROM arion.site WHERE tenant_id = @tenantId AND site_id = @siteId`);
       siteRow = r.recordset[0];
     } else {
       const r = await pool.request()
         .input('tenantId', sql.UniqueIdentifier, tenantId)
-        .query('SELECT TOP 1 site_id, domain, gbp_oauth_token_ref FROM arion.site WHERE tenant_id = @tenantId AND gbp_oauth_token_ref IS NOT NULL ORDER BY created_at');
+        .query(`SELECT TOP 1 site_id, domain, ${tokenColumnsSql()} FROM arion.site WHERE tenant_id = @tenantId AND ${hasSiteTokenSql()} ORDER BY created_at`);
       siteRow = r.recordset[0];
     }
     if (!siteRow || !hasSiteToken(siteRow)) {
       return res.status(400).json({ error: { code: 'NOT_CONNECTED', message: 'No Google-connected site for this tenant', status: 400 } });
     }
-    const tokenData = await getAccessToken(siteRefreshToken(siteRow)).catch(() => null);
+    const access = await googleAccessForSite(siteRow);
+    if (access.refusal) return res.status(409).json(refusalBody(access.refusal));
+    const { tokenData } = access;
     if (!tokenData) {
       return res.status(401).json({ error: { code: 'AUTH_EXPIRED', message: 'Google authorization expired — reconnect', status: 401 } });
     }

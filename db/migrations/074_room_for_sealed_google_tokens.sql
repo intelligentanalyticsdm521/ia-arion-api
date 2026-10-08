@@ -8,7 +8,8 @@
 -- for today's short tokens. Both token columns widen to 1000 characters.
 --
 -- Widening an NVARCHAR column keeps every value as it is; nothing is rewritten.
--- GUARDED: each column is altered only while it is narrower than 1000, so
+-- GUARDED: each column is altered only while it is narrower than 1000 (0 to
+-- 1999 bytes; an NVARCHAR(MAX) column reports -1 and is left alone), so
 -- running this twice changes nothing the second time. The last statement
 -- SELECTs both widths (in characters) so the pipeline log shows 1000 and 1000.
 --
@@ -17,11 +18,11 @@
 -- TARGET DB: iadm_services.
 
 IF COL_LENGTH('arion.site', 'gbp_oauth_token_ref') IS NOT NULL
-   AND COL_LENGTH('arion.site', 'gbp_oauth_token_ref') < 2000
+   AND COL_LENGTH('arion.site', 'gbp_oauth_token_ref') BETWEEN 0 AND 1999
     ALTER TABLE arion.site ALTER COLUMN gbp_oauth_token_ref NVARCHAR(1000) NULL;
 
 IF COL_LENGTH('arion.site', 'gsc_oauth_token_ref') IS NOT NULL
-   AND COL_LENGTH('arion.site', 'gsc_oauth_token_ref') < 2000
+   AND COL_LENGTH('arion.site', 'gsc_oauth_token_ref') BETWEEN 0 AND 1999
     ALTER TABLE arion.site ALTER COLUMN gsc_oauth_token_ref NVARCHAR(1000) NULL;
 
 SELECT COL_LENGTH('arion.site', 'gbp_oauth_token_ref') / 2 AS gbp_token_chars,

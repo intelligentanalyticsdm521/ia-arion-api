@@ -18,10 +18,12 @@ import { fileURLToPath } from 'node:url';
 import {
   seal, open, isSealed, tokenKey, forStore, storeGoogleRefreshToken, siteRefreshToken, siteSearchToken,
   hasSiteToken, legacyReads, resetLegacyReads, resetStoreWarning, GbpTokenUnreadable, UNREADABLE_WORDS, SEALED_PREFIX,
+  tokenColumnsSql, hasSiteTokenSql,
 } from '../lib/gbpTokenAtRest.js';
 import { runEncrypt, shapeOf } from '../scripts/encrypt-gbp-tokens.mjs';
 import { readGbpIntake } from '../lib/gbpIntake.js';
 import { reviewsApi } from '../lib/gbpFake.js';
+import { googleAccessForSite } from '../routes/arion.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KEY = () => crypto.randomBytes(32).toString('base64');
@@ -211,6 +213,7 @@ function fakeSitePool(rows, faults = {}) {
       return { recordset: row ? [{ v: row[m[1]] }] : [] };
     }
     if ((m = /UPDATE arion\.site SET (\w+) = @new WHERE site_id = @s AND \1 = @old/.exec(text))) {
+      if (faults.driverError) throw faults.driverError;
       const row = tx.view.get(inputs.s);
       if (!row || row[m[1]] !== inputs.old || faults.raced) return { rowsAffected: [0] };
       row[m[1]] = inputs.new;
@@ -309,6 +312,26 @@ test('--apply rolls back, and never commits, a value whose row changed under it 
   }
 });
 
+test('a database error never reaches the output: only the site_id and the error number, in a plain sentence', async () => {
+  const env = { GBP_TOKEN_KEY: KEY() };
+  // A made-up token-shaped value, 100 characters, as a driver might quote it.
+  const quoted = '1//' + 'Zq7'.repeat(40).slice(0, 97);
+  assert.equal(quoted.length, 100);
+  const driverError = Object.assign(new Error(quoted), { number: 8152, code: 'EREQUEST' });
+  const pool = fakeSitePool([ROWS()[0]], { driverError });
+  const lines = [];
+  const s = await runEncrypt({ pool, env, apply: true, out: (l) => lines.push(l) });
+  assert.equal(s.failed, 1);
+  assert.equal(s.changed, 0);
+  assert.equal(pool.commits, 0);
+  const text = lines.join('\n');
+  assert.equal(text.includes(quoted), false, 'the driver message is not printed');
+  assert.equal(text.includes(quoted.slice(3, 40)), false, 'no part of it either');
+  assertNoTokenShapes(lines);
+  assert.ok(lines.some((l) => l.includes(`gbp not sealed: the database refused the write for site_id=${G(1)} (database error 8152); nothing was changed for this value`)), text);
+  assert.equal(pool.table.get(G(1)).gbp_oauth_token_ref, MADE_UP, 'the stored value is untouched');
+});
+
 test('--apply refuses without GBP_TOKEN_KEY and touches nothing', async () => {
   const pool = fakeSitePool(ROWS());
   await assert.rejects(runEncrypt({ pool, env: {}, apply: true, out: () => {} }), /GBP_TOKEN_KEY is not set/);
@@ -344,8 +367,13 @@ test('the command line refuses --apply without the key, and a non-local server w
 
 /* ── the guard: no reader can slip past open() ─────────────────────────── */
 
-/** The code of a JS file with comments and string / template text removed (template ${} expressions kept). */
-function codeOnly(src) {
+/**
+ * The code of a JS file with comments removed. Default: string / template text
+ * removed too (template ${} expressions kept). keepText: string, template and
+ * regex text kept as they are, so a column named inside SQL or a bracket string
+ * is still seen.
+ */
+function codeOnly(src, { keepText = false } = {}) {
   let out = '';
   let i = 0;
   let lastSig = '';
@@ -358,10 +386,10 @@ function codeOnly(src) {
   while (i < n) {
     const c = src[i];
     if (inTemplate) {
-      if (c === '\\') { i += 2; continue; }
+      if (c === '\\') { if (keepText) out += src.slice(i, i + 2); i += 2; continue; }
       if (c === '`') { inTemplate = false; i += 1; out += '``'; lastSig = '`'; word = ''; continue; }
       if (c === '$' && src[i + 1] === '{') { tpl.push(0); inTemplate = false; i += 2; out += ' '; lastSig = '{'; word = ''; continue; }
-      if (c === '\n') out += '\n';
+      if (c === '\n' || keepText) out += c;
       i += 1;
       continue;
     }
@@ -371,7 +399,7 @@ function codeOnly(src) {
     if (c === '"' || c === "'") {
       let j = i + 1;
       while (j < n && src[j] !== c && src[j] !== '\n') j += src[j] === '\\' ? 2 : 1;
-      i = j + 1; out += '""'; lastSig = '"'; word = '';
+      out += keepText ? src.slice(i, j + 1) : '""'; i = j + 1; lastSig = '"'; word = '';
       continue;
     }
     if (c === '`') { inTemplate = true; i += 1; continue; }
@@ -386,7 +414,7 @@ function codeOnly(src) {
       }
       j += 1;
       while (j < n && /[a-z]/i.test(src[j])) j += 1;
-      i = j; out += '/r/'; lastSig = '/'; word = '';
+      out += keepText ? src.slice(i, j) : '/r/'; i = j; lastSig = '/'; word = '';
       continue;
     }
     if (tpl.length) {
@@ -416,6 +444,54 @@ test('the guard\'s scanner keeps code, drops SQL text and comments, and keeps ${
   assert.deepEqual(hits, ['gbp_oauth_token_ref', 'gsc_oauth_token_ref', 'gbp_oauth_token_ref'], code);
 });
 
+const COLUMN_RE = /\b(gbp|gsc)_oauth_token_ref\b/;
+const CLEARED_RE = /\b(gbp|gsc)_oauth_token_ref\s*=\s*NULL\b/gi;
+const REALIASED_RE = /\$\{\s*tokenColumnsSql\([^)]*\)\s*\}\s*(AS\b|=)|=\s*\$\{\s*tokenColumnsSql\(/i;
+
+/**
+ * Every line of a file that names a token column, in code OR in text (SQL, a
+ * bracket string, a regex), other than setting one to NULL; and every line that
+ * re-aliases the tokenColumnsSql() fragment. Comments do not count.
+ */
+function columnMentions(src) {
+  const { code, clean } = codeOnly(src, { keepText: true });
+  const lines = new Set();
+  code.split('\n').forEach((line, k) => { if (COLUMN_RE.test(line.replace(CLEARED_RE, ''))) lines.add(k + 1); });
+  src.split('\n').forEach((line, k) => { if (REALIASED_RE.test(line)) lines.add(k + 1); });
+  return { lines: [...lines].sort((a, b) => a - b), clean };
+}
+
+test('the guard sees a bracket string, a SQL alias and a re-aliased fragment, and lets a clear to NULL and a comment through', () => {
+  const caught = {
+    'a bracket string': "const t = site?.['gsc_oauth_token_ref'];",
+    'a SQL alias': "const r = await req.query('SELECT gbp_oauth_token_ref AS tok FROM arion.site'); const t = r.recordset[0].tok;",
+    'a T-SQL alias': 'const q = `SELECT tok = s.gbp_oauth_token_ref FROM arion.site s`;',
+    'a template SQL read': 'const q = `SELECT site_id, gbp_oauth_token_ref FROM arion.site WHERE x = ${y}`;',
+    'a write of a value': 'const q = `UPDATE arion.site SET gbp_oauth_token_ref = @t`;',
+    'a fragment re-aliased with AS': 'const q = `SELECT ${tokenColumnsSql()} AS tok FROM arion.site`;',
+    'a fragment re-aliased with =': 'const q = `SELECT tok = ${tokenColumnsSql()} FROM arion.site`;',
+    'a code read': 'const t = site.gbp_oauth_token_ref;',
+  };
+  for (const [label, line] of Object.entries(caught)) assert.deepEqual(columnMentions(line).lines, [1], label);
+  const allowed = [
+    'const q = `UPDATE arion.site SET gbp_oauth_token_ref = NULL, gsc_oauth_token_ref = NULL WHERE site_id = @s`;',
+    '// the gbp_oauth_token_ref column, in a comment',
+    "/* gsc_oauth_token_ref */ const q = `SELECT site_id, ${tokenColumnsSql('s')}, s.domain FROM arion.site s WHERE ${hasSiteTokenSql('s')}`;",
+  ];
+  for (const line of allowed) assert.deepEqual(columnMentions(line).lines, [], line);
+  // A clear to NULL does not cover a read on the same line.
+  assert.deepEqual(columnMentions("const q = `SET gbp_oauth_token_ref = NULL`; const t = row['gsc_oauth_token_ref'];").lines, [1]);
+});
+
+test('the SQL fragments name both columns under their own names, and refuse an alias that is not a plain name', () => {
+  assert.equal(tokenColumnsSql(), 'gbp_oauth_token_ref AS gbp_oauth_token_ref, gsc_oauth_token_ref AS gsc_oauth_token_ref');
+  assert.equal(tokenColumnsSql('s'), 's.gbp_oauth_token_ref AS gbp_oauth_token_ref, s.gsc_oauth_token_ref AS gsc_oauth_token_ref');
+  assert.equal(hasSiteTokenSql(), 'gbp_oauth_token_ref IS NOT NULL');
+  assert.equal(hasSiteTokenSql('s'), 's.gbp_oauth_token_ref IS NOT NULL');
+  assert.throws(() => tokenColumnsSql('s; DROP'), /alias/);
+  assert.throws(() => hasSiteTokenSql('1x'), /alias/);
+});
+
 function jsFiles(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
     const p = path.join(dir, e.name);
@@ -433,16 +509,14 @@ test('no file in lib/ or routes/ reads or writes the token columns except lib/gb
   for (const f of files) {
     if (f === HOME) continue;
     const src = fs.readFileSync(f, 'utf8');
-    const { code, clean } = codeOnly(src);
-    assert.equal(clean, true, `the scanner lost its place in ${path.relative(ROOT, f)}`);
     const rel = path.relative(ROOT, f).replace(/\\/g, '/');
-    code.split('\n').forEach((line, k) => {
-      if (/\b(gbp|gsc)_oauth_token_ref\b/.test(line)) offenders.push(`${rel}:${k + 1} reads the column directly (use siteRefreshToken / siteSearchToken / hasSiteToken)`);
-    });
-    // A store from anywhere else (a SET col = @value) skips the seal; only clearing it (= NULL) is allowed.
-    src.split('\n').forEach((line, k) => {
-      if (/\b(gbp|gsc)_oauth_token_ref\s*=(?!\s*NULL\b)/i.test(line)) offenders.push(`${rel}:${k + 1} writes the column directly (use storeGoogleRefreshToken)`);
-    });
+    assert.equal(codeOnly(src).clean, true, `the scanner lost its place in ${rel}`);
+    // Any mention, in code or in SQL text (an alias or a bracket string
+    // included), is a read or a write that skips the seal; only clearing a
+    // column (= NULL) is allowed.
+    const { lines, clean } = columnMentions(src);
+    assert.equal(clean, true, `the scanner lost its place in ${rel}`);
+    for (const k of lines) offenders.push(`${rel}:${k} names a token column (select with tokenColumnsSql, read with siteRefreshToken / siteSearchToken / hasSiteToken, store with storeGoogleRefreshToken)`);
   }
   assert.deepEqual(offenders, []);
 });
@@ -457,5 +531,84 @@ test('the known readers go through the helper (presence, not just absence)', () 
     'lib/insightsSnapshot.js': /siteSearchToken\(site\)/,
     'routes/oauth.js': /storeGoogleRefreshToken\(pool/,
   };
+  const sqlUses = {
+    'lib/gbpIntake.js': /SELECT TOP 1 site_id, tenant_id, gbp_connected, \$\{tokenColumnsSql\(\)\}/,
+    'lib/gbpReplyRunner.js': /gbp_location_name, \$\{tokenColumnsSql\(\)\}[\s\S]*AND \$\{hasSiteTokenSql\(\)\}/,
+    'lib/insightsSnapshot.js': /domain, \$\{tokenColumnsSql\(\)\}/,
+    'routes/arion/reviewReplies.js': /\$\{tokenColumnsSql\('s'\)\}/,
+    'routes/arion.js': /SELECT TOP 1 site_id, domain, \$\{tokenColumnsSql\(\)\} FROM arion\.site WHERE tenant_id = @tenantId AND \$\{hasSiteTokenSql\(\)\}/,
+  };
+  for (const [f, re] of Object.entries(sqlUses)) assert.match(fs.readFileSync(path.join(ROOT, f), 'utf8'), re, `${f} selects through the helper`);
   for (const [f, re] of Object.entries(uses)) assert.match(fs.readFileSync(path.join(ROOT, f), 'utf8'), re, f);
+});
+
+/* ── a token that cannot be opened, on the Business Profile routes ─────── */
+
+test('a saved connection that cannot be opened answers 409 gbp_token_unreadable in plain words, and nothing is sent to Google', async () => {
+  const saved = process.env.GBP_TOKEN_KEY;
+  const key = KEY();
+  process.env.GBP_TOKEN_KEY = key;
+  try {
+    const site = { site_id: G(1), gbp_connected: 1, gbp_oauth_token_ref: seal(MADE_UP, { GBP_TOKEN_KEY: key }) };
+    const asked = [];
+    const refresh = async (tok) => { asked.push(tok); return { access_token: 'made-up-access' }; };
+    assert.deepEqual(await googleAccessForSite(site, refresh), { tokenData: { access_token: 'made-up-access' } });
+    assert.deepEqual(asked, [MADE_UP], 'Google is asked with the opened token');
+
+    const expired = await googleAccessForSite(site, async () => { throw new Error('made-up refusal'); });
+    assert.deepEqual(expired, { tokenData: null }, 'a refused refresh is still the 401 path');
+
+    process.env.GBP_TOKEN_KEY = KEY(); // the wrong key
+    asked.length = 0;
+    const r = await googleAccessForSite(site, refresh);
+    assert.deepEqual(r, { refusal: { status: 409, code: 'gbp_token_unreadable', message: UNREADABLE_WORDS } });
+    assert.equal(asked.length, 0, 'nothing was sent to Google');
+  } finally {
+    if (saved === undefined) delete process.env.GBP_TOKEN_KEY; else process.env.GBP_TOKEN_KEY = saved;
+  }
+});
+
+test('gbp/locations, select-location, business-locations/sync and the Batch B context answer through googleAccessForSite', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'routes', 'arion.js'), 'utf8');
+  const body = (marker, next) => {
+    const a = src.indexOf(marker);
+    assert.ok(a >= 0, marker);
+    const b = src.indexOf(next, a + marker.length);
+    return src.slice(a, b < 0 ? undefined : b);
+  };
+  const parts = {
+    'gbp/locations': body("router.get('/sites/:siteId/gbp/locations'", '\nrouter.'),
+    'select-location': body("router.post('/sites/:siteId/gbp/select-location'", '\nrouter.'),
+    'business-locations/sync': body("router.post('/business-locations/sync'", '\nrouter.'),
+    'Batch B context': body('async function getGbpBatchBContext(', '\n}\n'),
+  };
+  for (const [name, text] of Object.entries(parts)) {
+    assert.match(text, /await googleAccessForSite\((site|siteRow)\)/, name);
+    assert.match(text, /access\.refusal/, `${name} answers the refusal`);
+    assert.doesNotMatch(text, /getAccessToken\(siteRefreshToken\(/, `${name} does not open the token outside the wrap`);
+  }
+  for (const name of ['gbp/locations', 'select-location', 'business-locations/sync']) {
+    assert.match(parts[name], /res\.status\(409\)\.json\(refusalBody\(access\.refusal\)\)/, name);
+  }
+});
+
+/* ── migration 074 and the Business Profile client ─────────────────────── */
+
+test('migration 074 widens only a column of 0 to 1999 bytes, never an NVARCHAR(MAX) one (COL_LENGTH -1)', () => {
+  const text = fs.readFileSync(path.join(ROOT, 'db', 'migrations', '074_room_for_sealed_google_tokens.sql'), 'utf8');
+  const sqlOnly = text.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n');
+  for (const col of ['gbp_oauth_token_ref', 'gsc_oauth_token_ref']) {
+    const guard = new RegExp(`IF COL_LENGTH\\('arion\\.site', '${col}'\\) IS NOT NULL\\s+AND COL_LENGTH\\('arion\\.site', '${col}'\\) BETWEEN 0 AND 1999\\s+ALTER TABLE arion\\.site ALTER COLUMN ${col} NVARCHAR\\(1000\\) NULL;`);
+    assert.match(sqlOnly, guard, col);
+  }
+  assert.doesNotMatch(sqlOnly, /COL_LENGTH\([^)]*\)\s*<\s*\d+/, 'no bare upper bound that -1 also passes');
+  assert.equal(text.includes('\r'), false, 'LF');
+});
+
+test('lib/googleBusiness.js is LF and its header no longer says the token is kept in the vault', () => {
+  const text = fs.readFileSync(path.join(ROOT, 'lib', 'googleBusiness.js'), 'utf8');
+  assert.equal(text.includes('\r'), false, 'LF line endings');
+  const header = text.split('*/')[0];
+  assert.doesNotMatch(header, /Key Vault/i);
+  assert.match(header, /lib\/gbpTokenAtRest\.js/);
 });

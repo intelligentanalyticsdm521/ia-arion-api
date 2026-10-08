@@ -57,6 +57,9 @@ export function shapeOf(value) {
 
 const shortCol = (c) => c.replace('_oauth_token_ref', '');
 
+/** A refusal this script raised itself: its words are plain and safe to print. */
+class SealRefused extends Error {}
+
 /** One value, one transaction. Returns 'sealed' | 'skipped' | a plain failure sentence. */
 async function sealOne(pool, { table, siteId, column, width, env }) {
   const tx = pool.transaction();
@@ -68,25 +71,28 @@ async function sealOne(pool, { table, siteId, column, width, env }) {
     if (!cur || shapeOf(cur.v) !== 'legacy') { await tx.rollback(); return 'skipped'; }
     const clear = String(cur.v);
     const sealed = seal(clear, env);
-    if (open(sealed, env) !== clear) throw new Error('the sealed value did not open back to the same token');
-    if (width && sealed.length > width) throw new Error(`the sealed value is longer than the column (${width} characters); apply migration 074 first`);
+    if (open(sealed, env) !== clear) throw new SealRefused('the sealed value did not open back to the same token');
+    if (width && sealed.length > width) throw new SealRefused(`the sealed value is longer than the column (${width} characters); apply migration 074 first`);
     const upd = await tx.request()
       .input('s', sql.UniqueIdentifier, siteId)
       .input('old', sql.NVarChar(sql.MAX), clear)
       .input('new', sql.NVarChar(sql.MAX), sealed)
       .query(`UPDATE ${table} SET ${column} = @new WHERE site_id = @s AND ${column} = @old`);
-    if ((upd.rowsAffected?.[0] ?? 0) !== 1) throw new Error('the row changed while it was being sealed');
+    if ((upd.rowsAffected?.[0] ?? 0) !== 1) throw new SealRefused('the row changed while it was being sealed');
     const back = (await tx.request()
       .input('s', sql.UniqueIdentifier, siteId)
       .query(`SELECT ${column} AS v FROM ${table} WHERE site_id = @s`)).recordset[0]?.v;
-    if (back !== sealed || open(back, env) !== clear) throw new Error('the value read back did not open to the same token');
+    if (back !== sealed || open(back, env) !== clear) throw new SealRefused('the value read back did not open to the same token');
     await tx.commit();
     return 'sealed';
   } catch (err) {
     try { await tx.rollback(); } catch { /* already rolled back */ }
     // Never the driver's own message: a SQL truncation error can quote the value.
-    const why = err && err.number === undefined && /^the /.test(String(err.message)) ? err.message : 'the database refused the write';
-    return `not sealed: ${why}; nothing was changed for this value`;
+    // Only this script's own refusals are printed; anything else is the site_id
+    // and the database's error number, nothing more.
+    if (err instanceof SealRefused) return `not sealed: ${err.message}; nothing was changed for this value`;
+    const num = Number.isInteger(err?.number) ? ` (database error ${err.number})` : '';
+    return `not sealed: the database refused the write for site_id=${siteId}${num}; nothing was changed for this value`;
   }
 }
 

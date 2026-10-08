@@ -32,7 +32,7 @@ import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
 import { reviewsApi, NOT_LIVE_WORDS } from '../../lib/gbpFake.js';
-import { siteRefreshToken } from '../../lib/gbpTokenAtRest.js';
+import { siteRefreshToken, tokenColumnsSql } from '../../lib/gbpTokenAtRest.js';
 import { runReviewReplyTick, markReply, claimReply, releaseReply, JOB_KEY, POSTING_STALE_MINUTES } from '../../lib/gbpReplyRunner.js';
 import { jobsOn as seamJobsOn, briefFor as seamBriefFor } from '../../lib/teamSeam.js';
 import { runChecks, PLATFORM_CHECKS, checkContext, RUN_WORDS } from '../../lib/jobChecks.js';
@@ -119,7 +119,7 @@ export function makeReviewRepliesRouter({
         .input('t', sql.UniqueIdentifier, tenantId)
         .input('stale', sql.Int, POSTING_STALE_MINUTES)
         .query(`SELECT d.draft_id, d.site_id, d.gbp_review_id, d.reply_text, d.star_rating, d.review_text,
-                       d.status, s.gbp_oauth_token_ref, s.gbp_location_name
+                       d.status, ${tokenColumnsSql('s')}, s.gbp_location_name
                   FROM arion.gbp_reply_draft d
                   JOIN arion.site s ON s.site_id = d.site_id AND s.tenant_id = d.tenant_id
                  WHERE d.draft_id = @id AND d.tenant_id = @t
