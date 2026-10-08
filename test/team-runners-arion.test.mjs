@@ -386,9 +386,17 @@ test('no_price holds a price with its sentence', () => {
 });
 
 test('offers: an allowed offer passes; one not in the Brief is held', () => {
-  assert.deepEqual(fires('Book your free spring yard check today, no charge.', 'offers_from_brief_only'), []);
+  assert.deepEqual(fires('Take 10% off a yearly plan this spring.', 'offers_from_brief_only', { ...CTX, approvedOffers: ['10% off a yearly plan'] }), []);
+  assert.deepEqual(fires('Book your free spring yard check today, no charge.', 'offers_from_brief_only'), [HELD_WORDS.offers_from_brief_only], '"no charge" is an offer of its own');
   assert.deepEqual(fires('Get 20% off mowing this month.', 'offers_from_brief_only'), [HELD_WORDS.offers_from_brief_only]);
   assert.deepEqual(fires('Get 20% off mowing this month.', 'offers_from_brief_only', { approvedOffers: [] }), [HELD_WORDS.offers_from_brief_only]);
+});
+
+test('offers: an allowed offer next to an invented one does not carry it through, and every match is checked', () => {
+  const ctx = { ...CTX, approvedOffers: ['Free spring yard check', '10% off a yearly plan'] };
+  assert.deepEqual(fires('Book a free spring yard check. Get 20% off mowing.', 'offers_from_brief_only', ctx), [HELD_WORDS.offers_from_brief_only]);
+  assert.deepEqual(fires('Take 10% off a yearly plan, or 20% off mowing.', 'offers_from_brief_only', ctx), [HELD_WORDS.offers_from_brief_only]);
+  assert.deepEqual(fires('Take 10% off a yearly plan this month.', 'offers_from_brief_only', ctx), []);
 });
 
 test('proof is list-based: allowed proof passes, invented proof is held', () => {
