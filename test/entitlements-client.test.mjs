@@ -229,6 +229,14 @@ test("F4 a non-Stripe source (comped, set by hand) keeps the higher of the two",
   assert.equal(tier, "pro");
 });
 
+test("F12 a COMPED ARION (tier_source 'comped', what platform-api now answers) is never lowered by the site row or a cheaper Stripe tier", async () => {
+  // platform-api serves a comped row at the higher of the comped tier and any
+  // live Stripe tier, with tier_source 'comped' (platform-api b4495d1). Only a
+  // 'stripe' source may lower ARION here; 'comped' keeps the higher of.
+  assert.equal(await resolveArionTier(reqFor(), { getEntitlements: entFrom("business", "comped"), getServicesPool: sitePool("lite") }), "business");
+  assert.equal(await resolveArionTier(reqFor(), { getEntitlements: entFrom("standard", "comped"), getServicesPool: sitePool("pro") }), "pro");
+});
+
 test("F4 a Stripe tier word that is not a tier ('website') never demotes: higher of", async () => {
   const tier = await resolveArionTier(reqFor(), { getEntitlements: entFrom("website", "stripe"), getServicesPool: sitePool("pro") });
   assert.equal(tier, "pro");
