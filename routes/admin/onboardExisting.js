@@ -204,7 +204,10 @@ router.post('/onboard-existing', requireFounderAuth, async (req, res) => {
       await platformPool.request()
         .input('tid', sql.UniqueIdentifier, tenantId)
         .input('sid', sql.UniqueIdentifier, ARION_SERVICE_ID)
-        .query('INSERT INTO core.tenant_services (tenant_id, service_id, is_enabled) VALUES (@tid, @sid, 1)');
+        // 'manual' (migration 041): set up by the founder with no live
+        // subscription yet. The entitlement sync never switches it off, and
+        // promotes it to 'stripe' once a live subscription covers it.
+        .query("INSERT INTO core.tenant_services (tenant_id, service_id, is_enabled, billing_source) VALUES (@tid, @sid, 1, 'manual')");
       push('service', 'created', 'Enabled ARION service for tenant');
     } else {
       push('service', 'reused', 'ARION service already enabled');

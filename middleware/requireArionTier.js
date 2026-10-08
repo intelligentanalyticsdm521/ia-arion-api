@@ -92,15 +92,32 @@ async function resolveArionTier(req, deps = {}) {
   //    entitlement must never demote a working customer, so it is simply not a
   //    tier and the site row below answers on its own.
   let purchased = null;
+  let fromStripe = false;
   try {
     const node = productOf(await (deps.getEntitlements || getEntitlements)(tenantId), 'arion');
-    if (node && node.decided && node.tier) purchased = String(node.tier).toLowerCase();
+    if (node && node.decided && node.tier) {
+      purchased = String(node.tier).toLowerCase();
+      fromStripe = node.tier_source === 'stripe' && Object.prototype.hasOwnProperty.call(TIER_LEVELS, purchased);
+    }
   } catch (err) {
     console.warn('[requireArionTier] entitlement lookup failed; using the site row:', err.message);
   }
 
+  // F4 (2026-10-07, access follows the subscription): when the answer is
+  // DECIDED and comes from a live Stripe subscription with a real tier word,
+  // that tier stands — it may be LOWER than the site row. The site row is only
+  // ever raised (lib/purchaseTierSync.js), so "higher of" meant an ARION
+  // downgrade never lowered ARION's own tier. Undecided, a non-Stripe source
+  // (comped, set by hand) or a tier word that is not a tier ("website",
+  // "active") keeps the old "higher of", so nobody is demoted by a naming
+  // accident or an outage.
+  if (fromStripe) {
+    req._arionTier = purchased;
+    return purchased;
+  }
+
   try {
-    const pool = await getServicesPool();
+    const pool = await (deps.getServicesPool || getServicesPool)();
     const r = await pool.request()
       .input('tenant_id', sql.UniqueIdentifier, tenantId)
       .query(`

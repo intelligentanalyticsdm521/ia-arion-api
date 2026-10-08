@@ -201,3 +201,42 @@ test("the client is thin — no Stripe, no tier SQL of its own", () => {
   assert.match(src, /PLATFORM_API_URL/);
   assert.match(src, /PLATFORM_INTERNAL_TOKEN/);
 });
+
+/* ── F4 (2026-10-07): a decided Stripe tier stands, even when it is LOWER ─── */
+
+const sitePool = (arion_tier) => async () => ({
+  request() {
+    const rq = { input() { return rq; }, async query() { return { recordset: [{ arion_tier, plan: null }] }; } };
+    return rq;
+  },
+});
+const entFrom = (tier, tier_source, decided = true) => async () => ({
+  decided, products: { arion: { owned: true, tier, tier_source, decided } }, addons: {},
+});
+
+test("F4 decided Stripe 'standard' with the site row at 'pro' gives standard — an ARION downgrade lowers ARION's tier", async () => {
+  const tier = await resolveArionTier(reqFor(), { getEntitlements: entFrom("standard", "stripe"), getServicesPool: sitePool("pro") });
+  assert.equal(tier, "standard");
+});
+
+test("F4 undecided gives the site row", async () => {
+  const tier = await resolveArionTier(reqFor(), { getEntitlements: entFrom("standard", "stripe", false), getServicesPool: sitePool("pro") });
+  assert.equal(tier, "pro");
+});
+
+test("F4 a non-Stripe source (comped, set by hand) keeps the higher of the two", async () => {
+  const tier = await resolveArionTier(reqFor(), { getEntitlements: entFrom("standard", "core.tenant_services"), getServicesPool: sitePool("pro") });
+  assert.equal(tier, "pro");
+});
+
+test("F4 a Stripe tier word that is not a tier ('website') never demotes: higher of", async () => {
+  const tier = await resolveArionTier(reqFor(), { getEntitlements: entFrom("website", "stripe"), getServicesPool: sitePool("pro") });
+  assert.equal(tier, "pro");
+});
+
+test("migration 041: a paid ARION grant is billing_source 'stripe'; the founder's onboard-existing is 'manual'", () => {
+  const core = fs.readFileSync(path.join(ROOT, "lib", "coreTenants.js"), "utf8");
+  assert.match(core, /INSERT INTO core\.tenant_services \(tenant_id, service_id, is_enabled, billing_source\) VALUES \(@tid, @sid, 1, 'stripe'\)/);
+  const onb = fs.readFileSync(path.join(ROOT, "routes", "admin", "onboardExisting.js"), "utf8");
+  assert.match(onb, /INSERT INTO core\.tenant_services \(tenant_id, service_id, is_enabled, billing_source\) VALUES \(@tid, @sid, 1, 'manual'\)/);
+});
