@@ -61,7 +61,7 @@ export async function requireArionAccess(req, res, next) {
     const user = await resolvePlatformUser(platformPool, req.auth);
 
     if (!user?.user_id) {
-      return res.status(403).json({ error: "Not authorized", details: "User was not found in iadm_platform." });
+      return res.status(403).json({ error: "Not authorized", details: "We could not find your account. Sign out and sign in again; if this keeps happening, ask an admin on your team to invite you." });
     }
 
     // Membership check accepts EITHER direct membership in the target tenant
@@ -132,7 +132,7 @@ export async function requireArionAccess(req, res, next) {
     }
 
     if (!tenantUserId && !actingAsConsultant) {
-      return res.status(403).json({ error: "Not authorized", details: "User is not a member of the selected tenant." });
+      return res.status(403).json({ error: "Not authorized", details: "You are not a member of this business. Ask an admin on your team to invite you." });
     }
     req.isFounderActingOnClient = isFounderActingOnClient;
     req.actingAsConsultant = actingAsConsultant;
@@ -166,7 +166,9 @@ export async function requireArionAccess(req, res, next) {
 
     const service = entitlement.recordset[0] || null;
     if (!service) {
-      return res.status(403).json({ error: "ARION is not enabled for this tenant." });
+      // SCOPE_ACCESS_FOLLOWS_SUBSCRIPTION_2026-10-07 F9 — words a business owner
+      // reads, never "tenant". `error` stays the sentence (callers show it).
+      return res.status(403).json({ error: "ARION isn't part of this business's plan." });
     }
 
     // ── Tier 3-3a (roles enforcement, 2026-07-04) — BYTE-SAFE primitive ──
