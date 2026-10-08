@@ -703,6 +703,10 @@
     {
       "source": "\\b5[- ]star (?:review|rating)s? (?:from|say)\\b",
       "flags": "i"
+    },
+    {
+      "source": "[\"“][^\"”]+[\"”]\\s*[,—–-]?\\s*(?:said|says|wrote)\\s+\\p{L}",
+      "flags": "iu"
     }
   ],
   "hold_keywords": [
@@ -1355,6 +1359,244 @@
       ],
       "text": "\"Best lawn service in town, they were on time\" - a happy customer. Our crew is out every day this spring.",
       "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". And they called us award winning.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". But they also called us award winning.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". Plus, they called us amazing.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". We mow on Tuesdays. They also called us award winning.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". Last spring they called us unbeatable.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". One of our customers also called us award winning.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". They're the best crew around.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"Best lawn service in town, they were on time\" - a happy customer. Then she told us we beat every quote in town.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". We mow on Tuesdays.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\".\n\nThey can book a spring cleanup with our crew today.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"Best lawn service in town, they were on time\", said Pat Jones. She also called us award winning.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"We are the best crew in the whole state\", said Pat Jones.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"Best lawn service in town, they were on time, award winning crew\", said Pat Jones.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"We are the best crew in the whole state\" said Pat Jones.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "“We are the best crew in the whole state,” wrote Pat Jones.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"Best lawn service in town, they were on time\", said Pat Jones.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "“Best lawn service in town, they were on time,” wrote Pat Jones.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"Best lawn service in town, they were on time\", said Pat Jones. She came back again in May.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\", says Super Fast.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said Best lawn service in town, they were on time, says Super Fast.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\", says Elite Premium.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\", wrote Gold Champion.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\", said Five Stars.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\", says No1 Winner.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\", said Pat Smith.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"Best lawn service in town, they were on time\", said Pat Smith.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". They called us back on Monday.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". They called us this morning to book a second visit.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". She called us yesterday about a second visit.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". They called us unbeatable.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". They called us back and then called us unbeatable.",
+      "held": true
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". A recent customer said \"Best lawn service in town, they were on time\".",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "\"Best lawn service in town, they were on time\" - a happy customer. \"Best lawn service in town, they were on time\" - a happy customer.",
+      "held": false
+    },
+    {
+      "allowed": [
+        "Best lawn service in town, they were on time"
+      ],
+      "text": "One of our customers said \"Best lawn service in town, they were on time\". And then also, just last week, they called us unbeatable.",
+      "held": true
     }
   ],
   "hold_keyword_cases": {
@@ -1392,7 +1634,7 @@
     "best",
     "so"
   ],
-  "proof_rule": "A proof match is judged by the whole sentence it sits in (a line break ends a sentence). Outside the allowed item(s) the only words allowed are: at the start, a subject (proof_subjects) immediately followed by its verb (proof_verbs) with nothing between them, then up to 3 lead-in words (proof_lead_in_words); at the very end, who said it (\"- a happy|satisfied|local|recent customer|client\", or \", said|says|wrote <Name>\" set off by a comma or a dash, where the name is one or two capitalised words with no word from proof_claim_words). Anything after who said it, before the subject, between subject and verb, or between or after allowed items is invented and held. What is left must lie inside one allowed item, or be the lead-in words followed by whole allowed items. A sentence after the proof that starts with a word from proof_follow_on_subjects keeps attributing words to the customer: if it holds a word from proof_claim_words or a phrase from proof_follow_on_phrases it is invented and held.",
+  "proof_rule": "A proof match is judged by the whole sentence it sits in (a line break ends a sentence). Outside the allowed item(s) the only words allowed are: at the start, a subject (proof_subjects) immediately followed by its verb (proof_verbs) with nothing between them, then up to 3 lead-in words (proof_lead_in_words); at the very end, who said it (\"- a happy|satisfied|local|recent customer|client\", or \", said|says|wrote <Name>\" set off by a comma or a dash, where the name is one or two capitalised words with no word from proof_claim_words). Anything after who said it, before the subject, between subject and verb, or between or after allowed items is invented and held. What is left must lie inside one allowed item, or be the lead-in words followed by whole allowed items. A quote credited by name (a quoted sentence followed by \", said|says|wrote <Name>\") is a proof claim of its own: its quoted words must lie inside an allowed item. Every later sentence in the same paragraph (up to a blank line) keeps attributing words to the customer when, after any words from proof_follow_on_joiners, a subject from proof_follow_on_subjects starts within its first proof_follow_on_window words; if it holds a word from proof_claim_words or a phrase from proof_follow_on_phrases it is invented and held, unless it is itself an allowed item's words. A phrase from proof_follow_on_not_claims (\"called us back\", \"called us on Monday\") is a phone call, not a claim.",
   "proof_subjects": [
     "one of our customers",
     "one of our clients",
@@ -1461,7 +1703,33 @@
     "exceptional",
     "crew",
     "team",
-    "company"
+    "company",
+    "fast",
+    "super",
+    "speedy",
+    "prompt",
+    "cheap",
+    "cheapest",
+    "lowest",
+    "highest",
+    "loved",
+    "love",
+    "approved",
+    "winner",
+    "winners",
+    "champion",
+    "champions",
+    "elite",
+    "premium",
+    "platinum",
+    "gold",
+    "silver",
+    "bronze",
+    "five",
+    "5",
+    "no1",
+    "better",
+    "greatest"
   ],
   "proof_follow_on_subjects": [
     "they",
@@ -1475,11 +1743,45 @@
     "the client",
     "that client",
     "our client",
-    "this client"
+    "this client",
+    "one of our customers",
+    "one of our clients",
+    "a customer",
+    "a recent customer",
+    "a client",
+    "a recent client",
+    "our customers",
+    "our clients",
+    "the customers",
+    "the clients"
   ],
   "proof_follow_on_phrases": [
     "called us",
     "rated us",
-    "said we"
+    "said we",
+    "told us we"
+  ],
+  "proof_follow_on_joiners": [
+    "and",
+    "but",
+    "plus",
+    "also",
+    "then",
+    "so"
+  ],
+  "proof_follow_on_window": 6,
+  "proof_follow_on_not_claims": [
+    "called us back",
+    "called us on",
+    "called us at",
+    "called us yesterday",
+    "called us today",
+    "called us tonight",
+    "called us this morning",
+    "called us this afternoon",
+    "called us this evening",
+    "called us last night",
+    "called us last week",
+    "called us again"
   ]
 }

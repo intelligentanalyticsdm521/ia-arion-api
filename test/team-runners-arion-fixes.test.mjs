@@ -165,6 +165,62 @@ test('proof: a sentence after the proof that keeps putting claims in the custome
   assert.equal(fired16('"Best lawn service in town, they were on time" - a happy customer. Our crew is out every day this spring.'), false, '"Best lawn service in town, they were on time" - a happy customer. Our crew is out every day this spring.');
 });
 
+test('proof: every later sentence in the paragraph that puts a claim in the customer\'s mouth is held, whatever comes first (the 17:00Z probes)', () => {
+  for (const [t, held] of [
+    ['One of our customers said "Best lawn service in town, they were on time". And they called us award winning.', true],
+    ['One of our customers said "Best lawn service in town, they were on time". But they also called us award winning.', true],
+    ['One of our customers said "Best lawn service in town, they were on time". Plus, they called us amazing.', true],
+    ['One of our customers said "Best lawn service in town, they were on time". We mow on Tuesdays. They also called us award winning.', true],
+    ['One of our customers said "Best lawn service in town, they were on time". Last spring they called us unbeatable.', true],
+    ['One of our customers said "Best lawn service in town, they were on time". One of our customers also called us award winning.', true],
+    ['One of our customers said "Best lawn service in town, they were on time". They\'re the best crew around.', true],
+    ['"Best lawn service in town, they were on time" - a happy customer. Then she told us we beat every quote in town.', true],
+    // Joining words come off first: the subject is found within six words after them.
+    ['One of our customers said "Best lawn service in town, they were on time". And then also, just last week, they called us unbeatable.', true],
+    ['One of our customers said "Best lawn service in town, they were on time". We mow on Tuesdays.', false],
+    ['One of our customers said "Best lawn service in town, they were on time".\n\nThey can book a spring cleanup with our crew today.', false],
+    // An allowed quote after an allowed quote is the allowed words, not a claim.
+    ['One of our customers said "Best lawn service in town, they were on time". A recent customer said "Best lawn service in town, they were on time".', false],
+    ['"Best lawn service in town, they were on time" - a happy customer. "Best lawn service in town, they were on time" - a happy customer.', false],
+  ]) assert.equal(fired16(t), held, `${held ? 'not held' : 'held'}: ${t}`);
+});
+
+test('proof: a quote credited by name is proof: its words must be allowed, and the sentences after it are judged (the 17:00Z probes)', () => {
+  for (const [t, held] of [
+    ['"Best lawn service in town, they were on time", said Pat Jones. She also called us award winning.', true],
+    ['"We are the best crew in the whole state", said Pat Jones.', true],
+    ['"Best lawn service in town, they were on time, award winning crew", said Pat Jones.', true],
+    ['"We are the best crew in the whole state" said Pat Jones.', true],
+    ['“We are the best crew in the whole state,” wrote Pat Jones.', true],
+    ['"Best lawn service in town, they were on time", said Pat Jones.', false],
+    ['“Best lawn service in town, they were on time,” wrote Pat Jones.', false],
+    ['"Best lawn service in town, they were on time", said Pat Jones. She came back again in May.', false],
+  ]) assert.equal(fired16(t), held, `${held ? 'not held' : 'held'}: ${t}`);
+});
+
+test('proof: praise words are never a name after said/says/wrote; a real name still passes (the 17:00Z probes)', () => {
+  for (const [t, held] of [
+    ['One of our customers said "Best lawn service in town, they were on time", says Super Fast.', true],
+    ['One of our customers said Best lawn service in town, they were on time, says Super Fast.', true],
+    ['One of our customers said "Best lawn service in town, they were on time", says Elite Premium.', true],
+    ['One of our customers said "Best lawn service in town, they were on time", wrote Gold Champion.', true],
+    ['One of our customers said "Best lawn service in town, they were on time", said Five Stars.', true],
+    ['One of our customers said "Best lawn service in town, they were on time", says No1 Winner.', true],
+    ['One of our customers said "Best lawn service in town, they were on time", said Pat Smith.', false],
+    ['"Best lawn service in town, they were on time", said Pat Smith.', false],
+  ]) assert.equal(fired16(t), held, `${held ? 'not held' : 'held'}: ${t}`);
+});
+
+test('proof: a phone call back is not a claim; "called us" with praise still is (the 17:00Z probes)', () => {
+  for (const [t, held] of [
+    ['One of our customers said "Best lawn service in town, they were on time". They called us back on Monday.', false],
+    ['One of our customers said "Best lawn service in town, they were on time". They called us this morning to book a second visit.', false],
+    ['One of our customers said "Best lawn service in town, they were on time". She called us yesterday about a second visit.', false],
+    ['One of our customers said "Best lawn service in town, they were on time". They called us unbeatable.', true],
+    ['One of our customers said "Best lawn service in town, they were on time". They called us back and then called us unbeatable.', true],
+  ]) assert.equal(fired16(t), held, `${held ? 'not held' : 'held'}: ${t}`);
+});
+
 test('hold words are whole words: praise is never held as a complaint', () => {
   for (const t of C.hold_keyword_cases.hold) assert.ok(HOLD_KEYWORDS.some((k) => holdWordHit(t, k)), `not held: ${t}`);
   for (const t of C.hold_keyword_cases.pass) assert.equal(HOLD_KEYWORDS.find((k) => holdWordHit(t, k)), undefined, `held: ${t}`);

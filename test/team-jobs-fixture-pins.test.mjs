@@ -13,7 +13,7 @@ import {
   PRICE_RE, OFFER_PATTERNS, SOCIAL_PROOF_PATTERNS, HOLD_KEYWORDS, RANKING_PATTERNS,
   CHECK_WORDS, SUPPORTED_ACTIONS, PLATFORM_CHECKS, RUNNER_REF, CHECKS,
   PROOF_LEAD_IN_WORDS, PROOF_LEAD_SLACK_WORDS, PROOF_SUBJECTS, PROOF_VERBS, PROOF_CLAIM_WORDS,
-  PROOF_FOLLOW_ON_SUBJECTS, PROOF_FOLLOW_ON_PHRASES,
+  PROOF_FOLLOW_ON_SUBJECTS, PROOF_FOLLOW_ON_PHRASES, PROOF_FOLLOW_ON_JOINERS, PROOF_FOLLOW_ON_WINDOW, PROOF_FOLLOW_ON_NOT_CLAIMS,
 } from '../lib/jobChecks.js';
 import { REQUIRED_BRIEF } from '../lib/contentAgent/tick.js';
 
@@ -49,6 +49,12 @@ test('the proof subjects, their verbs and the claim words a name may not hold ar
 test('the words that start a follow-on sentence, and its claim phrases, are the fixture\'s', () => {
   assert.deepEqual([...PROOF_FOLLOW_ON_SUBJECTS], C.proof_follow_on_subjects);
   assert.deepEqual([...PROOF_FOLLOW_ON_PHRASES], C.proof_follow_on_phrases);
+});
+
+test('the joining words, the window a subject must start in and the phone-call phrases are the fixture\'s', () => {
+  assert.deepEqual([...PROOF_FOLLOW_ON_JOINERS], C.proof_follow_on_joiners);
+  assert.equal(PROOF_FOLLOW_ON_WINDOW, C.proof_follow_on_window);
+  assert.deepEqual([...PROOF_FOLLOW_ON_NOT_CLAIMS], C.proof_follow_on_not_claims);
 });
 
 test('"What I never do" is the fixture\'s sentence for every check in the library', () => {
