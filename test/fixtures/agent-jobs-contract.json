@@ -1,0 +1,984 @@
+{
+  "about": "The shared contract for ARGUS employee jobs (CONTRACT_ARGUS_EMPLOYEES_PHASE1 §H.2). Written once in platform-api and copied byte-for-byte into arion-api and LUMEN test/fixtures/. Changing a rule means changing this file and all three copies in one commit per repo.",
+  "job_state_sql": "SELECT s.tenant_id, s.job_key, s.mode, s.mode_set_by, s.mode_set_at, s.vars_json, s.playbook_id, s.playbook_version,\n       j.state, j.setting_home, j.mode_rule, j.hire_required, j.employee_key, v.definition_json, t.tenant_kind,\n       CASE WHEN EXISTS (SELECT 1 FROM core.team_hire h\n                          WHERE h.tenant_id = s.tenant_id AND h.employee_key = j.employee_key AND h.ended_at IS NULL)\n            THEN 1 ELSE 0 END AS hired\n  FROM core.team_job_setting s\n  JOIN core.team_job j  ON j.job_key = s.job_key\n  JOIN core.tenants  t  ON t.tenant_id = s.tenant_id\n  LEFT JOIN core.team_job_playbook_version v ON v.playbook_id = s.playbook_id AND v.version = s.playbook_version\n WHERE s.enabled = 1 AND s.job_key IN ({keys}){only}",
+  "employees": [
+    {
+      "employee_key": "web",
+      "product": "arion",
+      "display_name": "The web person",
+      "job_line": "Writes your blog and social posts and answers your Google reviews.",
+      "sort": 10,
+      "active": 1
+    },
+    {
+      "employee_key": "marketer",
+      "product": "spark",
+      "display_name": "The marketer",
+      "job_line": "Answers every new inquiry, brings quiet customers back, and writes the campaigns you ask for.",
+      "sort": 20,
+      "active": 1
+    },
+    {
+      "employee_key": "office",
+      "product": "oliver",
+      "display_name": "The office administrator",
+      "job_line": "Chases quotes and unpaid invoices, suggests who takes each job, and asks for reviews.",
+      "sort": 30,
+      "active": 1
+    },
+    {
+      "employee_key": "bookkeeper",
+      "product": "stella",
+      "display_name": "The bookkeeper",
+      "job_line": "Keeps your books.",
+      "sort": 40,
+      "active": 0
+    }
+  ],
+  "jobs": [
+    {
+      "runner_ref": "arion:content_agent:blog_post",
+      "door": null,
+      "lock_words": null,
+      "automatic_needs": [],
+      "allowed_actions": [
+        "arion.pick_topic",
+        "arion.draft_blog_post",
+        "arion.publish_blog_post"
+      ],
+      "platform_checks": [
+        "no_price",
+        "offers_from_brief_only",
+        "no_invented_proof",
+        "no_names_from_never_name",
+        "no_competitor_names",
+        "no_ranking_promise"
+      ],
+      "required_brief": [
+        "services|servicesSummary"
+      ],
+      "job_key": "arion.blog_posts",
+      "employee_key": "web",
+      "sort": 10,
+      "display_name": "Blog posts",
+      "description_plain": "Writes a blog post for your website from what you sell and where you work.",
+      "state": "live",
+      "runner_kind": "agent",
+      "setting_home": "team",
+      "trigger": {
+        "type": "schedule",
+        "every": "week",
+        "day": "mon"
+      },
+      "trigger_words": "Every Monday",
+      "mode_rule": "either",
+      "hire_required": 1,
+      "cost_class": "credits",
+      "sends_to_customer": 1,
+      "needs": [
+        {
+          "kind": "product",
+          "product": "arion",
+          "words": "Your web person works on ARION. Add ARION to switch this on.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        }
+      ]
+    },
+    {
+      "runner_ref": "arion:content_agent:social_post",
+      "door": null,
+      "lock_words": null,
+      "automatic_needs": [],
+      "allowed_actions": [
+        "arion.pick_topic",
+        "arion.draft_social_post",
+        "arion.schedule_social_post"
+      ],
+      "platform_checks": [
+        "no_price",
+        "offers_from_brief_only",
+        "no_invented_proof",
+        "no_names_from_never_name",
+        "no_competitor_names",
+        "no_ranking_promise"
+      ],
+      "required_brief": [
+        "services|servicesSummary"
+      ],
+      "job_key": "arion.social_posts",
+      "employee_key": "web",
+      "sort": 20,
+      "display_name": "Social posts",
+      "description_plain": "Writes posts for your social accounts and schedules them.",
+      "state": "live",
+      "runner_kind": "agent",
+      "setting_home": "team",
+      "trigger": {
+        "type": "schedule",
+        "every": "week",
+        "day": "mon"
+      },
+      "trigger_words": "Every Monday",
+      "mode_rule": "either",
+      "hire_required": 1,
+      "cost_class": "credits",
+      "sends_to_customer": 1,
+      "needs": [
+        {
+          "kind": "product",
+          "product": "arion",
+          "words": "Your web person works on ARION. Add ARION to switch this on.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        }
+      ]
+    },
+    {
+      "runner_ref": "arion:gbp_reply_runner",
+      "door": null,
+      "lock_words": "Reviews of 3 stars or fewer always wait for you",
+      "automatic_needs": [],
+      "allowed_actions": [
+        "arion.read_new_reviews",
+        "arion.draft_review_reply",
+        "arion.post_review_reply"
+      ],
+      "platform_checks": [
+        "no_price",
+        "offers_from_brief_only",
+        "no_names_from_never_name",
+        "no_competitor_names",
+        "low_star_review_asks",
+        "hold_complaint_legal_refund"
+      ],
+      "required_brief": [],
+      "job_key": "arion.review_replies",
+      "employee_key": "web",
+      "sort": 30,
+      "display_name": "Google review replies",
+      "description_plain": "Writes a reply to each new Google review.",
+      "state": "live",
+      "runner_kind": "agent",
+      "setting_home": "team",
+      "trigger": {
+        "type": "schedule",
+        "every": "day"
+      },
+      "trigger_words": "Every morning",
+      "mode_rule": "either",
+      "hire_required": 0,
+      "cost_class": "credits",
+      "sends_to_customer": 1,
+      "needs": [
+        {
+          "kind": "product",
+          "product": "arion",
+          "words": "Your web person works on ARION. Add ARION to switch this on.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        },
+        {
+          "kind": "min_tier",
+          "product": "arion",
+          "tier": "pro",
+          "words": "Google review replies come with ARION Pro.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        },
+        {
+          "kind": "connected",
+          "what": "gbp",
+          "words": "Connect your Google Business Profile first.",
+          "link": {
+            "label": "Reviews",
+            "to": "/app/services/arion_business_reviews"
+          }
+        }
+      ]
+    },
+    {
+      "runner_ref": null,
+      "door": null,
+      "lock_words": "Not built yet",
+      "automatic_needs": [],
+      "allowed_actions": [],
+      "platform_checks": [],
+      "required_brief": [],
+      "job_key": "arion.seo_fixes",
+      "employee_key": "web",
+      "sort": 40,
+      "display_name": "Website wording and search fixes",
+      "description_plain": "Suggests wording changes on your website so more people near you find it.",
+      "state": "planned",
+      "runner_kind": "agent",
+      "setting_home": "none",
+      "trigger": {
+        "type": "manual"
+      },
+      "trigger_words": "",
+      "mode_rule": "always_asks",
+      "hire_required": 1,
+      "cost_class": "none",
+      "sends_to_customer": 0,
+      "needs": []
+    },
+    {
+      "runner_ref": null,
+      "door": null,
+      "lock_words": "Not built yet",
+      "automatic_needs": [],
+      "allowed_actions": [],
+      "platform_checks": [],
+      "required_brief": [],
+      "job_key": "arion.google_posts",
+      "employee_key": "web",
+      "sort": 50,
+      "display_name": "Google profile posts",
+      "description_plain": "Writes posts for your Google Business Profile.",
+      "state": "planned",
+      "runner_kind": "agent",
+      "setting_home": "none",
+      "trigger": {
+        "type": "manual"
+      },
+      "trigger_words": "",
+      "mode_rule": "either",
+      "hire_required": 1,
+      "cost_class": "none",
+      "sends_to_customer": 0,
+      "needs": []
+    },
+    {
+      "runner_ref": null,
+      "door": null,
+      "lock_words": "Always yours: your logo, colours and voice",
+      "automatic_needs": [],
+      "allowed_actions": [],
+      "platform_checks": [],
+      "required_brief": [],
+      "job_key": "arion.brand_changes",
+      "employee_key": "web",
+      "sort": 60,
+      "display_name": "Brand changes",
+      "description_plain": "Changes to your logo, colours and voice.",
+      "state": "locked",
+      "runner_kind": "agent",
+      "setting_home": "none",
+      "trigger": {
+        "type": "manual"
+      },
+      "trigger_words": "",
+      "mode_rule": "none",
+      "hire_required": 0,
+      "cost_class": "none",
+      "sends_to_customer": 0,
+      "needs": []
+    },
+    {
+      "runner_ref": "lumen:responder",
+      "door": null,
+      "lock_words": null,
+      "automatic_needs": [
+        {
+          "kind": "leads_package_min",
+          "rung": "authority",
+          "words": "Sending by itself comes with the SPARK Leads Authority package.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        }
+      ],
+      "allowed_actions": [
+        "spark.read_inquiry",
+        "spark.draft_reply",
+        "spark.send_reply"
+      ],
+      "platform_checks": [
+        "hold_complaint_legal_refund",
+        "over_money_limit_asks"
+      ],
+      "required_brief": [],
+      "job_key": "spark.inquiry_reply",
+      "employee_key": "marketer",
+      "sort": 10,
+      "display_name": "Replies to new inquiries",
+      "description_plain": "Writes a reply to every new inquiry from your website.",
+      "state": "live",
+      "runner_kind": "agent",
+      "setting_home": "team",
+      "trigger": {
+        "type": "event",
+        "on": "lead"
+      },
+      "trigger_words": "When a new inquiry arrives",
+      "mode_rule": "either",
+      "hire_required": 0,
+      "cost_class": "credits",
+      "sends_to_customer": 1,
+      "needs": [
+        {
+          "kind": "addon",
+          "addon": "responder",
+          "words": "Replies to new inquiries come with the Responder.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        },
+        {
+          "kind": "switched_on",
+          "what": "responder",
+          "words": "Switch the Responder on first.",
+          "link": {
+            "label": "The Responder",
+            "to": "/app/settings/responder"
+          }
+        },
+        {
+          "kind": "leads_package_min",
+          "rung": "growth",
+          "words": "Written replies come with the SPARK Leads Growth package.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        }
+      ]
+    },
+    {
+      "runner_ref": "lumen:campaign_agent:winback",
+      "door": null,
+      "lock_words": "Always asks you first: approving makes a draft campaign, and you send it from SPARK → Campaigns",
+      "automatic_needs": [],
+      "allowed_actions": [
+        "spark.find_quiet_customers",
+        "spark.draft_campaign",
+        "spark.make_draft_campaign"
+      ],
+      "platform_checks": [
+        "no_price",
+        "offers_from_brief_only",
+        "no_invented_proof",
+        "no_names_from_never_name",
+        "no_competitor_names",
+        "no_ranking_promise"
+      ],
+      "required_brief": [],
+      "job_key": "spark.winback",
+      "employee_key": "marketer",
+      "sort": 20,
+      "display_name": "Win back quiet customers",
+      "description_plain": "Finds customers you haven't worked for in a while and writes an email to bring them back.",
+      "state": "live",
+      "runner_kind": "agent",
+      "setting_home": "team",
+      "trigger": {
+        "type": "schedule",
+        "every": "week",
+        "day": "mon"
+      },
+      "trigger_words": "Every Monday",
+      "mode_rule": "always_asks",
+      "hire_required": 1,
+      "cost_class": "credits",
+      "sends_to_customer": 0,
+      "needs": [
+        {
+          "kind": "product",
+          "product": "spark",
+          "words": "Your marketer works on SPARK. Add SPARK to switch this on.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        }
+      ]
+    },
+    {
+      "runner_ref": "lumen:campaign_agent:campaign",
+      "door": null,
+      "lock_words": "Always asks you first: approving makes a draft campaign, and you send it from SPARK → Campaigns",
+      "automatic_needs": [],
+      "allowed_actions": [
+        "spark.read_brief_line",
+        "spark.draft_campaign",
+        "spark.make_draft_campaign"
+      ],
+      "platform_checks": [
+        "no_price",
+        "offers_from_brief_only",
+        "no_invented_proof",
+        "no_names_from_never_name",
+        "no_competitor_names",
+        "no_ranking_promise"
+      ],
+      "required_brief": [],
+      "job_key": "spark.campaign_from_brief",
+      "employee_key": "marketer",
+      "sort": 30,
+      "display_name": "Campaign from a one-line brief",
+      "description_plain": "Writes an email campaign from one line you give it.",
+      "state": "live",
+      "runner_kind": "agent",
+      "setting_home": "team",
+      "trigger": {
+        "type": "manual"
+      },
+      "trigger_words": "When you ask",
+      "mode_rule": "always_asks",
+      "hire_required": 1,
+      "cost_class": "credits",
+      "sends_to_customer": 0,
+      "needs": [
+        {
+          "kind": "product",
+          "product": "spark",
+          "words": "Your marketer works on SPARK. Add SPARK to switch this on.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        }
+      ]
+    },
+    {
+      "runner_ref": "lumen:leadgen_weekly_digest",
+      "door": null,
+      "lock_words": "Comes with lead search: a Monday email when your searches found new leads",
+      "automatic_needs": [],
+      "allowed_actions": [],
+      "platform_checks": [],
+      "required_brief": [],
+      "job_key": "spark.lead_digest",
+      "employee_key": "marketer",
+      "sort": 40,
+      "display_name": "Monday lead summary",
+      "description_plain": "Sends you a Monday email when your lead searches found new leads.",
+      "state": "live",
+      "runner_kind": "automation",
+      "setting_home": "none",
+      "trigger": {
+        "type": "schedule",
+        "every": "week",
+        "day": "mon"
+      },
+      "trigger_words": "Every Monday",
+      "mode_rule": "none",
+      "hire_required": 0,
+      "cost_class": "none",
+      "sends_to_customer": 0,
+      "needs": [
+        {
+          "kind": "product",
+          "product": "spark",
+          "words": "Your marketer works on SPARK. Add SPARK to switch this on.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        }
+      ]
+    },
+    {
+      "runner_ref": "oliver:qtc_agent",
+      "door": {
+        "kind": "oliver_agent",
+        "section": "qtc",
+        "place": "ARGUS → Your team → The office administrator → Jobs"
+      },
+      "lock_words": "Always asks you before it sends",
+      "automatic_needs": [],
+      "allowed_actions": [
+        "oliver.find_due_quotes_and_invoices",
+        "oliver.draft_followup",
+        "oliver.send_followup"
+      ],
+      "platform_checks": [
+        "no_collections_language"
+      ],
+      "required_brief": [],
+      "job_key": "oliver.quote_payment_followups",
+      "employee_key": "office",
+      "sort": 10,
+      "display_name": "Quote and payment follow-ups",
+      "description_plain": "Follows up on quotes nobody answered and reminds customers about unpaid invoices.",
+      "state": "live",
+      "runner_kind": "agent",
+      "setting_home": "door",
+      "trigger": {
+        "type": "schedule",
+        "every": "day"
+      },
+      "trigger_words": "Every day",
+      "mode_rule": "always_asks",
+      "hire_required": 0,
+      "cost_class": "none",
+      "sends_to_customer": 1,
+      "needs": [
+        {
+          "kind": "product",
+          "product": "oliver",
+          "words": "Your office administrator works on OLIVER. Add OLIVER to switch this on.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        }
+      ]
+    },
+    {
+      "runner_ref": "oliver:fieldops_agent",
+      "door": {
+        "kind": "oliver_agent",
+        "section": "fieldops",
+        "place": "ARGUS → Your team → The office administrator → Jobs"
+      },
+      "lock_words": "Always asks you before it assigns anyone",
+      "automatic_needs": [],
+      "allowed_actions": [
+        "oliver.find_unassigned_jobs",
+        "oliver.score_crew",
+        "oliver.assign_crew"
+      ],
+      "platform_checks": [],
+      "required_brief": [],
+      "job_key": "oliver.crew_suggestions",
+      "employee_key": "office",
+      "sort": 20,
+      "display_name": "Who takes each job",
+      "description_plain": "Suggests who on your crew takes each new job.",
+      "state": "live",
+      "runner_kind": "agent",
+      "setting_home": "door",
+      "trigger": {
+        "type": "schedule",
+        "every": "day"
+      },
+      "trigger_words": "Every day",
+      "mode_rule": "always_asks",
+      "hire_required": 0,
+      "cost_class": "none",
+      "sends_to_customer": 0,
+      "needs": [
+        {
+          "kind": "product",
+          "product": "oliver",
+          "words": "Your office administrator works on OLIVER. Add OLIVER to switch this on.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        }
+      ]
+    },
+    {
+      "runner_ref": "oliver:rule:review_request_after_job",
+      "door": {
+        "kind": "oliver_rule",
+        "rule_key": "review_request_after_job",
+        "place": "OLIVER → Jobs → Settings"
+      },
+      "lock_words": "Sends by itself: it is a fixed email from your templates",
+      "automatic_needs": [],
+      "allowed_actions": [
+        "oliver.ask_for_review"
+      ],
+      "platform_checks": [],
+      "required_brief": [],
+      "job_key": "oliver.review_asks",
+      "employee_key": "office",
+      "sort": 30,
+      "display_name": "Review asks after a job",
+      "description_plain": "Emails your customer a day after a job asking for a review.",
+      "state": "live",
+      "runner_kind": "automation",
+      "setting_home": "door",
+      "trigger": {
+        "type": "event",
+        "on": "job_done"
+      },
+      "trigger_words": "A day after a job is done",
+      "mode_rule": "none",
+      "hire_required": 0,
+      "cost_class": "none",
+      "sends_to_customer": 1,
+      "needs": [
+        {
+          "kind": "product",
+          "product": "oliver",
+          "words": "Your office administrator works on OLIVER. Add OLIVER to switch this on.",
+          "link": {
+            "label": "Plan & Pricing",
+            "to": "/app/settings/plan-pricing"
+          }
+        }
+      ]
+    }
+  ],
+  "checks": {
+    "no_price": "Put a price in anything I write. Prices come from your price list, never from me.",
+    "offers_from_brief_only": "Offer a discount or anything free that isn't in the offers you allow.",
+    "no_invented_proof": "Quote a customer, a number or an award that isn't in the proof you allow.",
+    "no_names_from_never_name": "Name anyone on your list of names never to mention.",
+    "no_competitor_names": "Name a competitor.",
+    "no_ranking_promise": "Promise a place on Google.",
+    "low_star_review_asks": "Answer a review of 3 stars or fewer without you.",
+    "hold_complaint_legal_refund": "Answer a complaint, a refund or anything legal without you.",
+    "over_money_limit_asks": "Send a quote over your limit without you.",
+    "no_collections_language": "Threaten, say 'final notice', or use legal words about money."
+  },
+  "price_re": {
+    "source": "(\\$|£|€)\\s?\\d|\\b\\d[\\d,.]*\\s?(dollars|usd|bucks)\\b|\\b(costs?|price is|priced at|starts? at)\\s+\\$?\\d",
+    "flags": "i"
+  },
+  "person_re": {
+    "source": "\\b(?:[Ii] am|[Ii]'m|[Ii]’m|[Tt]his is|[Mm]y name is)\\s+(?!ARGUS\\b)[A-Z][a-z]+\\b",
+    "flags": ""
+  },
+  "offer_patterns": [
+    {
+      "source": "\\b\\d{1,2}%\\s*off\\b",
+      "flags": "i"
+    },
+    {
+      "source": "\\bfree\\s+(?:service|visit|consultation|estimate|inspection|month|upgrade)\\b",
+      "flags": "i"
+    },
+    {
+      "source": "\\b(?:discount|coupon|promo code|voucher)\\b",
+      "flags": "i"
+    },
+    {
+      "source": "\\bsave\\s+\\$\\d+",
+      "flags": "i"
+    },
+    {
+      "source": "\\bno charge\\b",
+      "flags": "i"
+    }
+  ],
+  "social_proof_patterns": [
+    {
+      "source": "\\b(?:one of our (?:customers|clients)|a recent (?:customer|client))\\b[^.!?]*\\b(?:said|told us|raved|loved)\\b",
+      "flags": "i"
+    },
+    {
+      "source": "[\"“][^\"”]{20,}[\"”]\\s*[-—]\\s*(?:a\\s)?(?:happy|satisfied|local)\\s+(?:customer|client)",
+      "flags": "i"
+    },
+    {
+      "source": "\\b5[- ]star (?:review|rating)s? (?:from|say)\\b",
+      "flags": "i"
+    }
+  ],
+  "hold_keywords": [
+    "complaint",
+    "complain",
+    "refund",
+    "money back",
+    "chargeback",
+    "lawyer",
+    "attorney",
+    "solicitor",
+    "legal action",
+    "sue you",
+    "suing",
+    "small claims",
+    "court",
+    "lawsuit",
+    "liable",
+    "liability",
+    "negligent",
+    "damaged",
+    "damage to my",
+    "injury",
+    "injured",
+    "insurance claim",
+    "bbb",
+    "better business bureau",
+    "consumer protection",
+    "cancel my",
+    "cancel our",
+    "terrible",
+    "unacceptable",
+    "disgrace",
+    "never again",
+    "worst",
+    "scam",
+    "fraud",
+    "ripped me off",
+    "rip off"
+  ],
+  "ranking_phrases": [
+    {
+      "source": "number one on google",
+      "flags": "i"
+    },
+    {
+      "source": "#1 on google",
+      "flags": "i"
+    },
+    {
+      "source": "first page of google",
+      "flags": "i"
+    },
+    {
+      "source": "top of google",
+      "flags": "i"
+    },
+    {
+      "source": "guarantee(d)? (a )?(top )?(ranking|rankings|first page)",
+      "flags": "i"
+    },
+    {
+      "source": "rank (number one|#?1)",
+      "flags": "i"
+    }
+  ],
+  "definitions": [
+    {
+      "job_key": "arion.blog_posts",
+      "def": {
+        "schema": "agent-job/1",
+        "job": "arion.blog_posts",
+        "name": "Blog posts",
+        "trigger": {
+          "type": "schedule",
+          "every": "week",
+          "day": "mon"
+        },
+        "reads": [
+          "brief.services",
+          "brief.servicesSummary",
+          "brief.serviceArea",
+          "brief.brandVoice",
+          "brief.doNotSay",
+          "brief.noGoList",
+          "brief.idealCustomer",
+          "brief.differentiators",
+          "brief.offersAllowed",
+          "brief.proofAllowed",
+          "brief.namesNeverMention",
+          "brief.namesYouMayMention",
+          "brief.competitors",
+          "brief.customerWords"
+        ],
+        "steps": [
+          {
+            "id": "pick_topic",
+            "action": "arion.pick_topic",
+            "words": "Picks a topic people near you search for"
+          },
+          {
+            "id": "draft_blog_post",
+            "action": "arion.draft_blog_post",
+            "words": "Writes the post from what I know about your business"
+          },
+          {
+            "id": "check",
+            "checks": [
+              "no_price",
+              "offers_from_brief_only",
+              "no_invented_proof",
+              "no_names_from_never_name",
+              "no_competitor_names",
+              "no_ranking_promise"
+            ],
+            "words": "Checks it against what I never do"
+          },
+          {
+            "id": "publish_blog_post",
+            "action": "arion.publish_blog_post",
+            "words": "Puts it on your website",
+            "hold": "by_mode"
+          }
+        ],
+        "vars": {
+          "posts_per_week": {
+            "label": "Posts a week",
+            "type": "int",
+            "default": 1,
+            "min": 1,
+            "max": 3
+          },
+          "seed_topics": {
+            "label": "Topics to lean towards",
+            "type": "list",
+            "default": [],
+            "max_items": 10,
+            "max_len": 80
+          }
+        }
+      },
+      "checksum": "3020d501f6da7ba2ece9560756dab1b693723107ba0599273a8da747dbb62e6c"
+    },
+    {
+      "job_key": "arion.review_replies",
+      "def": {
+        "schema": "agent-job/1",
+        "job": "arion.review_replies",
+        "name": "Google review replies",
+        "trigger": {
+          "type": "schedule",
+          "every": "day"
+        },
+        "reads": [
+          "brief.brandVoice",
+          "brief.doNotSay",
+          "brief.offersAllowed",
+          "brief.namesNeverMention",
+          "brief.competitors",
+          "brief.businessName"
+        ],
+        "steps": [
+          {
+            "id": "read_new_reviews",
+            "action": "arion.read_new_reviews",
+            "words": "Reads your new Google reviews"
+          },
+          {
+            "id": "draft_review_reply",
+            "action": "arion.draft_review_reply",
+            "words": "Writes a reply in your voice"
+          },
+          {
+            "id": "check",
+            "checks": [
+              "no_price",
+              "offers_from_brief_only",
+              "no_names_from_never_name",
+              "no_competitor_names",
+              "low_star_review_asks",
+              "hold_complaint_legal_refund"
+            ],
+            "words": "Checks it against what I never do"
+          },
+          {
+            "id": "post_review_reply",
+            "action": "arion.post_review_reply",
+            "words": "Posts the reply on Google",
+            "hold": "by_mode"
+          }
+        ],
+        "vars": {
+          "automatic_min_stars": {
+            "label": "Answer by itself from this many stars",
+            "type": "stars",
+            "default": 4,
+            "min": 4,
+            "max": 5
+          }
+        }
+      },
+      "checksum": "3aa6359c217e5e40857af532fa2a7595e84fb877086807b8962c319940c1bbc5"
+    },
+    {
+      "job_key": "spark.winback",
+      "def": {
+        "schema": "agent-job/1",
+        "job": "spark.winback",
+        "name": "Win back quiet customers",
+        "trigger": {
+          "type": "schedule",
+          "every": "week",
+          "day": "mon"
+        },
+        "reads": [
+          "brief.services",
+          "brief.brandVoice",
+          "brief.doNotSay",
+          "brief.offersAllowed",
+          "brief.proofAllowed",
+          "brief.namesNeverMention",
+          "brief.namesYouMayMention",
+          "brief.competitors"
+        ],
+        "steps": [
+          {
+            "id": "find_quiet_customers",
+            "action": "spark.find_quiet_customers",
+            "words": "Finds customers you haven't worked for in a while"
+          },
+          {
+            "id": "draft_campaign",
+            "action": "spark.draft_campaign",
+            "words": "Writes the email"
+          },
+          {
+            "id": "check",
+            "checks": [
+              "no_price",
+              "offers_from_brief_only",
+              "no_invented_proof",
+              "no_names_from_never_name",
+              "no_competitor_names",
+              "no_ranking_promise"
+            ],
+            "words": "Checks it against what I never do"
+          },
+          {
+            "id": "make_draft_campaign",
+            "action": "spark.make_draft_campaign",
+            "words": "Saves it as a draft campaign for you to send",
+            "hold": "always"
+          }
+        ],
+        "vars": {
+          "campaigns_per_cycle": {
+            "label": "Campaigns each time",
+            "type": "int",
+            "default": 1,
+            "min": 1,
+            "max": 8
+          },
+          "winback_days_since_job": {
+            "label": "Days since their last job",
+            "type": "int",
+            "default": 45,
+            "min": 7,
+            "max": 730
+          },
+          "min_cohort_size": {
+            "label": "Smallest group worth an email",
+            "type": "int",
+            "default": 5,
+            "min": 1,
+            "max": 500
+          },
+          "winback_cohort_source": {
+            "label": "Who counts as a customer",
+            "type": "choice",
+            "default": "auto",
+            "options": [
+              "auto",
+              "job",
+              "invoice"
+            ]
+          }
+        }
+      },
+      "checksum": "fc27d3ebdc55b7ec7f79baaafe30ff67fadcaedec74b6ade6fb7e86cadb3f630"
+    }
+  ],
+  "starter_checksums": {
+    "arion.blog_posts": "3020d501f6da7ba2ece9560756dab1b693723107ba0599273a8da747dbb62e6c",
+    "arion.social_posts": "3aff28495c9ab24ce2aede2f5aeb3bb02dabed35815971d7a72cf496564a8bf1",
+    "arion.review_replies": "3aa6359c217e5e40857af532fa2a7595e84fb877086807b8962c319940c1bbc5",
+    "spark.inquiry_reply": "6e9a34095eaaf8b10a058dfaef2a0b07110bf4c04affb7e0bd40705d8b65b9f6",
+    "spark.winback": "fc27d3ebdc55b7ec7f79baaafe30ff67fadcaedec74b6ade6fb7e86cadb3f630",
+    "spark.campaign_from_brief": "af87cf43bac2fa395db067868b454426c633a7522a953f979726d4375a6baa8f",
+    "oliver.quote_payment_followups": "b37854de86efd3fcaf38bac4cf15a292b4b70f7597460da1f05c67215eaff7ff",
+    "oliver.crew_suggestions": "1bd3e7f3f3f81a48e8b29b58756829312bcdbf2ad9540b8bdb69ca0904ada99f",
+    "oliver.review_asks": "580806c98358850b11acbd6e0ace3d00c1098388f4d1f338ff864793a7f93f54"
+  }
+}
