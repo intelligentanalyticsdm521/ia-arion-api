@@ -637,6 +637,32 @@ describe('checks on fixture HTML', () => {
     assert.deepEqual(contactChecks('<p>Call 515-555-0142</p>'), { telLink: false, phoneShown: true, contactLink: false });
   });
 
+  test('contact: a Facebook icon, a search box or a /notebooks link is not a way to get in touch', () => {
+    for (const html of [
+      '<a href="https://facebook.com/acme">Facebook</a>',
+      '<form role="search" action="/"><input type="search" name="s"><button>Go</button></form>',
+      '<form action="/search"><input type="text" name="q"></form>',
+      '<a href="/notebooks">Our notebooks</a>',
+      '<a href="/blog/quotes-we-love">Read</a>',
+      '<a href="https://www.facebook.com/booking.page">Like us</a>',
+    ]) assert.equal(contactChecks(html).contactLink, false, html);
+  });
+
+  test('contact: real ways to get in touch still count (presence)', () => {
+    for (const html of [
+      '<a href="/contact-us">Say hi</a>',
+      '<a href="/contact/">Reach us</a>',
+      '<a href="/book-online">Times</a>',
+      '<a href="/request-a-quote.html">Pricing</a>',
+      '<a href="mailto:hi@x.example">Email</a>',
+      '<a href="#form">Get in touch</a>',
+      '<a href="/start">Book now</a>',
+      '<form action="/send"><input type="email" name="e"></form>',
+      '<form action="/send"><textarea name="m"></textarea></form>',
+      '<form action="/send"><input type="tel" name="p"></form>',
+    ]) assert.equal(contactChecks(html).contactLink, true, html);
+  });
+
   test('typed websites are normalised; the day key ignores case and the trailing slash', () => {
     assert.equal(normaliseSiteUrl('example.com'), 'https://example.com/');
     assert.equal(normaliseSiteUrl('  http://Example.com/shop/ '), 'http://example.com/shop/');
