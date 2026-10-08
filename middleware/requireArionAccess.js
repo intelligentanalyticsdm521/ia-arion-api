@@ -54,7 +54,7 @@ export async function requireArionAccess(req, res, next) {
   try {
     const tenantId = req.tenant?.tenantId;
     if (!tenantId) {
-      return res.status(400).json({ error: "Tenant not resolved" });
+      return res.status(400).json({ error: "business_not_resolved", details: "We couldn't tell which business you're working in. Reload the page, or sign out and sign in again." });
     }
 
     const platformPool = await getPlatformPool();

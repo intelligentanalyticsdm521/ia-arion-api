@@ -12,8 +12,8 @@ test("the not-owned refusal is the plain sentence", () => {
   assert.match(src, /return res\.status\(403\)\.json\(\{ error: "ARION isn't part of this business's plan\." \}\);/);
 });
 
-test("no 403 body in the gate says 'tenant'", () => {
-  const bodies = [...src.matchAll(/res\.status\(403\)\.json\(([^;]*)\);/g)].map((m) => m[1]);
-  assert.ok(bodies.length > 0, "the gate's refusals were found (a scan that finds nothing proves nothing)");
+test("no 4xx or 5xx body in the gate says 'tenant' (the 400 and 500 too)", () => {
+  const bodies = [...src.matchAll(/res\.status\([45]\d\d\)\.json\(([\s\S]*?)\);\s*\n/g)].map((m) => m[1]);
+  assert.ok(bodies.length >= 7, `the gate's refusals were found (a scan that finds nothing proves nothing): ${bodies.length}`);
   for (const b of bodies) assert.doesNotMatch(b, /\btenant\b/i, b);
 });
