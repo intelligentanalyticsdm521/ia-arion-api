@@ -20,6 +20,9 @@
  *   scanner and entities, C1-2 contact check, B1-3 robots-blocked report,
  *   W1-2 report words, L1 stable links, S1-4 slots and the cap, T1-3 lost
  *   runs, D1-2 daily limit, K1 signed run id, P1-2 caller re-registration.
+ *   (fixes of 8 Oct 2026) H5-H8 one-walk tag reader and forms, H9 the 512 KB
+ *   page cap, H10 the 4 KB attribute cap, R3 the robots path cap, E1-E4 true
+ *   failure sentences, E5 "tomorrow" in the daily-limit words.
  */
 
 import test, { describe } from 'node:test';
@@ -38,7 +41,7 @@ import { sign, verify } from '../lib/audit/signature.js';
 import { AuditNotConfigured, callerKey, encryptSecret, decryptSecret, planCallerUpsert, upsertCaller, CallerChangeRefused } from '../lib/audit/callers.js';
 import { safeFetch, checkUrl, isBlockedAddress, SafeFetchRefused } from '../lib/audit/safeFetch.js';
 import { parseRobots, isAllowed } from '../lib/audit/robots.js';
-import { pageChecks, securityHeaderChecks, contactChecks, anchorsOf } from '../lib/audit/checks.js';
+import { pageChecks, securityHeaderChecks, contactChecks, anchorsOf, attrsOf, MAX_HTML, MAX_TAG, MAX_TAGS } from '../lib/audit/checks.js';
 import { crawl, normaliseSiteUrl, urlKey } from '../lib/audit/crawl.js';
 import { scoreAudit, bandSentence, SPEED_WORDS, ROBOTS_BLOCKED_SENTENCE } from '../lib/audit/score.js';
 import { renderReportHtml, renderPdf, brandColours } from '../lib/audit/report.js';
@@ -761,6 +764,32 @@ function fakeSite({ robots = 'User-agent: *\nDisallow: /private\n', counter = {}
   };
 }
 
+describe('robots path cap', () => {
+  test('a path longer than any page address is cut before it is matched (500 hostile rules, 500 KB paths)', async () => {
+    // Without the cap, each rule scans the whole path: about 150 ms per check
+    // for one 500 KB link, and a page can hold many of them.
+    const { out } = await timedInWorker(`async (root) => {
+      const { parseRobots, isAllowed, MAX_PATH_LENGTH, MAX_RULES } = await import(root + 'lib/audit/robots.js');
+      const NL = String.fromCharCode(10);
+      const rules = Array.from({ length: MAX_RULES }, (_, i) => 'Disallow: /*' + 'a'.repeat(990) + 'b' + i);
+      const p = parseRobots(['User-agent: *', ...rules].join(NL));
+      const paths = ['a', 'c', 'd'].map((x) => '/' + x.repeat(500 * 1024));
+      const t0 = performance.now();
+      const answers = paths.map((x) => isAllowed(p, x));
+      const ms = performance.now() - t0;
+      const late = parseRobots(['User-agent: *', 'Disallow: /*secret'].join(NL));
+      return { ms, answers, rules: p.rules.length, cap: MAX_PATH_LENGTH,
+        pastCap: isAllowed(late, '/' + 'x'.repeat(MAX_PATH_LENGTH) + 'secret'),
+        insideCap: isAllowed(late, '/x/secret') };
+    }`, 20_000);
+    assert.equal(out.rules, 500, 'the rules were read');
+    assert.deepEqual(out.answers, [true, true, true]);
+    assert.ok(out.ms < 50, `three checks took ${out.ms.toFixed(1)} ms`);
+    assert.equal(out.pastCap, true, `only the first ${out.cap} characters of a path are matched`);
+    assert.equal(out.insideCap, false, 'a rule still matches inside the cap');
+  });
+});
+
 describe('checks on fixture HTML', () => {
   test('title/description length, H1 count, alt, canonical, viewport, JSON-LD types', () => {
     const c = pageChecks(HOME_HTML);
@@ -844,6 +873,117 @@ describe('hostile HTML cannot freeze the server', () => {
       assert.ok(out.ms < 500, `took ${out.ms.toFixed(0)} ms`);
     });
   }
+
+  // Reviewer finding, 7 Oct 2026: a page of start tags that never finish, with
+  // ONE '>' inside the 512 KB cap, made every opener reach the same far '>' and
+  // re-read that huge "tag" (174 s for 256 KB). Unclosed forms re-read the rest
+  // of the page once each (30 s for 512 KB). Each check must finish in under
+  // 500 ms, and a drift probe must never see the thread held for 100 ms.
+  for (const [unit, closeOne] of [['<meta ', true], ['<img ', true], ['<link ', true], ['<input ', true], ['<form>', false], ['<form><input type=text ', true]]) {
+    test(`512 KB of ${JSON.stringify(unit)}${closeOne ? " with one '>'" : ''} is checked in under 500 ms and never holds the thread 100 ms`, async () => {
+      const { out } = await timedInWorker(`async (root) => {
+        const { pageChecks, contactChecks, anchorsOf, jsonLdTypes, MAX_HTML } = await import(root + 'lib/audit/checks.js');
+        const unit = ${JSON.stringify(unit)};
+        let html = unit.repeat(Math.floor((MAX_HTML - 1) / unit.length));
+        if (${closeOne}) html += '>';
+        if (html.length > MAX_HTML) throw new Error('the closing > must sit inside the cap');
+        let last = performance.now();
+        let worst = 0;
+        const probe = setInterval(() => { const now = performance.now(); worst = Math.max(worst, now - last - 5); last = now; }, 5);
+        const breathe = () => new Promise((r) => setTimeout(r, 15));
+        const ms = {};
+        await breathe();
+        for (const [name, fn] of Object.entries({ pageChecks, contactChecks, anchorsOf, jsonLdTypes })) {
+          const t0 = performance.now();
+          fn(html);
+          ms[name] = performance.now() - t0;
+          await breathe();
+        }
+        clearInterval(probe);
+        return { ms, worst, size: html.length };
+      }`, 20_000);
+      for (const [name, v] of Object.entries(out.ms)) assert.ok(v < 500, `${name} took ${v.toFixed(0)} ms on ${out.size} characters`);
+      assert.ok(out.worst < 100, `the thread was held for ${out.worst.toFixed(0)} ms`);
+    });
+  }
+
+  test('a hostile home page through the real crawl and safeFetch never holds the thread 100 ms', async () => {
+    const { out } = await timedInWorker(`async (root) => {
+      const http = require('node:http');
+      const { crawl } = await import(root + 'lib/audit/crawl.js');
+      const { safeFetch } = await import(root + 'lib/audit/safeFetch.js');
+      const { MAX_HTML } = await import(root + 'lib/audit/checks.js');
+      const pages = { '/': '<meta '.repeat(Math.floor((MAX_HTML - 1) / 6)) + '>', '/forms': '<form>'.repeat(Math.floor(MAX_HTML / 6)) };
+      const server = http.createServer((req, res) => {
+        const body = pages[req.url];
+        if (body == null) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('no'); return; }
+        res.writeHead(200, { 'content-type': 'text/html' }); res.end(body);
+      });
+      await new Promise((r) => server.listen(0, '127.0.0.1', r));
+      const base = 'http://127.0.0.1:' + server.address().port;
+      const fetch = (u, o = {}) => safeFetch(u, { ...o, env: { AUDIT_ALLOW_LOCAL: 'true' } });
+      let last = performance.now();
+      let worst = 0;
+      const probe = setInterval(() => { const now = performance.now(); worst = Math.max(worst, now - last - 5); last = now; }, 5);
+      const runs = [];
+      for (const p of ['/', '/forms']) {
+        const t0 = performance.now();
+        const r = await crawl(base + p, { fetch });
+        runs.push({ path: p, ms: performance.now() - t0, pages: r.pages.length, status: r.pages[0] && r.pages[0].status });
+      }
+      clearInterval(probe);
+      server.close();
+      return { runs, worst };
+    }`, 30_000);
+    for (const r of out.runs) {
+      assert.equal(r.pages, 1, `the hostile page ${r.path} was read`);
+      assert.equal(r.status, 200);
+    }
+    assert.ok(out.worst < 100, `the thread was held for ${out.worst.toFixed(0)} ms (${JSON.stringify(out.runs)})`);
+  });
+
+  test('only the first 512 KB of a page is read', () => {
+    const late = `${' '.repeat(MAX_HTML)}<title>A title past the cap</title><h1>Late</h1><a href="tel:5155550142">Call</a><form><textarea></textarea></form>`;
+    const c = pageChecks(late);
+    assert.equal(c.title, '', 'a title past 512 KB is not read');
+    assert.equal(c.h1Count, 0);
+    assert.deepEqual(anchorsOf(late), []);
+    assert.deepEqual(contactChecks(late), { telLink: false, phoneShown: false, contactLink: false });
+    // Presence: the same page inside the cap is read.
+    assert.equal(pageChecks(late.trimStart()).title, 'A title past the cap');
+    assert.equal(contactChecks(late.trimStart()).contactLink, true);
+  });
+
+  test('a tag whose quote never closes stops at 4 KB, and attrsOf reads at most 4 KB of one tag', () => {
+    const broken = `<img src="a.jpg>${' '.repeat(MAX_TAG + 100)}<h1>Real heading</h1>`;
+    assert.equal(pageChecks(broken).h1Count, 1, 'the heading after the broken tag is still read');
+    assert.equal(pageChecks(broken).imageCount, 1);
+    assert.deepEqual(attrsOf(`<img ${' '.repeat(MAX_TAG)} alt=x>`), {}, 'an attribute past 4 KB is not read');
+    assert.deepEqual(attrsOf('<img alt=x>'), { alt: 'x' });
+  });
+
+  test(`at most ${MAX_TAGS.toLocaleString('en-US')} tags of one page are read`, () => {
+    const html = '<img src=x>'.repeat(MAX_TAGS + 500);
+    assert.equal(pageChecks(html).imageCount, MAX_TAGS);
+    assert.equal(pageChecks('<img src=x>'.repeat(30)).imageCount, 30, 'an ordinary page counts every image');
+  });
+
+  test('the tag reader keeps what a browser keeps', () => {
+    // A '>' inside a quoted value does not end the tag; a tag that never ends stops at the next '<'.
+    assert.deepEqual(attrsOf('<meta name="description" content="Fast > slow, always" />'), { name: 'description', content: 'Fast > slow, always' });
+    const c = pageChecks('<meta name="description" content="Fast > slow, always and every time, for every customer we have"><meta name=viewport content="width=device-width"'
+      + '<link rel="Canonical" href="/x"><img src=a alt><img src=b><h1 title="a>b">x</h1>');
+    assert.equal(c.description, 'Fast > slow, always and every time, for every customer we have');
+    assert.equal(c.viewport, true, 'an unfinished tag still counts, up to the next tag');
+    assert.equal(c.canonical, true);
+    assert.equal(c.imageCount, 2);
+    assert.equal(c.imagesWithoutAlt, 1, 'a bare alt is an alt');
+    assert.equal(c.h1Count, 1);
+    assert.equal(contactChecks('<form><input type="Email "></form>').contactLink, true);
+    assert.equal(contactChecks('<form><input type=text></form><input type=email>').contactLink, false, 'a box outside any form is not a form');
+    assert.equal(contactChecks('<form><input type=text><form role=search><input type=email>').contactLink, false, 'an unclosed form ends where the next form starts');
+    assert.equal(contactChecks('<form><input type=text><form><textarea>').contactLink, true);
+  });
 
   test('the scanner still reads what it should (presence)', () => {
     const html = '<html><head><TITLE>Sam &amp; Co plumbing</TITLE><!-- <h1>hidden</h1> --><script>"<a href=/no>no</a>"</script></head>'
@@ -1217,6 +1357,36 @@ describe('runner', () => {
     assert.equal(row.status, 'failed');
     assert.equal(row.error_plain, PLAIN.unreachable);
     assert.deepEqual(JSON.parse(t.callbacks[0].opts.body), { kind: 'result', run_id: row.external_run_id, status: 'failed', error: PLAIN.unreachable });
+  });
+
+  test('a website that answered is never told "we couldn\'t reach" it: 404 home page, not a web page, too big, redirect loop', async () => {
+    const homeAnswers = {
+      homeError: () => ({ status: 404, headers: { 'content-type': 'text/html' }, body: Buffer.from('Not found') }),
+      notHtml: () => { throw new SafeFetchRefused('not_html', 'application/pdf'); },
+      tooBig: () => { throw new SafeFetchRefused('too_big', '3000000 > 2097152'); },
+      redirectLoop: () => { throw new SafeFetchRefused('too_many_redirects', 'https://samtest.example/'); },
+    };
+    const base = fakeSite();
+    for (const [want, answer] of Object.entries(homeAnswers)) {
+      const t = setup({ site: async (url, o = {}) => (new URL(url).pathname === '/' && (o.method || 'GET') === 'GET' ? { url, ...answer() } : base(url, o)) });
+      const id = await t.queue();
+      await t.runner.runNow(id);
+      const row = t.repo.runs.get(id);
+      assert.equal(row.status, 'failed', want);
+      assert.equal(row.error_plain, PLAIN[want], want);
+      assert.notEqual(row.error_plain, PLAIN.unreachable, `${want}: we did reach the website`);
+      assert.equal(JSON.parse(t.callbacks[0].opts.body).error, PLAIN[want], `${want}: the caller is told the same words`);
+    }
+    // Plain words: no codes, no numbers a business owner would not know.
+    for (const k of ['homeError', 'notHtml', 'tooBig', 'redirectLoop']) {
+      assert.doesNotMatch(PLAIN[k], /\b(?:404|500|HTML|HTTP|redirect|UTC)\b/i, k);
+    }
+    assert.equal(new Set(Object.values(PLAIN)).size, Object.keys(PLAIN).length, 'every failure has its own sentence');
+  });
+
+  test('the daily-limit words say "tomorrow", not a time zone', () => {
+    assert.match(WORDS.dailyLimit, /tomorrow/);
+    assert.doesNotMatch(WORDS.dailyLimit, /UTC|midnight|GMT/i);
   });
 
   test('a private website fails as "not a public website" and is not retried', async () => {

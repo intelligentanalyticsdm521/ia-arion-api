@@ -34,7 +34,7 @@ export const WORDS = {
   notConfigured: "The website check can't run right now. Please try again later or contact support.",
   // The owner reads this inside "did not finish: your tool said: …", so it
   // says what happened and what to do.
-  dailyLimit: "Today's limit of website checks was reached, so this one didn't run. Reply to this visitor yourself — checks start again after midnight UTC.",
+  dailyLimit: "Today's limit of website checks was reached, so this one didn't run. Reply to this visitor yourself — checks start again tomorrow.",
   linkWrong: "This link isn't right. Ask the business that sent it to you for a fresh copy.",
   linkExpired: (name) => `This link has expired. Ask ${name || 'the business that sent it'} for a fresh copy.`,
   fileTrouble: "We couldn't open this report right now. Please try again in a few minutes.",

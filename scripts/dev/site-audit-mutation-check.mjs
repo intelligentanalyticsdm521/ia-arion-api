@@ -92,7 +92,7 @@ const M = [
     edits: [{ file: 'lib/audit/checks.js', from: 'const contactLink = anchors.some((a) => isContactHref(a.href) || CONTACT_WORDS.test(a.text));',
       to: 'const contactLink = anchors.some((a) => /^mailto:/i.test(a.href) || /contact|get-in-touch|quote|book/i.test(a.href) || /\\bcontact\\b|get in touch|book|quote/i.test(a.text));' }] },
   { id: 'C2', name: 'only a form with an email, phone or message box counts', mustFail: 'a Facebook icon, a search box or a /notebooks link',
-    edits: [{ file: 'lib/audit/checks.js', from: 'const form = contactForms(visibleHtml(html));', to: "const form = tagsNamed(capped(html), 'form').length > 0;" }] },
+    edits: [{ file: 'lib/audit/checks.js', from: 'const form = contactForms(vis);', to: "const form = named(scanTags(capped(html), asciiLower(capped(html))), 'form').length > 0;" }] },
   { id: 'B1', name: 'robots-blocked report scores only speed and security', mustFail: 'the report scores only speed and security',
     edits: [{ file: 'lib/audit/score.js', from: '    google: blocked ? none : googleSection(crawl, psiMobile, psiDesktop),', to: '    google: googleSection(crawl, psiMobile, psiDesktop),' }] },
   { id: 'B2', name: 'robots-blocked crawl does not fetch the sitemap', mustFail: 'the report scores only speed and security',
@@ -183,6 +183,61 @@ const M = [
     edits: [{ file: 'routes/audit.js', from: "          website: site,\n        }),", to: "          website: site,\n          email: msg.visitor?.email,\n        })," }] },
   { id: 'V16', name: "owner reads are scoped to the caller's owner business", mustFail: "only the caller's owner business sees its runs",
     edits: [{ file: 'routes/arion/siteAudits.js', from: 'const row = await repo.getForOwner(tenantId, req.params.runId);\n      if (!row) return', to: 'const row = await repo.getRun?.(req.params.runId) ?? await repo.getForOwner(tenantId, req.params.runId);\n      if (!row) return' }] },
+  // 8 Oct 2026 fixes: one-walk tag reader, page/tag/path caps, true failure sentences.
+  { id: "H5", name: "the tag walk never goes back (reverted: every opener reads on to the same far \">\")", mustFail: "512 KB of \"<meta \" with one",
+    edits: [
+      { file: "lib/audit/checks.js", from: "    pos = end;\n", to: "    pos = lt + 1;\n" },
+      { file: "lib/audit/checks.js", from: "      if (c === LT) { end = k; break; } // never finished: it ends where the next tag starts\n", to: "" },
+      { file: "lib/audit/checks.js", from: "    const limit = Math.min(n, lt + MAX_TAG);\n", to: "    const limit = n;\n" },
+    ] },
+  { id: "H5b", name: "an unfinished tag ends at the next \"<\"", mustFail: "the tag reader keeps what a browser keeps",
+    edits: [
+      { file: "lib/audit/checks.js", from: "      if (c === LT) { end = k; break; } // never finished: it ends where the next tag starts\n", to: "" },
+    ] },
+  { id: "H6", name: "a tag is cut at 4 KB", mustFail: "a tag whose quote never closes stops at 4 KB",
+    edits: [
+      { file: "lib/audit/checks.js", from: "    const limit = Math.min(n, lt + MAX_TAG);\n", to: "    const limit = n;\n" },
+    ] },
+  { id: "H7", name: "at most 20,000 tags per page", mustFail: "tags of one page are read",
+    edits: [
+      { file: "lib/audit/checks.js", from: "  while (out.length < MAX_TAGS) {\n", to: "  for (;;) {\n" },
+    ] },
+  { id: "H8", name: "forms read in one pass (reverted: each unclosed form re-reads the rest of the page)", mustFail: "512 KB of \"<form>\"",
+    edits: [
+      { file: "lib/audit/checks.js", from: "function contactForms(html) {\n  const lower = asciiLower(html);\n  const nextClose = finder(lower, '</form');\n  let formEnd = -1; // where the open contact-capable form stops; -1 = none open\n  for (const t of scanTags(html, lower)) {\n    if (t.name === 'form') {\n      const search = String(attrsOf(t.tag).role || '').toLowerCase() === 'search';\n      const close = nextClose(t.end);\n      formEnd = search ? -1 : (close < 0 ? lower.length : close);\n      continue;\n    }\n    if (formEnd < 0 || t.start >= formEnd) { formEnd = -1; continue; }\n    if (t.name === 'textarea') return true;\n    if (t.name === 'input' && /^(?:email|tel)$/i.test(String(attrsOf(t.tag).type || '').trim())) return true;\n  }\n  return false;\n}\n", to: "function contactForms(html) {\n  const lower = asciiLower(html);\n  const nextClose = finder(lower, '</form');\n  return named(scanTags(html, lower), 'form').some((t) => {\n    if (String(attrsOf(t.tag).role || '').toLowerCase() === 'search') return false;\n    const close = nextClose(t.end);\n    const inner = html.slice(t.end, close < 0 ? html.length : close);\n    const tags = scanTags(inner, asciiLower(inner));\n    if (named(tags, 'textarea').length) return true;\n    return named(tags, 'input').map((x) => attrsOf(x.tag)).some((at) => /^(?:email|tel)$/i.test(String(at.type || '').trim()));\n  });\n}\n" },
+    ] },
+  { id: "H9", name: "only the first 512 KB of a page is read", mustFail: "only the first 512 KB of a page is read",
+    edits: [
+      { file: "lib/audit/checks.js", from: "const capped = (html) => String(html || '').slice(0, MAX_HTML);", to: "const capped = (html) => String(html || '');" },
+    ] },
+  { id: "H10", name: "attrsOf reads at most 4 KB of one tag", mustFail: "attrsOf reads at most 4 KB of one tag",
+    edits: [
+      { file: "lib/audit/checks.js", from: "  let s = String(tag || '').slice(0, MAX_TAG);", to: "  let s = String(tag || '');" },
+    ] },
+  { id: "R3", name: "robots path-length cap", mustFail: "a path longer than any page address is cut before it is matched",
+    edits: [
+      { file: "lib/audit/robots.js", from: "  const p = String(pathWithQuery || '/').slice(0, MAX_PATH_LENGTH);", to: "  const p = String(pathWithQuery || '/');" },
+    ] },
+  { id: "E1", name: "a home page that answered with an error has its own sentence", mustFail: "a website that answered is never told",
+    edits: [
+      { file: "lib/audit/runner.js", from: "  if (err?.code === 'home_status') return PLAIN.homeError; // the site answered 404, 500 …\n", to: "" },
+    ] },
+  { id: "E2", name: "a page that is not a web page has its own sentence", mustFail: "a website that answered is never told",
+    edits: [
+      { file: "lib/audit/runner.js", from: "    if (err.code === 'not_html') return PLAIN.notHtml;\n", to: "" },
+    ] },
+  { id: "E3", name: "a page that is too big has its own sentence", mustFail: "a website that answered is never told",
+    edits: [
+      { file: "lib/audit/runner.js", from: "    if (err.code === 'too_big') return PLAIN.tooBig;\n", to: "" },
+    ] },
+  { id: "E4", name: "a redirect loop has its own sentence", mustFail: "a website that answered is never told",
+    edits: [
+      { file: "lib/audit/runner.js", from: "    if (err.code === 'too_many_redirects') return PLAIN.redirectLoop;\n", to: "" },
+    ] },
+  { id: "E5", name: "the daily-limit words say tomorrow (reverted to midnight UTC)", mustFail: "the daily-limit words say",
+    edits: [
+      { file: "routes/audit.js", from: "checks start again tomorrow.", to: "checks start again after midnight UTC." },
+    ] },
 ];
 
 console.log(`\n=== site audit mutations (${M.length}) — ${REPO} ===\n`);
