@@ -897,6 +897,26 @@ describe('report', () => {
     assert.deepEqual(brandColours({ primary: 'javascript:1' }).primary, '#1f2937');
   });
 
+
+  test('report words stay true at the edges', () => {
+    const one = { score: 90, sentence: 'This is in good shape.', sections: [], topFindings: ['Only one thing.'], notes: [] };
+    const html1 = renderReportHtml({ business: { name: 'Northwind Gardens' }, url: 'https://samtest.example/', result: one });
+    assert.match(html1, /<h2>The thing to fix first<\/h2>/);
+    assert.doesNotMatch(html1, /three things/);
+    const html2 = renderReportHtml({ business: { name: 'Northwind Gardens' }, url: 'https://samtest.example/', result: { ...one, topFindings: ['a', 'b'] } });
+    assert.match(html2, /<h2>The two things to fix first<\/h2>/);
+    const html3 = renderReportHtml({ business: { name: 'Northwind Gardens' }, url: 'https://samtest.example/', result: { ...one, topFindings: ['a', 'b', 'c'] } });
+    assert.match(html3, /<h2>The three things to fix first<\/h2>/);
+
+    const speedAt = (ms) => scoreAudit({ crawl: null, psiMobile: { scores: { performance: 60 }, metrics: { lcp: { value: ms } }, opportunities: [] } })
+      .sections.find((x) => x.key === 'speed').findings[0];
+    assert.equal(speedAt(2600), 'Your phone visitors wait about 3 seconds before they see your page.');
+    assert.equal(speedAt(3600), 'Your phone visitors wait about 4 seconds before they see your page. Most people leave after 3.');
+
+    const trust = scoreAudit({ crawl: { homepage: { https: true, security: { hsts: true } }, httpsRedirect: true, robots: {} } })
+      .sections.find((x) => x.key === 'trust').findings;
+    assert.deepEqual(trust, ['Your site is missing 4 of 5 standard browser protections that keep visitors safe.']);
+  });
   test('a visitor business name with markup is escaped', async () => {
     const html = renderReportHtml({ business, visitor: { business: '<script>alert(1)</script>' }, url: 'https://samtest.example/', result: await result() });
     assert.doesNotMatch(html, /<script>alert/);
