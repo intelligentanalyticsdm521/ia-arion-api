@@ -144,7 +144,7 @@ router.get('/activity', async (req, res) => {
     res.json({ data: await loadArionActivity(pool, req.tenant.tenantId, { limit, waiting }) });
   } catch (err) {
     console.error('[arion/agents:activity]', err);
-    fail(res, 500, 'INTERNAL_ERROR', err.message);
+    fail(res, 500, 'INTERNAL_ERROR', SERVER_WORDS);
   }
 });
 
@@ -158,7 +158,7 @@ router.get('/runs', async (req, res) => {
     res.json({ data: await loadArionRuns(pool, req.tenant.tenantId, { limit }) });
   } catch (err) {
     console.error('[arion/agents:runs]', err);
-    fail(res, 500, 'INTERNAL_ERROR', err.message);
+    fail(res, 500, 'INTERNAL_ERROR', SERVER_WORDS);
   }
 });
 
@@ -212,7 +212,7 @@ router.get('/settings', async (req, res) => {
     res.json({ data: await readSettings(pool, req.tenant.tenantId) });
   } catch (err) {
     console.error('[arion/agents:settings:get]', err);
-    fail(res, 500, 'INTERNAL_ERROR', err.message);
+    fail(res, 500, 'INTERNAL_ERROR', SERVER_WORDS);
   }
 });
 
@@ -272,7 +272,7 @@ router.put('/settings', async (req, res) => {
     res.json({ data: await readSettings(pool, tenantId) });
   } catch (err) {
     console.error('[arion/agents:settings:put]', err);
-    fail(res, 500, 'INTERNAL_ERROR', err.message);
+    fail(res, 500, 'INTERNAL_ERROR', SERVER_WORDS);
   }
 });
 
@@ -302,21 +302,36 @@ export const RUN_WORDS = Object.freeze({
   unreadable: "ARGUS couldn't check whether that job is on, so nothing ran. Try again in a minute.",
   off: 'That job is off. Switch it on first.',
   halted: (when, why) => `It stopped itself${when ? ` on ${when}` : ''}: ${why}. Start it again first.`,
+  // A thrown error is logged here, never sent: an owner reads this, not the exception.
+  broke: 'Something went wrong on our side, so nothing ran. Try again in a minute.',
 });
+
+/** What an owner reads when a read or a save throws (the error itself goes to the log). */
+export const SERVER_WORDS = 'Something went wrong on our side. Try again in a minute.';
 
 /**
  * What "Run it now" sends back: THIS business's results only. The tick's
  * summary is a fleet shape (margins, every alert, notifications); an owner
  * route must never hand one business another business's id, price or spend.
+ *
+ * productOff is kept, narrowed to this business: a business whose ARION
+ * ended while a job stayed on gets no results, and the Portal's runResult
+ * (src/lib/team.ts) reads `productOff.skipped` to say "your plan doesn't
+ * include this job" instead of "It couldn't finish this time". Each entry
+ * carries the plain sentence only (no id, no reason code); `words` repeats it.
  */
 export function ownRunSummary(summary, tenantId) {
   const T = String(tenantId).toUpperCase();
   const mine = (x) => String(x?.tenantId || '').toUpperCase() === T;
+  const skipped = (summary?.productOff?.skipped || []).filter(mine)
+    .map((s) => ({ ended: !!s.ended, note: String(s.note || '') }));
   return {
     ran: Number(summary?.ran) || 0,
     results: (summary?.results || []).filter(mine),
     alerts: (summary?.alerts || []).filter((a) => mine(a) && a.failure_mode !== 'MARGIN')
       .map(({ tenantId: _t, ...a }) => a),
+    productOff: { skipped },
+    ...(skipped.length && skipped[0].note ? { words: skipped[0].note } : {}),
     ...(summary?.jobStateUnreadable ? { jobStateUnreadable: true, words: summary.words } : {}),
   };
 }
@@ -365,7 +380,7 @@ export function makeRunHandler({ getPool = getServicesPool, jobsOn = seamJobsOn,
       res.json({ data: ownRunSummary(summary, tenantId) });
     } catch (err) {
       console.error('[arion/agents:run]', err);
-      fail(res, 500, 'INTERNAL_ERROR', err.message);
+      fail(res, 500, 'INTERNAL_ERROR', RUN_WORDS.broke);
     }
   };
 }

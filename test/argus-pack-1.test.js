@@ -259,7 +259,8 @@ test("no client surface carries a dollar figure", () => {
   });
   assert.equal("cost_usd" in row, false);
   assert.match(row.cost_note, /ARGUS AI/);
-  assert.match(row.attribution, /^Created by Intelligent Analytics — /);
+  // No company line and no "Agent" on an owner's page (the Portal blanks it too).
+  assert.equal(row.attribution, "");
   assert.equal(ARION_AGENTS.content.drafts_with_ai, true);
 });
 

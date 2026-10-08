@@ -182,7 +182,7 @@ test('a check this repo cannot run → the job does nothing and names it (fail c
   def.steps[2].checks = [...def.steps[2].checks, 'no_collections_language'];
   const g = gateJob('arion.blog_posts', { playbook: { def } }, BRIEF_WITH_SERVICES);
   assert.equal(g.ok, false);
-  assert.equal(g.words, 'ARGUS has no check called no_collections_language, so I did nothing.');
+  assert.equal(g.words, 'This job can\'t run its check "Never threaten, say \'final notice\', or use legal words about money", so I did nothing.');
 });
 
 test('the platform checks are added again whatever the playbook says', () => {
@@ -873,6 +873,7 @@ test('no code reads or writes the switches that moved to the jobs', () => {
 const STREAM_FILES = [
   'db/migrations/069_review_replies_and_citations.sql', 'db/migrations/later/070_drop_moved_agent_switches.sql',
   'db/migrations/071_review_reply_posting_and_held_reasons.sql',
+  'db/migrations/072_plain_words_for_credit_prices.sql',
   'lib/jobChecks.js', 'lib/teamSeam.js', 'lib/businessTimeZone.js', 'lib/gbpReplyRunner.js', 'lib/gbpFake.js', 'lib/gbpAiReply.js',
   'lib/gbpIntake.js', 'lib/argus/suiteCeiling.js',
   'lib/contentAgent/tick.js', 'lib/contentAgent/runner.js', 'lib/contentAgent/drafting.js',
@@ -889,7 +890,6 @@ const PHASE1_BASE = '84df57c';
 // Pre-existing lines (finding F7 and routes/arion.js's older product words),
 // not this build's to fix; exact lines only, so no new literal can hide here.
 const PRE_EXISTING = [
-  "export const ATTRIBUTION_ORG = 'Intelligent Analytics';",
   "requiredAddon: x.seoAddon === true && !x.done ? 'Intelligent Analytics SEO package' : null,",
   "return res.status(403).json({ error: { code: 'platform_entry', message: 'This entry is managed by Intelligent Analytics and cannot be removed here', status: 403 } });",
 ];

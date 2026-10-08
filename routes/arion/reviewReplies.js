@@ -34,7 +34,7 @@ import { getServicesPool } from '../../db/servicesPool.js';
 import { reviewsApi, NOT_LIVE_WORDS } from '../../lib/gbpFake.js';
 import { runReviewReplyTick, markReply, claimReply, releaseReply, JOB_KEY, POSTING_STALE_MINUTES } from '../../lib/gbpReplyRunner.js';
 import { jobsOn as seamJobsOn, briefFor as seamBriefFor } from '../../lib/teamSeam.js';
-import { runChecks, PLATFORM_CHECKS, checkContext } from '../../lib/jobChecks.js';
+import { runChecks, PLATFORM_CHECKS, checkContext, RUN_WORDS } from '../../lib/jobChecks.js';
 
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const fail = (res, status, code, message) => res.status(status).json({ error: { code, message, status } });
@@ -50,6 +50,9 @@ export const WORDS = Object.freeze({
   jobOff: 'Google review replies are off. Switch them on first.',
   jobUnreadable: "ARGUS couldn't check whether Google review replies are on, so nothing ran. Try again in a minute.",
   emptyBody: 'Write the reply first.',
+  // A thrown error is logged, never sent: an owner reads these, not the exception.
+  runBroke: 'Something went wrong on our side, so nothing ran. Try again in a minute.',
+  serverError: 'Something went wrong on our side. Try again in a minute.',
 });
 
 /** Who decided, in a person's words. */
@@ -95,7 +98,7 @@ export function makeReviewRepliesRouter({
       res.json({ data: summary });
     } catch (err) {
       console.error('[review-replies:run]', err);
-      fail(res, 500, 'INTERNAL_ERROR', err.message);
+      fail(res, 500, 'INTERNAL_ERROR', WORDS.runBroke);
     }
   });
 
@@ -138,7 +141,7 @@ export function makeReviewRepliesRouter({
         const read = await briefFor(tenantId);
         if (!read || read.ok !== true || !read.brief) return fail(res, 503, 'BRIEF_UNREADABLE', WORDS.briefUnreadable);
         const checked = runChecks(text, EDIT_CHECKS, checkContext(read.brief, { stars: row.star_rating, reviewText: row.review_text || '' }));
-        if (!checked.ok) return fail(res, 409, 'UNKNOWN_CHECK', `ARGUS has no check called ${checked.unknown[0]}, so I did nothing.`);
+        if (!checked.ok) return fail(res, 409, 'UNKNOWN_CHECK', RUN_WORDS.unknownCheck(checked.unknown[0]));
         if (checked.fired.length) return fail(res, 409, 'CHECK_FIRED', checked.fired[0].words);
       }
 
@@ -169,7 +172,7 @@ export function makeReviewRepliesRouter({
       res.json({ data: { draft_id: id, status: 'posted', words: 'Posted your reply on Google.' } });
     } catch (err) {
       console.error('[review-replies:approve]', err);
-      fail(res, 500, 'INTERNAL_ERROR', err.message);
+      fail(res, 500, 'INTERNAL_ERROR', WORDS.serverError);
     }
   });
 
@@ -196,7 +199,7 @@ export function makeReviewRepliesRouter({
       res.json({ data: { draft_id: id, status: 'skipped' } });
     } catch (err) {
       console.error('[review-replies:skip]', err);
-      fail(res, 500, 'INTERNAL_ERROR', err.message);
+      fail(res, 500, 'INTERNAL_ERROR', WORDS.serverError);
     }
   });
 

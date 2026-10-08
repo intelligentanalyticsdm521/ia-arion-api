@@ -242,13 +242,25 @@ for (const scenario of scenarios) {
 /* ── tidy up what this run wrote (unless --keep) ───────────────────────── */
 if (!keep) {
   // Only the rows THIS run created, by their run ids.
+  // The Automatic social scenario hands its post to LUMEN for real, which
+  // writes a draft in core.tenant_social_post (and its targets). Its id is on
+  // the output row (scheduled_social_post_id), so it is read BEFORE the
+  // outputs go and removed with them: "removed what this exercise wrote"
+  // must be true.
+  const socialPostIds = [...new Set((await contentRows(createdRuns))
+    .map((o) => o.scheduled_social_post_id).filter((id) => GUID.test(String(id || ''))).map(String))];
   const req = pool.request().input('t', sql.UniqueIdentifier, tenantId);
   const cr = createdRuns.map((id, i) => { req.input(`c${i}`, sql.UniqueIdentifier, id); return `@c${i}`; });
   const rr = createdReplyRuns.map((id, i) => { req.input(`g${i}`, sql.UniqueIdentifier, id); return `@g${i}`; });
+  const sp = socialPostIds.map((id, i) => { req.input(`p${i}`, sql.UniqueIdentifier, id); return `@p${i}`; });
   const parts = [];
   if (rr.length) {
     parts.push(`DELETE FROM arion.gbp_reply_draft WHERE tenant_id = @t AND run_id IN (${rr.join(', ')});`);
     parts.push(`DELETE FROM arion.gbp_reply_run WHERE tenant_id = @t AND run_id IN (${rr.join(', ')});`);
+  }
+  if (sp.length) {
+    parts.push(`DELETE FROM core.tenant_social_post_target WHERE post_id IN (${sp.join(', ')});`);
+    parts.push(`DELETE FROM core.tenant_social_post WHERE tenant_id = @t AND post_id IN (${sp.join(', ')});`);
   }
   if (cr.length) {
     parts.push(`DELETE FROM arion.content_agent_output WHERE tenant_id = @t AND run_id IN (${cr.join(', ')});`);
@@ -256,7 +268,7 @@ if (!keep) {
   }
   parts.push(`DELETE FROM arion.content_keyword_candidate WHERE tenant_id = @t AND keyword = N'${KEYWORD}';`);
   await req.query(parts.join(' '));
-  out({ cleanup: `removed what this exercise wrote: ${createdRuns.length} content run(s) and their drafts, ${createdReplyRuns.length} review run(s) and their replies, the stand-in keyword`, note: 'metering audit rows and the dev wallet are left as every dev run leaves them' });
+  out({ cleanup: `removed what this exercise wrote: ${createdRuns.length} content run(s) and their drafts, ${socialPostIds.length} social post draft(s) the hand-off made, ${createdReplyRuns.length} review run(s) and their replies, the stand-in keyword`, note: 'metering audit rows and the dev wallet are left as every dev run leaves them' });
 }
 fs.rmSync(fakeFile, { force: true });
 await pool.close?.();

@@ -73,11 +73,24 @@ test('offers: every case in the shared fixture', () => {
   for (const t of C.offer_cases.never_an_offer) assert.equal(held(t), false, `held: ${t}`);
   assert.equal(held(C.offer_cases.allowed_inside_its_own_words.text, C.offer_cases.allowed_inside_its_own_words.allowed), false);
   assert.equal(held(C.offer_cases.invented_next_to_allowed.text, C.offer_cases.invented_next_to_allowed.allowed), true);
+  // The forms with nothing after "free", or no "free" at all: an allowed one still passes.
+  assert.ok(C.offer_cases.allowed_new_forms.length >= 3);
+  for (const c of C.offer_cases.allowed_new_forms) {
+    assert.equal(held(c.text), true, `not held with nothing allowed: ${c.text}`);
+    assert.equal(held(c.text, c.allowed), false, `held although allowed: ${c.text}`);
+  }
 });
 
-test('the offer patterns are the fixture\'s, and there are seven', () => {
+test('offers: the verifier\'s probes are held (is free, on us, waive)', () => {
+  const held = (text) => !!CHECKS.offers_from_brief_only(text, { approvedOffers: [] });
+  for (const t of ['Your first mow is free', 'Second visit on us', 'We will waive the call-out fee']) assert.equal(held(t), true, `not held: ${t}`);
+  assert.equal(held('20% off mowing'), true);
+  assert.equal(held('You can count on us'), false);
+});
+
+test('the offer patterns are the fixture\'s, and there are eleven', () => {
   assert.deepEqual(OFFER_PATTERNS.map((r) => ({ source: r.source, flags: r.flags })), C.offer_patterns);
-  assert.equal(OFFER_PATTERNS.length, 7);
+  assert.equal(OFFER_PATTERNS.length, 11);
 });
 
 test('proof: each quote is judged on its own; an allowed one never carries an invented one through', () => {
@@ -93,12 +106,32 @@ test('proof: each quote is judged on its own; an allowed one never carries an in
   assert.ok(CHECKS.no_invented_proof('One of our customers said they loved the edging and that we are the best crew in the whole state.', { approvedProof: ['Loved the edging'] }));
 });
 
+test('proof: words AFTER an allowed quote are invented, whatever their number (the 14:48Z probes)', () => {
+  const allowed = ['Best lawn service in town, they were on time'];
+  const fired = (text) => !!CHECKS.no_invented_proof(text, { approvedProof: allowed });
+  assert.equal(fired('"Best lawn service in town, they were on time, award winning crew" - a happy customer'), true);
+  assert.equal(fired('One of our customers said Best lawn service in town, they were on time, voted best Texas.'), true);
+  // One trailing word is as invented as three.
+  assert.equal(fired('One of our customers said Best lawn service in town, they were on time, guaranteed.'), true);
+  // Lead-in words in front, and who said it at the end, are fine.
+  assert.equal(fired('A recent customer said it best: Best lawn service in town, they were on time.'), false);
+  assert.equal(fired('One of our customers told us Best lawn service in town, they were on time, said Pat.'), false);
+  // A lead-in that is not one of the lead-in words is invented too.
+  assert.equal(fired('One of our customers said award winning Best lawn service in town, they were on time.'), true);
+});
+
 test('hold words are whole words: praise is never held as a complaint', () => {
   for (const t of C.hold_keyword_cases.hold) assert.ok(HOLD_KEYWORDS.some((k) => holdWordHit(t, k)), `not held: ${t}`);
   for (const t of C.hold_keyword_cases.pass) assert.equal(HOLD_KEYWORDS.find((k) => holdWordHit(t, k)), undefined, `held: ${t}`);
   // Through the check itself, with the review text (the runner's shape).
   assert.deepEqual(runChecks('Thank you!', ['hold_complaint_legal_refund'], { reviewText: 'Very reliable and courteous crew' }).fired, []);
   assert.equal(runChecks('Thank you!', ['hold_complaint_legal_refund'], { reviewText: 'I want a refund' }).fired.length, 1);
+});
+
+test('hold words reach the forms whole-word matching missed (fraudulent, disgraceful, non-refundable)', () => {
+  const hit = (t) => HOLD_KEYWORDS.some((k) => holdWordHit(t, k));
+  for (const t of ['This is fraudulent', 'a disgraceful crew', 'non-refundable deposit']) assert.equal(hit(t), true, `not held: ${t}`);
+  assert.equal(hit('Very reliable crew'), false);
 });
 
 /* ══ 2. a check is "known" only to the runner that runs it ═════════════ */
@@ -109,7 +142,9 @@ test('a blog job whose description adds a review-only check is refused, nothing 
   const g = gateJob('arion.blog_posts', { playbook: { def } }, brief({ services: ['Mowing'] }));
   assert.equal(g.ok, false);
   assert.equal(g.rule, 'unknown_check');
-  assert.match(g.words, /low_star_review_asks/);
+  // The check's plain name, and that THIS job can't run it; never its key.
+  assert.equal(g.words, 'This job can\'t run its check "Never answer a review of 3 stars or fewer without you", so I did nothing.');
+  assert.doesNotMatch(g.words, /low_star_review_asks|ARGUS has no check/);
   assert.deepEqual(unknownChecksFor('arion.blog_posts', ['over_money_limit_asks', 'no_price']), ['over_money_limit_asks']);
   assert.deepEqual(unknownChecksFor('arion.review_replies', ['low_star_review_asks']), []);
 });
@@ -127,7 +162,7 @@ test('a review job whose description adds a check this runner cannot run fails c
   });
   assert.equal(drafted.length, 0);
   assert.equal(s.runs[0].outcome, 'failed');
-  assert.match(s.runs[0].words, /over_money_limit_asks/);
+  assert.equal(s.runs[0].words, 'This job can\'t run its check "Never send a quote over your limit without you", so I did nothing.');
 });
 
 /* ══ 3. "Run it now" never hands one business another's numbers ═══════ */
@@ -173,6 +208,66 @@ test('run now speaks in the jobs\' names, never their keys', async () => {
   await handler({ tenant: { tenantId: T1 }, body: {} }, res);
   assert.equal(res.statusCode, 400);
   assert.equal(res.body.error.message, 'Say which job to run: Blog posts or Social posts.');
+});
+
+test('run now keeps productOff for this business, in the shape the Portal reads (productOff.skipped)', async () => {
+  const note = "ARION has ended for this business, so the web person didn't write anything. It starts again after a re-subscribe.";
+  const summary = {
+    ran: 0, results: [], alerts: [],
+    productOff: { product: 'arion', mode: 'apply', skipped: [
+      { tenantId: T1, reason: 'subscription_ended', ended: true, note },
+      { tenantId: T2, reason: 'subscription_ended', ended: true, note: 'theirs' },
+    ], held: [], undecided: false },
+  };
+  const out = ownRunSummary(summary, T1);
+  assert.deepEqual(out.productOff, { skipped: [{ ended: true, note }] });
+  assert.equal(out.words, note);
+  assert.equal(JSON.stringify(out).includes(T2), false, 'another business\'s id is in the answer');
+  assert.equal(JSON.stringify(out).includes('subscription_ended'), false, 'a reason code is in the answer');
+  // The Portal's runResult reads exactly this: no results + productOff.skipped => not-owned sentence.
+  assert.ok(Array.isArray(out.productOff.skipped) && out.productOff.skipped.length === 1 && out.results.length === 0);
+  // A business that owns it gets an empty list, never a missing field.
+  assert.deepEqual(ownRunSummary({ ran: 1, results: [{ tenantId: T1 }], productOff: { skipped: [] } }, T1).productOff, { skipped: [] });
+
+  const handler = makeRunHandler({ getPool: async () => recordingPool(), jobsOn: fakeJobsOn({ [T1]: ['arion.blog_posts'] }), tick: async () => summary });
+  const res = fakeRes();
+  await handler({ tenant: { tenantId: T1 }, body: { job_key: 'arion.blog_posts' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.data.productOff.skipped, [{ ended: true, note }]);
+});
+
+test('a run that throws answers a plain sentence; the exception text stays in the log', async (t) => {
+  const logged = [];
+  t.mock.method(console, 'error', (...a) => logged.push(a));
+  const secret = 'Login failed for user sa on localhost,1433';
+  const handler = makeRunHandler({ getPool: async () => recordingPool(), jobsOn: fakeJobsOn({ [T1]: ['arion.blog_posts'] }), tick: async () => { throw new Error(secret); } });
+  const res = fakeRes();
+  await handler({ tenant: { tenantId: T1 }, body: { job_key: 'arion.blog_posts' } }, res);
+  assert.equal(res.statusCode, 500);
+  assert.equal(res.body.error.message, 'Something went wrong on our side, so nothing ran. Try again in a minute.');
+  assert.equal(JSON.stringify(res.body).includes(secret), false);
+  assert.ok(logged.some((a) => a.some((x) => x instanceof Error && x.message === secret)), 'the error was not logged');
+
+  // The review replies routes: run, approve and skip.
+  const boom = () => { throw new Error(secret); };
+  const router = makeReviewRepliesRouter({ getPool: async () => recordingPool(boom), jobsOn: fakeJobsOn({ [T1]: ['arion.review_replies'] }), tick: async () => { throw new Error(secret); } });
+  const call = async (path, params = {}) => {
+    const layer = router.stack.find((l) => l.route && l.route.path === path);
+    const r = fakeRes();
+    await layer.route.stack[0].handle({ tenant: { tenantId: T1 }, params, body: {}, auth: { name: 'Dana Ruiz' } }, r);
+    return r;
+  };
+  const id = { id: 'd0000000-0000-4000-8000-000000000001' };
+  for (const [path, params, words] of [
+    ['/run', {}, 'Something went wrong on our side, so nothing ran. Try again in a minute.'],
+    ['/:id/approve', id, 'Something went wrong on our side. Try again in a minute.'],
+    ['/:id/skip', id, 'Something went wrong on our side. Try again in a minute.'],
+  ]) {
+    const r = await call(path, params);
+    assert.equal(r.statusCode, 500, path);
+    assert.equal(r.body.error.message, words, path);
+    assert.equal(JSON.stringify(r.body).includes(secret), false, `${path} sent the exception text`);
+  }
 });
 
 /* ══ 4. review replies: spend limits ═══════════════════════════════════ */

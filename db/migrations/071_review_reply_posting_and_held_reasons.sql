@@ -59,7 +59,7 @@ BEGIN
   INSERT INTO argus.action_pricing (action_type, credits_per_call, description, outlier_cap_usd, is_active)
   SELECT N'arion.review_reply',
          COALESCE((SELECT credits_per_call FROM argus.action_pricing WHERE action_type = N'my_brand.review_reply'), 1),
-         N'Google review reply written by the web person''s job (Haiku class); same price as the owner''s Draft a reply button',
+         N'ARION: a reply to a Google review, written by your web person''s job. The same price as the Draft a reply button.',
          COALESCE((SELECT outlier_cap_usd FROM argus.action_pricing WHERE action_type = N'my_brand.review_reply'), 0.05),
          1;
   PRINT '  + argus.action_pricing arion.review_reply';
@@ -73,7 +73,7 @@ BEGIN
   INSERT INTO lumen.argus_action_pricing (action_type, credits_per_call, description, outlier_cap_usd, is_active)
   SELECT N'arion.review_reply',
          COALESCE((SELECT credits_per_call FROM lumen.argus_action_pricing WHERE action_type = N'my_brand.review_reply'), 1),
-         N'Google review reply written by the web person''s job (Haiku class); same price as the owner''s Draft a reply button',
+         N'ARION: a reply to a Google review, written by your web person''s job. The same price as the Draft a reply button.',
          COALESCE((SELECT outlier_cap_usd FROM lumen.argus_action_pricing WHERE action_type = N'my_brand.review_reply'), 0.05),
          1;
   PRINT '  + lumen.argus_action_pricing arion.review_reply';
