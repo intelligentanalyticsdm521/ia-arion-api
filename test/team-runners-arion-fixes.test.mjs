@@ -135,6 +135,36 @@ test('proof: a claim word after said/says, words after who said it, words betwee
   assert.equal(fired('One of our customers told us Best lawn service in town, they were on time, said Pat.'), false, 'One of our customers told us Best lawn service in town, they were on time, said Pat.');
 });
 
+const fired16 = (text) => !!CHECKS.no_invented_proof(text, { approvedProof: ['Best lawn service in town, they were on time'] });
+
+test('proof: a "name" holding a praise, service or quality word is a claim, and who said it is set off by a comma or a dash (the 16:16Z probes)', () => {
+  assert.equal(fired16('One of our customers said Best lawn service in town, they were on time, says Highly Recommended.'), true, 'One of our customers said Best lawn service in town, they were on time, says Highly Recommended.');
+  assert.equal(fired16('One of our customers said "Best lawn service in town, they were on time", wrote Customer Favorite.'), true, 'One of our customers said "Best lawn service in town, they were on time", wrote Customer Favorite.');
+  assert.equal(fired16('One of our customers said Best lawn service in town, they were on time, says Excellent Service.'), true, 'One of our customers said Best lawn service in town, they were on time, says Excellent Service.');
+  assert.equal(fired16('One of our customers said Best lawn service in town, they were on time, says Fastest Crew.'), true, 'One of our customers said Best lawn service in town, they were on time, says Fastest Crew.');
+  assert.equal(fired16('One of our customers said Best lawn service in town, they were on time says Pat.'), true, 'One of our customers said Best lawn service in town, they were on time says Pat.');
+  assert.equal(fired16('A recent customer said "Best lawn service in town, they were on time" wrote Pat Jones.'), true, 'A recent customer said "Best lawn service in town, they were on time" wrote Pat Jones.');
+  // Still passing: who said it by name after a comma or a dash, and "- a happy customer".
+  assert.equal(fired16('One of our customers told us Best lawn service in town, they were on time, said Pat.'), false, 'One of our customers told us Best lawn service in town, they were on time, said Pat.');
+  assert.equal(fired16('One of our customers said "Best lawn service in town, they were on time", said Pat Jones.'), false, 'One of our customers said "Best lawn service in town, they were on time", said Pat Jones.');
+  assert.equal(fired16('One of our customers said "Best lawn service in town, they were on time" - said Pat.'), false, 'One of our customers said "Best lawn service in town, they were on time" - said Pat.');
+  assert.equal(fired16('One of our customers said "Best lawn service in town, they were on time," said Pat Jones.'), false, 'One of our customers said "Best lawn service in town, they were on time," said Pat Jones.');
+  assert.equal(fired16('"Best lawn service in town, they were on time" - a happy customer.'), false, '"Best lawn service in town, they were on time" - a happy customer.');
+});
+
+test('proof: a sentence after the proof that keeps putting claims in the customer\'s mouth is held (the 16:16Z probes)', () => {
+  assert.equal(fired16('"Best lawn service in town, they were on time" - a happy customer. They also called us award winning.'), true, '"Best lawn service in town, they were on time" - a happy customer. They also called us award winning.');
+  assert.equal(fired16('One of our customers said "Best lawn service in town, they were on time". They also called us award winning.'), true, 'One of our customers said "Best lawn service in town, they were on time". They also called us award winning.');
+  assert.equal(fired16('"Best lawn service in town, they were on time" - a happy customer. She said we beat every other quote.'), true, '"Best lawn service in town, they were on time" - a happy customer. She said we beat every other quote.');
+  assert.equal(fired16('One of our customers said "Best lawn service in town, they were on time". The customer rated us five stars.'), true, 'One of our customers said "Best lawn service in town, they were on time". The customer rated us five stars.');
+  assert.equal(fired16('"Best lawn service in town, they were on time" - a happy customer.\nThey also told us we are the best crew around.'), true, '"Best lawn service in town, they were on time" - a happy customer.\nThey also told us we are the best crew around.');
+  assert.equal(fired16('"Best lawn service in town, they were on time" - a happy customer. They came back in May. They also called us award winning.'), true, '"Best lawn service in town, they were on time" - a happy customer. They came back in May. They also called us award winning.');
+  // Still passing: a follow-on with no claim in it, and the business's own next sentence.
+  assert.equal(fired16('"Best lawn service in town, they were on time" - a happy customer. They came back again in May.'), false, '"Best lawn service in town, they were on time" - a happy customer. They came back again in May.');
+  assert.equal(fired16('One of our customers said "Best lawn service in town, they were on time". Book your spring cleanup today!'), false, 'One of our customers said "Best lawn service in town, they were on time". Book your spring cleanup today!');
+  assert.equal(fired16('"Best lawn service in town, they were on time" - a happy customer. Our crew is out every day this spring.'), false, '"Best lawn service in town, they were on time" - a happy customer. Our crew is out every day this spring.');
+});
+
 test('hold words are whole words: praise is never held as a complaint', () => {
   for (const t of C.hold_keyword_cases.hold) assert.ok(HOLD_KEYWORDS.some((k) => holdWordHit(t, k)), `not held: ${t}`);
   for (const t of C.hold_keyword_cases.pass) assert.equal(HOLD_KEYWORDS.find((k) => holdWordHit(t, k)), undefined, `held: ${t}`);
