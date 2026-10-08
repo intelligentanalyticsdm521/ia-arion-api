@@ -4,7 +4,8 @@
  *
  * Fakes stand in for PageSpeed, the website, the blob store and the caller's
  * callback. The SSRF tests talk to real sockets on 127.0.0.1 with a fake DNS.
- * One test paints a REAL PDF with Playwright and reads the words back out of it.
+ * The report tests paint REAL PDFs with pdfkit (no browser: production has none)
+ * and read the words back out of them.
  *
  * Mutation map (scripts/dev/site-audit-mutation-check.mjs breaks each guard and
  * requires the named test here to go red):
@@ -23,6 +24,8 @@
  *   (fixes of 8 Oct 2026) H5-H8 one-walk tag reader and forms, H9 the 512 KB
  *   page cap, H10 the 4 KB attribute cap, R3 the robots path cap, E1-E4 true
  *   failure sentences, E5 "tomorrow" in the daily-limit words.
+ *   (8 Oct 2026, the PDF without a browser) F1 "Prepared by <agency>" on the
+ *   paper, F2 the findings on the paper, F3 no playwright in the report module.
  */
 
 import test, { describe } from 'node:test';
@@ -1115,55 +1118,26 @@ describe('score bands and sentences', () => {
 });
 
 // ---------------------------------------------------------------------------
-/** The text Chromium painted into a PDF: inflate the streams, read each font's ToUnicode map. */
+/**
+ * The words pdfkit painted into a PDF (the same reading as oliver-api's
+ * test/proposal-pdf-data-table.test.mjs): inflate each content stream, take the
+ * hex strings of every TJ between BT and ET, and decode them as the standard
+ * fonts' WinAnsi (windows-1252) bytes. One space between text objects.
+ */
 function pdfText(buf) {
   const s = buf.toString('latin1');
-  const objs = new Map();
-  for (const m of s.matchAll(/(\d+) 0 obj([\s\S]*?)endobj/g)) {
-    const body = m[2];
-    const si = body.indexOf('stream');
-    let dict = body;
-    let stream = null;
-    if (si >= 0) {
-      dict = body.slice(0, si);
-      const start = m.index + m[0].indexOf(m[2]) + si + 'stream'.length + (body[si + 6] === '\r' ? 2 : 1);
-      const end = s.indexOf('endstream', start);
-      const raw = buf.subarray(start, end);
-      try { stream = /FlateDecode/.test(dict) ? zlib.inflateSync(raw).toString('latin1') : raw.toString('latin1'); } catch { stream = ''; }
-    }
-    objs.set(m[1], { dict, stream });
-  }
-  const cmapOf = (text) => {
-    const map = new Map();
-    for (const b of text.matchAll(/beginbfchar([\s\S]*?)endbfchar/g)) {
-      for (const p of b[1].matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g)) map.set(parseInt(p[1], 16), Buffer.from(p[2], 'hex').swap16().toString('utf16le'));
-    }
-    for (const b of text.matchAll(/beginbfrange([\s\S]*?)endbfrange/g)) {
-      for (const p of b[1].matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g)) {
-        const lo = parseInt(p[1], 16); const hi = parseInt(p[2], 16); const dst = parseInt(p[3], 16);
-        for (let c = lo; c <= hi; c++) map.set(c, String.fromCodePoint(dst + (c - lo)));
-      }
-    }
-    return map;
-  };
-  const fontMaps = new Map(); // resource name -> cmap
-  for (const { dict } of objs.values()) {
-    const fonts = /\/Font\s*<<([^>]*)>>/.exec(dict);
-    if (!fonts) continue;
-    for (const f of fonts[1].matchAll(/\/(\w+)\s+(\d+)\s+0\s+R/g)) {
-      const fontObj = objs.get(f[2]);
-      const tu = fontObj && /\/ToUnicode\s+(\d+)\s+0\s+R/.exec(fontObj.dict);
-      if (tu && objs.get(tu[1])?.stream) fontMaps.set(f[1], cmapOf(objs.get(tu[1]).stream));
-    }
-  }
+  const winAnsi = new TextDecoder('windows-1252');
   let out = '';
-  for (const { stream } of objs.values()) {
-    if (!stream || !/\bBT\b/.test(stream)) continue;
-    let cmap = null;
-    for (const t of stream.matchAll(/\/(\w+)\s+[\d.]+\s+Tf|<([0-9a-fA-F]*)>|\bET\b/g)) {
-      if (t[1]) cmap = fontMaps.get(t[1]) || null;
-      else if (t[2] !== undefined && cmap) for (let i = 0; i + 4 <= t[2].length; i += 4) out += cmap.get(parseInt(t[2].slice(i, i + 4), 16)) ?? '';
-      else if (t[0] === 'ET') out += ' ';
+  for (const m of s.matchAll(/stream\r?\n/g)) {
+    const start = m.index + m[0].length;
+    const end = s.indexOf('endstream', start);
+    if (end < 0) continue;
+    const raw = Buffer.from(s.slice(start, end), 'latin1');
+    let stream;
+    try { stream = zlib.inflateSync(raw).toString('latin1'); } catch { stream = raw.toString('latin1'); }
+    for (const bt of stream.matchAll(/\bBT\b([\s\S]*?)\bET\b/g)) {
+      for (const h of bt[1].matchAll(/<([0-9a-fA-F]*)>/g)) out += winAnsi.decode(Buffer.from(h[1], 'hex'));
+      out += ' ';
     }
   }
   return out;
@@ -1218,36 +1192,44 @@ describe('report', () => {
     assert.doesNotMatch(html, /<script>alert/);
   });
 
-  test('PDF render through an injected renderer seam: the browser is always closed', async () => {
-    const events = [];
-    const fakeBrowser = {
-      async newContext(opts) {
-        events.push(`context js=${opts.javaScriptEnabled}`);
-        return { async newPage() { return { async route() { events.push('route-all-blocked'); }, async setContent() { events.push('content'); }, async pdf() { return Buffer.from('%PDF-fake'); } }; } };
-      },
-      async close() { events.push('closed'); },
-    };
-    const pdf = await renderPdf('<p>x</p>', { launch: async () => fakeBrowser });
-    assert.equal(pdf.toString(), '%PDF-fake');
-    assert.deepEqual(events, ['context js=false', 'route-all-blocked', 'content', 'closed']);
-    const failing = { ...fakeBrowser, async newContext() { throw new Error('boom'); }, async close() { events.push('closed-after-fail'); } };
-    await assert.rejects(renderPdf('<p>x</p>', { launch: async () => failing }));
-    assert.equal(events.at(-1), 'closed-after-fail');
+  test('the report module paints its PDF without a browser: it does not import playwright', () => {
+    const src = fs.readFileSync(path.join(REPO, 'lib/audit/report.js'), 'utf8');
+    const imports = [...src.matchAll(/(?:\bimport\s[^'";]*?from\s*|\bimport\s*\(?\s*|\bexport\s[^'";]*?from\s*|\brequire\s*\(\s*)['"]([^'"]+)['"]/g)].map((m) => m[1]);
+    assert.ok(imports.includes('pdfkit'), 'the import scan read the imports (pdfkit is there)');
+    for (const i of imports) assert.doesNotMatch(i, /playwright|puppeteer|chromium/i, `report.js imports ${i}`);
+    assert.doesNotMatch(src, /\bchromium\s*\.\s*launch|\.pdf\s*\(\s*\{\s*format/, 'no browser launch or page.pdf() call');
   });
 
-  test('a real PDF: one Letter page with the score, the five sections and the agency name in it', { timeout: 60_000 }, async () => {
+  test('a real PDF from pdfkit: one Letter page with the score, the sections, three findings and "Prepared by" the agency', async () => {
     const res = await result();
-    const html = renderReportHtml({ business, visitor: { business: 'Sam Test Plumbing' }, url: 'https://samtest.example/', result: res, now: new Date('2026-10-07T12:00:00Z') });
-    const pdf = await renderPdf(html);
+    const findings = ["Visitors can't see a phone number on your home page.", "There's no clear way to get in touch from your home page.", 'Your site is slow on phones, where most of your visitors are.'];
+    const withThree = { ...res, topFindings: findings };
+    const pdf = await renderPdf({ business, visitor: { business: 'Sam Test Plumbing' }, url: 'https://samtest.example/', result: withThree, now: new Date('2026-10-07T12:00:00Z') });
+    assert.ok(Buffer.isBuffer(pdf));
     assert.equal(pdf.subarray(0, 5).toString('latin1'), '%PDF-');
-    const pages = (pdf.toString('latin1').match(/\/Type\s*\/Page\b/g) || []).length;
-    assert.equal(pages, 1, 'one page');
-    assert.match(pdf.toString('latin1'), /\/MediaBox\s*\[0 0 612 792\]/, 'Letter size');
+    const bytes = pdf.toString('latin1');
+    assert.equal((bytes.match(/\/Type\s*\/Page\b/g) || []).length, 1, 'one page');
+    assert.match(bytes, /\/MediaBox\s*\[0 0 612 792\]/, 'Letter size');
+    assert.doesNotMatch(bytes, /PDFKit|HeadlessChrome|Skia|Playwright/i, 'no tool or vendor name in the file');
     const text = squash(pdfText(pdf));
-    for (const words of ['Website check for Sam Test Plumbing', 'Northwind Gardens', 'Prepared by', 'Speed', 'Found on Google', 'Trust & security',
-      'Works on phones', 'Turns visitors into leads', String(res.score), res.sentence, res.topFindings[0], '7 October 2026']) {
+    for (const words of ['Website check for Sam Test Plumbing', 'Prepared by Northwind Gardens', '(555) 010-2000', 'northwind.example', 'Speed', 'Found on Google',
+      'Trust & security', 'Works on phones', 'Turns visitors into leads', String(res.score), res.sentence, 'The three things to fix first', ...findings, '7 October 2026']) {
       assert.ok(text.includes(squash(words)), `"${words}" is not on the PDF`);
     }
+    // The score words unchanged: every section's verdict is the band sentence the HTML prints.
+    for (const s of res.sections) assert.ok(text.includes(squash(s.verdict)), `the verdict "${s.verdict}" is not on the PDF`);
+    await assert.rejects(renderPdf('<p>x</p>'), /not HTML/, 'an HTML string is refused rather than painted as nothing');
+  });
+
+  test('a long report runs onto a second page and still ends "Prepared by" the agency', async () => {
+    const res = await result();
+    const notes = Array.from({ length: 40 }, (_, i) => `Note ${i + 1}: this sentence is long enough to take up most of one line on the page.`);
+    const pdf = await renderPdf({ business, url: 'https://samtest.example/', result: { ...res, notes } });
+    const pages = (pdf.toString('latin1').match(/\/Type\s*\/Page\b/g) || []).length;
+    assert.ok(pages >= 2, `${pages} page(s)`);
+    const text = squash(pdfText(pdf));
+    assert.ok(text.includes(squash('Note 40:')), 'the last note is on the paper');
+    assert.ok(text.indexOf(squash('Note 40:')) < text.lastIndexOf(squash('Prepared by Northwind Gardens')), '"Prepared by" comes after the last note');
   });
 });
 

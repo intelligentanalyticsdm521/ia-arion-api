@@ -238,6 +238,19 @@ const M = [
     edits: [
       { file: "routes/audit.js", from: "checks start again tomorrow.", to: "checks start again after midnight UTC." },
     ] },
+  // 8 Oct 2026 — the PDF is painted by pdfkit, not a browser (production has none).
+  { id: "F1", name: "the paper says \"Prepared by\" the agency", mustFail: "a real PDF from pdfkit",
+    edits: [
+      { file: "lib/audit/report.js", from: ".text('Prepared by ', x, pdf.y, { width: W, continued: true });", to: ".text('', x, pdf.y, { width: W, continued: true });" },
+    ] },
+  { id: "F2", name: "the findings reach the paper", mustFail: "a real PDF from pdfkit",
+    edits: [
+      { file: "lib/audit/report.js", from: "      pdf.text(f, x + 18, y, { width: W - 18 });\n", to: "" },
+    ] },
+  { id: "F3", name: "the report module does not import playwright", mustFail: "it does not import playwright",
+    edits: [
+      { file: "lib/audit/report.js", from: "import PDFDocument from 'pdfkit';\n", to: "import PDFDocument from 'pdfkit';\nimport { chromium } from 'playwright';\n" },
+    ] },
 ];
 
 console.log(`\n=== site audit mutations (${M.length}) — ${REPO} ===\n`);

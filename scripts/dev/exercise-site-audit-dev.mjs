@@ -4,8 +4,9 @@
  *
  * PART 1 (always): the audit in this process against the dev WordPress
  * fixture (default http://localhost:8084): robots, crawl, checks, score, the
- * branded report and a real PDF painted by Playwright. The PDF is written to a
- * temp folder; the path, the score and the plain summary are printed.
+ * branded report and a real PDF painted by pdfkit (no browser, as production).
+ * The PDF and the HTML page are written to a temp folder; the path, the score
+ * and the plain summary are printed.
  *
  * PART 2 (--server): the whole signed path through the running arion-api
  * (default http://localhost:4003), exactly as a calling agency would use it:
@@ -63,8 +64,9 @@ const url = normaliseSiteUrl(SITE);
 const started = Date.now();
 const facts = await crawl(url, { fetch: (u, o) => safeFetch(u, o) });
 const result = scoreAudit({ crawl: facts });
-const html = renderReportHtml({ business, visitor: { business: null }, url, result });
-const pdf = await renderPdf(html);
+const report = { business, visitor: { business: null }, url, result };
+const html = renderReportHtml(report);
+const pdf = await renderPdf(report);
 const pdfPath = path.join(outDir, 'website-audit.pdf');
 fs.writeFileSync(pdfPath, pdf);
 fs.writeFileSync(path.join(outDir, 'website-audit.html'), html);
