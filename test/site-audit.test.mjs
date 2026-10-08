@@ -38,7 +38,8 @@ import { pageChecks, securityHeaderChecks, contactChecks, anchorsOf } from '../l
 import { crawl, normaliseSiteUrl, urlKey } from '../lib/audit/crawl.js';
 import { scoreAudit, bandSentence, SPEED_WORDS, ROBOTS_BLOCKED_SENTENCE } from '../lib/audit/score.js';
 import { renderReportHtml, renderPdf, brandColours } from '../lib/audit/report.js';
-import { mintLinks, hashKey } from '../lib/audit/links.js';
+import { mintLinks, hashKey, linksFor } from '../lib/audit/links.js';
+import { STALE } from '../lib/audit/runs.js';
 import { createAuditRunner, PLAIN } from '../lib/audit/runner.js';
 import { createAuditRouter, WORDS } from '../routes/audit.js';
 import { createSiteAuditsRouter } from '../routes/arion/siteAudits.js';
@@ -88,18 +89,40 @@ function memoryRepo() {
       return [...runs.values()].filter((x) => x.caller_id === c && x.url_key === u && x.audit_day === d
         && ['done', 'callback_failed'].includes(x.status) && x.blob_path).pop() || null;
     },
-    async countToday(c, d) { return [...runs.values()].filter((x) => x.caller_id === c && x.audit_day === d).length; },
-    async insertRun(p) {
-      const dup = await r.findByExternal(p.caller_id, p.external_run_id);
+    async insertRun(p, { dailyLimit = null } = {}) {
+      // No await between the count and the insert: the same one-step promise
+      // the SQL repo keeps with its per-caller, per-day lock.
+      const dup = [...runs.values()].find((x) => x.caller_id === p.caller_id && x.external_run_id === p.external_run_id);
       if (dup) return { run_id: dup.run_id, inserted: false };
+      if (dailyLimit != null) {
+        const used = [...runs.values()].filter((x) => x.caller_id === p.caller_id && x.audit_day === p.audit_day && !x.copied_from_run_id).length;
+        if (used >= dailyLimit) return { overLimit: true, inserted: false, run_id: null };
+      }
       const run_id = crypto.randomUUID();
-      runs.set(run_id, { callback_attempts: 0, created_at: new Date(), ...p, run_id });
+      runs.set(run_id, { callback_attempts: 0, run_attempts: 0, created_at: new Date(), ...p, run_id });
       return { run_id, inserted: true };
     },
-    async markRunning(id) { const x = runs.get(id); if (!x || x.status !== 'queued') return false; x.status = 'running'; return true; },
+    async markRunning(id) {
+      const x = runs.get(id); if (!x || x.status !== 'queued') return false;
+      Object.assign(x, { status: 'running', started_at: new Date(), run_attempts: (x.run_attempts || 0) + 1 }); return true;
+    },
+    async reviveStale(id, { failPlain, stale = STALE } = {}) {
+      const x = runs.get(id); if (!x) return null;
+      const now = Date.now();
+      const runningOld = x.status === 'running' && x.started_at && now - new Date(x.started_at).getTime() > stale.runningSeconds * 1000;
+      if (runningOld && (x.run_attempts || 0) >= stale.maxAttempts) { Object.assign(x, { status: 'failed', error_plain: failPlain, finished_at: new Date() }); return 'failed'; }
+      if (runningOld) { Object.assign(x, { status: 'queued', started_at: null }); return 'restart'; }
+      if (x.status === 'queued' && now - new Date(x.created_at).getTime() > stale.queuedSeconds * 1000) return 'restart';
+      return null;
+    },
+    async listStale({ stale = STALE } = {}) {
+      const now = Date.now();
+      return [...runs.values()].filter((x) => (x.status === 'queued' && now - new Date(x.created_at).getTime() > stale.queuedSeconds * 1000)
+        || (x.status === 'running' && x.started_at && now - new Date(x.started_at).getTime() > stale.runningSeconds * 1000)).map((x) => x.run_id);
+    },
     async markDone(id, p) { Object.assign(runs.get(id), p, { status: 'done', error_plain: null, finished_at: new Date() }); },
     async markFailed(id, e) { Object.assign(runs.get(id), { status: 'failed', error_plain: e, finished_at: new Date() }); },
-    async setLinks(id, p) { const x = runs.get(id); x.visitor_key_hash = p.visitor_key_hash; x.owner_key_hash = p.owner_key_hash; x.visitor_link_expires_at = p.visitor_link_expires_at; },
+    async setLinks(id, p) { const x = runs.get(id); if (x.visitor_key_hash || x.owner_key_hash) return; x.visitor_key_hash = p.visitor_key_hash; x.owner_key_hash = p.owner_key_hash; x.visitor_link_expires_at = p.visitor_link_expires_at; },
     async recordCallback(id, { attempts, lastError = null, callbackFailed = false }) {
       const x = runs.get(id); x.callback_attempts = attempts; x.callback_last_error = lastError; if (callbackFailed) x.status = 'callback_failed';
     },
@@ -309,11 +332,118 @@ describe('POST /audit/runs', () => {
       await post(a.base, c, runBody());
       const r = await post(a.base, c, runBody({ visitor: { website: 'other.example' } }));
       assert.equal(r.status, 200);
-      assert.deepEqual(r.json, { status: 'failed', error: WORDS.dailyLimit });
+      assert.deepEqual(r.json, { status: 'failed', error: WORDS.dailyLimit });      assert.match(WORDS.dailyLimit, /Reply to this visitor yourself/, 'it says what to do');
+
       assert.equal(a.repo.runs.size, 1);
     } finally { await a.close(); }
   });
 
+
+  test('a repeat ask of a delivered run answers with the same links, and the old links keep working', async () => {
+    const env = { AUDIT_CALLER_KEY: TEST_KEY, ARION_PUBLIC_BASE_URL: 'https://audit.example' };
+    const a = await auditApp({ env });
+    try {
+      const c = makeCaller(a.repo);
+      const body = runBody();
+      await post(a.base, c, body);
+      const row = [...a.repo.runs.values()][0];
+      // What the runner writes when the audit finishes.
+      const first = mintLinks(a.base, row.run_id, Date.now(), env);
+      Object.assign(row, { status: 'done', score: 64, summary_plain: 'Two things.', blob_path: 'site-audits/a/b/website-audit.pdf',
+        visitor_key_hash: first.visitor_key_hash, owner_key_hash: first.owner_key_hash, visitor_link_expires_at: first.visitor_link_expires_at });
+      const opens = async (u) => (await fetch(`${a.base}${new URL(u).pathname}${new URL(u).search}`)).status;
+      assert.equal(await opens(first.owner_file_url), 200);
+      for (const status of ['done', 'callback_failed']) {
+        row.status = status;
+        const again = await post(a.base, c, { ...body, sent_at: new Date().toISOString() });
+        assert.equal(again.status, 200);
+        assert.equal(again.json.status, 'done');
+        assert.equal(new URL(again.json.owner_file_url).search, new URL(first.owner_file_url).search, `${status}: the same owner link`);
+        assert.equal(new URL(again.json.file_url).search, new URL(first.file_url).search, `${status}: the same visitor link`);
+        assert.equal(row.owner_key_hash, first.owner_key_hash, 'the stored hash is untouched');
+        assert.equal(await opens(first.owner_file_url), 200, `${status}: the lead's link still opens`);
+        assert.equal(await opens(first.file_url), 200, `${status}: the emailed link still opens`);
+      }
+    } finally { await a.close(); }
+  });
+
+  test('a same-website copy gets links of its own and the first run keeps its links', async () => {
+    const env = { AUDIT_CALLER_KEY: TEST_KEY, ARION_PUBLIC_BASE_URL: 'https://audit.example' };
+    const a = await auditApp({ env });
+    try {
+      const c = makeCaller(a.repo);
+      await post(a.base, c, runBody());
+      const row = [...a.repo.runs.values()][0];
+      const first = mintLinks(a.base, row.run_id, Date.now(), env);
+      Object.assign(row, { status: 'done', score: 70, summary_plain: 'x', blob_path: 'site-audits/a/b/website-audit.pdf',
+        visitor_key_hash: first.visitor_key_hash, owner_key_hash: first.owner_key_hash, visitor_link_expires_at: first.visitor_link_expires_at });
+      const copy = await post(a.base, c, runBody());
+      assert.equal(copy.json.status, 'done');
+      assert.notEqual(copy.json.owner_file_url, first.owner_file_url);
+      const copyRow = [...a.repo.runs.values()].find((x) => x.run_id !== row.run_id);
+      assert.equal(copyRow.copied_from_run_id, row.run_id, 'marked as a copy');
+      assert.equal((await fetch(`${a.base}${new URL(first.owner_file_url).pathname}${new URL(first.owner_file_url).search}`)).status, 200);
+      assert.equal((await fetch(`${a.base}${new URL(copy.json.owner_file_url).pathname}${new URL(copy.json.owner_file_url).search}`)).status, 200);
+    } finally { await a.close(); }
+  });
+
+  test('a burst of runs cannot go over the daily limit', async () => {
+    const a = await auditApp();
+    try {
+      const c = makeCaller(a.repo, { daily_limit: 2 });
+      const answers = await Promise.all(Array.from({ length: 6 }, (_, i) => post(a.base, c, runBody({ visitor: { website: `site${i}.example` } }))));
+      assert.equal(answers.filter((r) => r.status === 202).length, 2);
+      assert.equal(answers.filter((r) => r.json.error === WORDS.dailyLimit).length, 4);
+      assert.equal(a.repo.runs.size, 2, 'nothing over the limit was written');
+    } finally { await a.close(); }
+  });
+
+  test('same-website copies do not use up the daily limit', async () => {
+    const a = await auditApp();
+    try {
+      const c = makeCaller(a.repo, { daily_limit: 2 });
+      await post(a.base, c, runBody());
+      Object.assign([...a.repo.runs.values()][0], { status: 'done', score: 70, summary_plain: 'x', blob_path: 'site-audits/a/b/website-audit.pdf' });
+      for (let i = 0; i < 3; i++) assert.equal((await post(a.base, c, runBody())).json.status, 'done');
+      const other = await post(a.base, c, runBody({ visitor: { website: 'other.example' } }));
+      assert.equal(other.status, 202, 'one real check so far, so a second one runs');
+    } finally { await a.close(); }
+  });
+
+  test('a run lost to a restart is started again when the caller asks again', async () => {
+    const a = await auditApp();
+    try {
+      const c = makeCaller(a.repo);
+      const ask = async (over) => {
+        const body = runBody();
+        await post(a.base, c, body);
+        const row = [...a.repo.runs.values()].find((x) => x.external_run_id === body.run_id);
+        Object.assign(row, over);
+        a.started.length = 0;
+        const again = await post(a.base, c, { ...body, sent_at: new Date().toISOString() });
+        await new Promise((r) => setImmediate(r));
+        return { again, row };
+      };
+      const minutesAgo = (m) => new Date(Date.now() - m * 60_000);
+      // Fresh and queued: still waiting its turn, left alone.
+      let r = await ask({});
+      assert.equal(r.again.status, 202);
+      assert.equal(a.started.length, 0, 'a fresh run is not started twice');
+      // Queued for 2 minutes: nobody has it.
+      r = await ask({ created_at: minutesAgo(2) });
+      assert.equal(r.again.status, 202);
+      assert.deepEqual(a.started.map((x) => x.id), [r.row.run_id]);
+      // Running for 10 minutes on its first start: queued again and started.
+      r = await ask({ status: 'running', started_at: minutesAgo(10), run_attempts: 1 });
+      assert.equal(r.row.status, 'queued');
+      assert.deepEqual(a.started.map((x) => x.id), [r.row.run_id]);
+      // Running for 10 minutes on its second start: failed in plain words, not looped.
+      r = await ask({ status: 'running', started_at: minutesAgo(10), run_attempts: 2 });
+      assert.deepEqual(r.again.json, { status: 'failed', error: PLAIN.noReport });
+      assert.equal(r.row.status, 'failed');
+      assert.equal(a.started.length, 0);
+    } finally { await a.close(); }
+  });
   test('a missing website, business name or a non-https callback is a 400', async () => {
     const a = await auditApp();
     try {
@@ -332,8 +462,8 @@ describe('file links', () => {
   async function withDoneRun(nowMs) {
     const a = await auditApp({ now: () => nowMs() });
     const c = makeCaller(a.repo);
-    const links = mintLinks('https://audit.example', 'x', Date.now());
     const run_id = crypto.randomUUID();
+    const links = mintLinks('https://audit.example', run_id, Date.now(), { AUDIT_CALLER_KEY: TEST_KEY });
     a.repo.runs.set(run_id, {
       run_id, caller_id: c.caller_id, status: 'done', blob_path: 'site-audits/c/r/website-audit.pdf',
       business_json: JSON.stringify({ name: 'Northwind Gardens' }),
@@ -390,7 +520,7 @@ describe('file links', () => {
   });
 
   test('only key hashes are kept', () => {
-    const l = mintLinks('https://audit.example', 'r1');
+    const l = mintLinks('https://audit.example', 'r1', Date.now(), { AUDIT_CALLER_KEY: TEST_KEY });
     const k = new URL(l.file_url).searchParams.get('k');
     assert.equal(l.visitor_key_hash, hashKey(k));
     assert.ok(!JSON.stringify({ a: l.visitor_key_hash, b: l.owner_key_hash }).includes(k));
@@ -957,7 +1087,7 @@ describe('report', () => {
 
 // ---------------------------------------------------------------------------
 describe('runner', () => {
-  function setup({ callbackStatus = () => 200, site = fakeSite(), renderPdfFn = async () => Buffer.from('%PDF-1.4 fake'), pagespeed } = {}) {
+  function setup({ callbackStatus = () => 200, site = fakeSite(), renderPdfFn = async () => Buffer.from('%PDF-1.4 fake'), pagespeed, sleepFn, storePdfFn, runCapMs } = {}) {
     const repo = memoryRepo();
     const caller = makeCaller(repo);
     const callbacks = [];
@@ -976,11 +1106,12 @@ describe('runner', () => {
       callerSecret: async (id) => { const c = repo.callers.get(id); return { caller: c, secret: decryptSecret(c, { AUDIT_CALLER_KEY: TEST_KEY }) }; },
       fetch: fetchAll,
       lookup: fakeLookup(),
-      env: {},
+      env: { AUDIT_CALLER_KEY: TEST_KEY },
+      ...(runCapMs ? { runCapMs } : {}),
       pagespeed: pagespeed || (async (url, strategy) => ({ strategy, scores: { performance: strategy === 'mobile' ? 55 : 80, seo: 90 }, metrics: { lcp: { value: 3900 } }, opportunities: [{ id: 'server-response-time' }] })),
       renderPdf: renderPdfFn,
-      storePdf: async ({ callerId, runId }) => `site-audits/${callerId}/${runId}/website-audit.pdf`,
-      sleep: async (ms) => { sleeps.push(ms); },
+      storePdf: storePdfFn || (async ({ callerId, runId }) => `site-audits/${callerId}/${runId}/website-audit.pdf`),
+      sleep: async (ms) => { sleeps.push(ms); if (sleepFn) await sleepFn(ms); },
       publicBase: 'https://audit.example',
       log: { error() {} },
     });
@@ -1012,7 +1143,9 @@ describe('runner', () => {
     assert.equal(cb.opts.headers['X-Workflow-Run'], row.external_run_id);
     assert.deepEqual(verify(Buffer.from(cb.opts.body), cb.opts.headers['X-Workflow-Signature'], SECRET), { ok: true });
     const body = JSON.parse(cb.opts.body);
-    assert.equal(body.status, 'done');
+    assert.equal(body.status, 'done');    assert.equal(body.kind, 'result', 'the signed body says what it is');
+    assert.equal(body.run_id, row.external_run_id, 'the signed body names the run, so it cannot be replayed onto another');
+
     assert.equal(body.score, row.score);
     assert.match(body.file_url, /^https:\/\/audit\.example\/audit\/files\//);
     assert.equal(hashKey(new URL(body.file_url).searchParams.get('k')), row.visitor_key_hash);
@@ -1057,7 +1190,7 @@ describe('runner', () => {
     const row = t.repo.runs.get(id);
     assert.equal(row.status, 'failed');
     assert.equal(row.error_plain, PLAIN.unreachable);
-    assert.deepEqual(JSON.parse(t.callbacks[0].opts.body), { status: 'failed', error: PLAIN.unreachable });
+    assert.deepEqual(JSON.parse(t.callbacks[0].opts.body), { kind: 'result', run_id: row.external_run_id, status: 'failed', error: PLAIN.unreachable });
   });
 
   test('a private website fails as "not a public website" and is not retried', async () => {
@@ -1095,6 +1228,79 @@ describe('runner', () => {
     assert.equal(t.callbacks.length, 0);
   });
 
+
+  const until = async (cond, ms = 3000) => {
+    const t0 = Date.now();
+    while (!cond()) {
+      if (Date.now() - t0 > ms) throw new Error('timed out waiting');
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  };
+
+  test('a run waiting on a callback retry holds no audit slot', async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const t = setup({ callbackStatus: () => 503, sleepFn: () => gate });
+    const first = await t.queue();
+    const p1 = t.runner.start(first);
+    await until(() => t.sleeps.length === 1);
+    assert.equal(t.repo.runs.get(first).status, 'done', 'the audit itself finished');
+    assert.equal(t.runner.semaphore.active, 0, 'the back-off before the second callback holds no slot');
+    // Another business's audit runs straight away.
+    const second = await t.queue();
+    t.runner.start(second);
+    await until(() => t.repo.runs.get(second).status === 'done');
+    release();
+    const out = await p1;
+    assert.equal(out.delivered, false);
+  });
+
+  test('the cap stops the audit: no PDF is stored, and the slot is held until it has stopped', async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const fetched = [];
+    const base = fakeSite();
+    const site = async (url, opts) => {
+      const path = new URL(url).pathname;
+      fetched.push(path);
+      if (path === '/about') await gate; // a slow page
+      return base(url, opts);
+    };
+    let stored = 0;
+    let painted = 0;
+    const t = setup({ site, runCapMs: 50, storePdfFn: async () => { stored += 1; return 'site-audits/x/y/website-audit.pdf'; }, renderPdfFn: async () => { painted += 1; return Buffer.from('%PDF'); } });
+    const id = await t.queue();
+    const done = t.runner.start(id);
+    await until(() => t.callbacks.length === 1);
+    assert.equal(t.repo.runs.get(id).status, 'failed');
+    assert.equal(t.repo.runs.get(id).error_plain, PLAIN.tooSlow);
+    assert.equal(JSON.parse(t.callbacks[0].opts.body).error, PLAIN.tooSlow);
+    assert.equal(t.runner.semaphore.active, 1, 'the slot is kept while the audit is still in its slow step');
+    const seen = fetched.length;
+    release();
+    await done;
+    await until(() => t.runner.semaphore.active === 0);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(stored, 0, 'no orphan PDF');
+    assert.equal(painted, 0, 'no PDF painted after the cap');
+    assert.ok(!fetched.slice(seen).includes('/contact'), `no new page was read after the cap (${fetched.slice(seen).join(', ')})`);
+  });
+
+  test('the sweep restarts lost runs and fails ones out of starts', async () => {
+    const t = setup();
+    const lost = await t.queue();
+    Object.assign(t.repo.runs.get(lost), { created_at: new Date(Date.now() - 5 * 60_000) });
+    const dead = await t.queue({ status: 'running' });
+    Object.assign(t.repo.runs.get(dead), { started_at: new Date(Date.now() - 30 * 60_000), run_attempts: 2 });
+    const out = await t.runner.sweep({ base: 'https://audit.example' });
+    assert.deepEqual(out.map(([, what]) => what).sort(), ['failed', 'restart']);
+    await until(() => t.repo.runs.get(lost).status === 'done');
+    assert.equal(t.repo.runs.get(dead).status === 'failed' || t.repo.runs.get(dead).status === 'callback_failed', true);
+    assert.equal(t.repo.runs.get(dead).error_plain, PLAIN.noReport);
+    await until(() => t.callbacks.length === 2);
+    const bodies = t.callbacks.map((cb) => JSON.parse(cb.opts.body));
+    assert.ok(bodies.some((b) => b.run_id === t.repo.runs.get(dead).external_run_id && b.status === 'failed'), 'the caller is told');
+  });
   test('at most two audits at a time', async () => {
     let active = 0; let peak = 0;
     const t = setup({ renderPdfFn: async () => { active += 1; peak = Math.max(peak, active); await new Promise((r) => setTimeout(r, 20)); active -= 1; return Buffer.from('%PDF'); } });

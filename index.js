@@ -38,7 +38,7 @@ import provisioningRouter from './routes/provisioning.js';
 import pluginRouter from './routes/plugin.js';
 import argusRouter from './routes/argus.js';
 import intelligenceRouter from './routes/intelligence.js';
-import auditRouter from './routes/audit.js';
+import auditRouter, { startAuditSweep } from './routes/audit.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -238,4 +238,5 @@ app.use((err, req, res, next) => {
 app.listen(port, () => {
   console.log('ARION API listening on http://localhost:' + port);
   console.log('[CORS] allowedOrigins: ' + allowedOrigins.join(', '));
+  startAuditSweep(); // website checks a restart dropped are started again
 });
