@@ -34,7 +34,7 @@ import { sign, verify } from '../lib/audit/signature.js';
 import { AuditNotConfigured, callerKey, encryptSecret, decryptSecret } from '../lib/audit/callers.js';
 import { safeFetch, checkUrl, isBlockedAddress, SafeFetchRefused } from '../lib/audit/safeFetch.js';
 import { parseRobots, isAllowed } from '../lib/audit/robots.js';
-import { pageChecks, securityHeaderChecks, contactChecks } from '../lib/audit/checks.js';
+import { pageChecks, securityHeaderChecks, contactChecks, anchorsOf } from '../lib/audit/checks.js';
 import { crawl, normaliseSiteUrl, urlKey } from '../lib/audit/crawl.js';
 import { scoreAudit, bandSentence, SPEED_WORDS, ROBOTS_BLOCKED_SENTENCE } from '../lib/audit/score.js';
 import { renderReportHtml, renderPdf, brandColours } from '../lib/audit/report.js';
@@ -643,6 +643,46 @@ describe('checks on fixture HTML', () => {
     assert.equal(normaliseSiteUrl('not a site'), null);
     assert.equal(normaliseSiteUrl('javascript:alert(1)'), null);
     assert.equal(urlKey('https://WWW.Example.com/shop/'), 'www.example.com/shop');
+  });
+});
+
+describe('hostile HTML cannot freeze the server', () => {
+  for (const unit of ['<!--', '<a href=x>', '<script>', '<title>', '<meta', '<']) {
+    test(`2 MB of ${JSON.stringify(unit)} is checked in under 500 ms`, async () => {
+      // In a worker with a hard deadline: a lazy "opener ... closer" regex
+      // rescans to the end of the page per opener and would block this thread.
+      const { out } = await timedInWorker(`async (root) => {
+        const { pageChecks, contactChecks, anchorsOf, jsonLdTypes } = await import(root + 'lib/audit/checks.js');
+        const unit = ${JSON.stringify(unit)};
+        const html = unit.repeat(Math.ceil(2 * 1024 * 1024 / unit.length));
+        const t0 = performance.now();
+        pageChecks(html); contactChecks(html); anchorsOf(html); jsonLdTypes(html);
+        return { ms: performance.now() - t0 };
+      }`, 20_000);
+      assert.ok(out.ms < 500, `took ${out.ms.toFixed(0)} ms`);
+    });
+  }
+
+  test('the scanner still reads what it should (presence)', () => {
+    const html = '<html><head><TITLE>Sam &amp; Co plumbing</TITLE><!-- <h1>hidden</h1> --><script>"<a href=/no>no</a>"</script></head>'
+      + '<body><H1>Hi</H1><a href="/x">X <b>bold</b></a><A HREF=/y>Y</A><abbr>not a link</abbr><img src=a.jpg></body></html>';
+    const c = pageChecks(html);
+    assert.equal(c.title, 'Sam & Co plumbing');
+    assert.equal(c.h1Count, 1, 'the commented-out heading is not counted');
+    assert.equal(c.imagesWithoutAlt, 1);
+    assert.deepEqual(anchorsOf(html), [{ href: '/x', text: 'X bold' }, { href: '/y', text: 'Y' }]);
+    assert.equal(pageChecks('<!-- never closed <h1>x</h1>').h1Count, 0, 'an unclosed comment runs to the end, as a browser reads it');
+  });
+
+  test('a huge numeric entity on the home page does not break the check', async () => {
+    assert.equal(pageChecks('<title>&#99999999;</title>').title, '�');
+    assert.equal(pageChecks('<title>&#xD800; ok</title>').title, '� ok');
+    assert.equal(pageChecks('<title>A &#65; &#x41;</title>').title, 'A A A', 'ordinary entities still decode');
+    const home = HOME_HTML.replace('<title>Sam Test Plumbing', '<title>&#99999999; Sam Test Plumbing');
+    const base = fakeSite();
+    const r = await crawl('https://samtest.example/', { fetch: async (url, o) => (new URL(url).pathname === '/' && (o?.method || 'GET') === 'GET' ? { status: 200, headers: { 'content-type': 'text/html' }, body: Buffer.from(home), url } : base(url, o)) });
+    assert.equal(r.pages[0].status, 200);
+    assert.match(r.pages[0].checks.title, /Sam Test Plumbing/);
   });
 });
 
