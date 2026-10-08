@@ -27,6 +27,8 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import express from 'express';
 import { Readable } from 'node:stream';
+import { Worker } from 'node:worker_threads';
+import { pathToFileURL } from 'node:url';
 
 import { sign, verify } from '../lib/audit/signature.js';
 import { AuditNotConfigured, callerKey, encryptSecret, decryptSecret } from '../lib/audit/callers.js';
@@ -45,6 +47,23 @@ const REPO = path.resolve(new URL('..', import.meta.url).pathname.replace(/^\/([
 const TEST_KEY = crypto.randomBytes(32).toString('base64');
 const SECRET = 'test-secret-0123456789abcdef0123456789';
 const PUBLIC_IP = '93.184.216.34';
+/**
+ * Run `fnSource` (an async (repoRootUrl) => result function, as text) in a
+ * worker thread. Rejects when it is not finished by `ms`: a synchronous
+ * runaway (catastrophic regex backtracking) cannot be interrupted in this
+ * thread, so timing tests run their work over there.
+ */
+function timedInWorker(fnSource, ms) {
+  return new Promise((resolve, reject) => {
+    const w = new Worker(`const { parentPort, workerData } = require('node:worker_threads');
+      (${fnSource})(workerData.root).then((out) => parentPort.postMessage({ out }), (e) => parentPort.postMessage({ error: String(e && e.stack || e) }));`,
+    { eval: true, workerData: { root: pathToFileURL(`${REPO}/`).href } });
+    const timer = setTimeout(() => { w.terminate(); reject(new Error(`still running after ${ms} ms`)); }, ms);
+    w.once('message', (m) => { clearTimeout(timer); w.terminate(); if (m.error) reject(new Error(m.error)); else resolve(m); });
+    w.once('error', (e) => { clearTimeout(timer); reject(e); });
+  });
+}
+
 
 /** DNS twin: every *.example name is public unless the map says otherwise. */
 function fakeLookup(map = {}) {
@@ -506,6 +525,45 @@ describe('robots', () => {
     assert.equal(isAllowed(star, '/files/a.pdf'), false);
     assert.equal(isAllowed(star, '/files/a.pdf?x'), true);
     assert.equal(isAllowed(parseRobots('User-agent: *\nDisallow:'), '/'), true, 'an empty Disallow allows everything');
+  });
+});
+
+describe('robots cannot freeze the server', () => {
+  test('a pathological robots rule against a 5,000-character path finishes in under 50 ms', async () => {
+    // In a worker with a hard deadline: a backtracking matcher would block
+    // this thread for minutes, and the test must go red rather than hang.
+    const { out } = await timedInWorker(`async (root) => {
+      const { parseRobots, isAllowed } = await import(root + 'lib/audit/robots.js');
+      const rules = ['/*a*a*a*a*a*a*b', '/*aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab', '/' + '*a'.repeat(200) + '*b$'];
+      const p = parseRobots(['User-agent: *', ...rules.map((r) => 'Disallow: ' + r)].join(String.fromCharCode(10)));
+      const t0 = performance.now();
+      const answers = [isAllowed(p, '/' + 'a'.repeat(60)), isAllowed(p, '/' + 'a'.repeat(5000))];
+      return { ms: performance.now() - t0, answers, rules: p.rules.length, presence: isAllowed(p, '/xaaaaaab') };
+    }`, 10_000);
+    assert.equal(out.rules, 3, 'the rules were read');
+    assert.deepEqual(out.answers, [true, true]);
+    assert.ok(out.ms < 50, `the checks took ${out.ms.toFixed(1)} ms`);
+    assert.equal(out.presence, false, 'the same rules still match a path they should');
+  });
+
+  test('rules are capped: no more than 500 per group, none longer than 1,000 characters', () => {
+    const many = Array.from({ length: 900 }, (_, i) => `Disallow: /r${i}`).join('\n');
+    assert.equal(parseRobots(`User-agent: *\n${many}`).rules.length, 500);
+    assert.equal(parseRobots(`User-agent: *\nDisallow: /${'x'.repeat(1200)}`).rules.length, 0);
+  });
+
+  test('the wildcard matcher agrees with the common robots dialect', () => {
+    const cases = [
+      ['/fish', '/fish', true], ['/fish', '/fish.html', true], ['/fish', '/Fish', false], ['/fish*', '/fishheads/x', true],
+      ['/*.php', '/index.php', true], ['/*.php', '/folder/x.php?y', true], ['/*.php$', '/x.php', true], ['/*.php$', '/x.php?y', false],
+      ['/fish*.php', '/fish/salmon.php', true], ['/fish*.php', '/Fish.PHP', false], ['/a*b*c', '/axxbyyc', true], ['/a*b*c', '/axxcyyb', false],
+      ['/$', '/', true], ['/$', '/x', false], ['*/private', '/x/private/y', true], ['/a*', '/a', true], ['/a**b$', '/aqqb', true],
+      ['/ab*ab$', '/abab', true], ['/ab*ab$', '/ab', false],
+    ];
+    for (const [rule, path, want] of cases) {
+      const p = parseRobots(`User-agent: *\nDisallow: ${rule}`);
+      assert.equal(!isAllowed(p, path), want, `${rule} vs ${path}`);
+    }
   });
 });
 

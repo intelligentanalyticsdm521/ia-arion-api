@@ -39,7 +39,7 @@ function mutate({ id, name, edits, mustFail }) {
       const now = fs.readFileSync(p, 'utf8');
       const count = now.split(e.from).length - 1;
       if (count !== 1) throw new Error(`${e.file}: the line to break was found ${count} times`);
-      fs.writeFileSync(p, now.replace(e.from, e.to));
+      fs.writeFileSync(p, now.replace(e.from, () => e.to)); // a function: "$" in e.to stays literal
     }
     const out = runTests();
     const red = out.split('\n').filter((l) => /^\s*not ok \d+ - /.test(l)).map((l) => l.replace(/^\s*not ok \d+ - /, '').trim());
@@ -72,6 +72,11 @@ const M = [
     edits: [{ file: 'lib/audit/safeFetch.js', from: '  if ((b[0] & 0xe0) !== 0x20) return true;', to: '' }] },
   { id: 'A3e', name: 'IPv4 inside IPv6 is checked as IPv4 (redirect hop)', mustFail: 'a redirect to a hex-mapped metadata or private address is refused at the hop',
     edits: [{ file: 'lib/audit/safeFetch.js', from: '  return mapped || compatible ?', to: '  return false ?' }, { file: 'lib/audit/safeFetch.js', from: '  if ((b[0] & 0xe0) !== 0x20) return true;', to: '' }] },
+  { id: 'R1', name: 'robots rules matched without a backtracking regex', mustFail: 'a pathological robots rule against a 5,000-character path',
+    edits: [{ file: 'lib/audit/robots.js', from: '  const { pieces, anchored } = rule;\n',
+      to: "  const { pieces, anchored } = rule;\n  return new RegExp('^' + pieces.map((x) => x.replace(/[^a-zA-Z0-9\\/]/g, '\\\\$&')).join('.*') + (anchored ? '$' : '')).test(path);\n" }] },
+  { id: 'R2', name: 'robots rule caps', mustFail: 'rules are capped',
+    edits: [{ file: 'lib/audit/robots.js', from: '|| current.rules.length >= MAX_RULES', to: '' }] },
   { id: 'A4', name: 'every redirect hop is checked again', mustFail: 'a redirect to a private address is refused at the hop',
     edits: [{ file: 'lib/audit/safeFetch.js', from: '    const target = await checkUrl(current, { lookup, env, httpsOnly });',
       to: "    const target = hop === 0 ? await checkUrl(current, { lookup, env, httpsOnly }) : { url: new URL(current), address: '127.0.0.1', family: 4 };" }] },
