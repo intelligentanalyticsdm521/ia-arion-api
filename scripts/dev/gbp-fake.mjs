@@ -7,11 +7,16 @@
 //   node scripts/dev/gbp-fake.mjs --tenant <id> --site <id> --show
 //
 // Writes the review into the file named by ARION_GBP_FAKE_FILE (the arion
-// .env), and marks the dev site as connected to that fake profile:
+// .env), under the site's location name. lib/gbpFake.js then serves the file
+// instead of Google, but only on a machine where WEBSITE_SITE_NAME is unset
+// (never on an App Service).
+//
+// A SITE THAT IS ALREADY CONNECTED IS LEFT ALONE. A dev site can hold a real
+// Google connection; overwriting its token would lose it. Its own location
+// name is used as the key in the fake file, and nothing on the row changes.
+// Only a site with no connection is marked connected to the fake profile:
 // gbp_connected = 1, gbp_oauth_token_ref = 'dev-fake',
-// gbp_location_name = 'locations/dev-fake'. lib/gbpFake.js then serves the
-// file instead of Google, but only on a machine where WEBSITE_SITE_NAME is
-// unset (never on an App Service).
+// gbp_location_name = 'locations/dev-fake'.
 //
 // LOCAL ONLY: refuses a SQL server that is not this machine. Nothing in here
 // knows a business; the business and site are the command line.
@@ -45,8 +50,29 @@ const site = arg('site');
 if (!GUID.test(String(tenant))) die('--tenant <business id> is required');
 if (!GUID.test(String(site))) die('--site <site id> is required');
 
+const pool = await getServicesPool();
+const cur = await pool.request()
+  .input('t', sql.UniqueIdentifier, tenant)
+  .input('s', sql.UniqueIdentifier, site)
+  .query('SELECT gbp_connected, gbp_oauth_token_ref, gbp_location_name FROM arion.site WHERE tenant_id = @t AND site_id = @s');
+const row = cur.recordset[0];
+if (!row) die("That site is not this business's, so nothing was written.");
+const connected = (row.gbp_connected === true || row.gbp_connected === 1) && row.gbp_oauth_token_ref && row.gbp_location_name;
+const location = connected ? String(row.gbp_location_name) : LOCATION;
+if (!connected) {
+  await pool.request()
+    .input('t', sql.UniqueIdentifier, tenant)
+    .input('s', sql.UniqueIdentifier, site)
+    .input('loc', sql.NVarChar(200), LOCATION)
+    .query(`UPDATE arion.site SET gbp_connected = 1, gbp_oauth_token_ref = 'dev-fake', gbp_location_name = @loc
+             WHERE tenant_id = @t AND site_id = @s`);
+  console.log(`site ${site} now reads its reviews from the fake profile`);
+} else {
+  console.log(`site ${site} is already connected; its connection is left alone and the fake file uses its location name`);
+}
+
 const all = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8') || '{}') : {};
-const loc = all[LOCATION] || (all[LOCATION] = { reviews: [], replies: [] });
+const loc = all[location] || (all[location] = { reviews: [], replies: [] });
 
 if (has('add-review')) {
   const stars = Number(arg('stars'));
@@ -57,18 +83,6 @@ if (has('add-review')) {
   fs.writeFileSync(file, JSON.stringify(all, null, 2));
   console.log(`added review ${id} (${stars} stars) to ${file}`);
 }
-
-const pool = await getServicesPool();
-const r = await pool.request()
-  .input('t', sql.UniqueIdentifier, tenant)
-  .input('s', sql.UniqueIdentifier, site)
-  .input('loc', sql.NVarChar(200), LOCATION)
-  .query(`UPDATE arion.site
-             SET gbp_connected = 1, gbp_oauth_token_ref = 'dev-fake', gbp_location_name = @loc
-           WHERE tenant_id = @t AND site_id = @s;
-          SELECT @@ROWCOUNT AS affected;`);
-if (Number(r.recordset?.[0]?.affected) !== 1) die('That site is not this business\'s, so nothing was connected.');
-console.log(`site ${site} now reads its reviews from the fake profile`);
 
 if (has('show')) console.log(JSON.stringify(loc, null, 2));
 await pool.close?.();
