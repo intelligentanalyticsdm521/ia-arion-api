@@ -41,6 +41,7 @@ import {
   fetchKit, writeKit, fetchChrome, writeChrome,
   fetchSiteOptions, writeSiteOptions,
 } from '../../lib/websiteBuilder/pageClient.js';
+import { syncSubscriptionConfigSoon } from '../../lib/websiteBuilder/subscriptionConfig.js';
 
 const router = Router({ mergeParams: true });
 
@@ -515,6 +516,10 @@ router.get('/site/options', async (req, res) => {
   try {
     const ctx = await resolve(req, res);
     if (!ctx) return;
+    // Opening the website settings also tells the site what the subscription
+    // lets it do (SPARK capture, the ARION tier). Fire and forget, at most once
+    // per ten minutes per site; it never delays or changes this answer.
+    syncSubscriptionConfigSoon(ctx.pool, ctx.site);
     const result = await fetchSiteOptions(ctx.site);
     if (!result.ok) return pluginFailure(res, result, 'reading your website settings');
     return res.json({ data: publicSiteOptions(result.data) });
@@ -548,6 +553,7 @@ router.post('/site/options', async (req, res) => {
 
     const ctx = await resolve(req, res);
     if (!ctx) return;
+    syncSubscriptionConfigSoon(ctx.pool, ctx.site);
     const result = await writeSiteOptions(ctx.site, payload);
     if (!result.ok) {
       if (result.status === 400 || result.status === 409) {

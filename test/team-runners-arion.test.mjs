@@ -891,6 +891,9 @@ const STREAM_FILES = [
   'lib/pluginClient.js', 'lib/siteCaptureGate.js', 'lib/bookingButtonSync.js',
   'lib/websiteBuilder/brandContext.js', 'lib/purchasedArionTier.js',
   'routes/arion/pages.js', 'routes/submit.js', 'index.js',
+  // The website forms switch and the plugin's capture and tier push (11 Oct 2026).
+  'routes/arion/forms.js', 'routes/arion/website.js',
+  'lib/websiteBuilder/pageClient.js', 'lib/websiteBuilder/subscriptionConfig.js',
 ];
 /** Deleted by this build (the old runner): must stay deleted. */
 const DELETED_FILES = ['lib/gbpAutoReplyRunner.js'];
