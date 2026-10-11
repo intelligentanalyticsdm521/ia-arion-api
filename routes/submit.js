@@ -13,6 +13,7 @@ import { resolveBookingTarget } from '../lib/websiteBuilder/brandContext.js';
 import { getEntitlements } from '../lib/entitlements.js';
 import { requireSiteArion } from '../middleware/requireSiteArion.js';
 import { entitlementsFor, loadFormConfig, productState, sparkCaptureDecision } from '../lib/siteCaptureGate.js';
+import { purchasedArionTier, effectiveArionTier } from '../lib/purchasedArionTier.js';
 
 const router = Router();
 
@@ -793,13 +794,21 @@ router.post('/public/provision-codes/redeem', async (req, res) => {
     // business's button over a platform-api hiccup. Never fatal.
     const booking = await submitDeps.resolveBookingTarget(pool, tenant_id);
 
+    // The tier the plugin stores (ia_tier) and gates its own features on
+    // (book-now button, post forms, mega menu, ...). BY THE SUBSCRIPTION:
+    // the ARION tier the business pays for stands; arion.site.arion_tier is
+    // raise-only, so after a downgrade it still named the old, higher tier.
+    // The site row is the fallback when the subscription carries no tier.
+    const purchased = await purchasedArionTier(tenant_id, { getEntitlements: submitDeps.getEntitlements });
+    const pluginTier = effectiveArionTier(purchased, seoResult.recordset[0]?.arion_tier);
+
     res.json({
       data: {
         provisioned: true,
         site_id,
         tenant_id,
         site_token: rawToken,            // RAW token returned ONLY here
-        tier: seoResult.recordset[0]?.arion_tier || null,
+        tier: pluginTier || null,
         seo_addon: seoResult.recordset[0]?.seo_addon_tier || null,
         domain: siteRow.domain || null,
         ...(booking.decided ? { booking_url: booking.href } : {}),

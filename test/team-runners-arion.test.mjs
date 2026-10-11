@@ -885,6 +885,12 @@ const STREAM_FILES = [
   'lib/agents/activity.js', 'lib/agents/runs.js',
   'routes/arion.js', 'routes/internal.js', 'routes/arion/contentAgent.js', 'routes/arion/agents.js', 'routes/arion/reviewReplies.js',
   'scripts/dev/gbp-fake.mjs', 'scripts/dev/exercise-team-jobs.mjs',
+  // Later commits on the same release line that touch lib/ or routes/ (the
+  // plugin self-update call; the 11 Oct 2026 "features follow the
+  // subscription" work), so the list test stays an honest list.
+  'lib/pluginClient.js', 'lib/siteCaptureGate.js', 'lib/bookingButtonSync.js',
+  'lib/websiteBuilder/brandContext.js', 'lib/purchasedArionTier.js',
+  'routes/arion/pages.js', 'routes/submit.js',
 ];
 /** Deleted by this build (the old runner): must stay deleted. */
 const DELETED_FILES = ['lib/gbpAutoReplyRunner.js'];
@@ -909,6 +915,9 @@ const PRE_EXISTING = [
   "console.warn('[oauth/google/callback] LUMEN_WALKTHROUGH_SEED_TOKEN not set — skipping connect_gbp walkthrough completion');",
   "completeWalkthroughTaskByKindFor(tenantId, 'connect_gbp', {",
   "internalToken: walkthroughInternalToken,",
+  // The booking site's default host name in lib/websiteBuilder/brandContext.js
+  // (older than the 11 Oct 2026 work that put the file on the list).
+  "process.env.BOOKING_HOSTNAME_SUFFIX || 'book.ia-dm.com',",
 ];
 const DEFECT = [/Intelligent Analytics/i, /intelligentanalyticsdm/i, /ia-dm\.com/i,
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i,

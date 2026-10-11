@@ -123,6 +123,12 @@ import {
 } from '../../lib/websiteBuilder/libraryCatalog.js';
 import { maybeDevModel } from '../../lib/websiteBuilder/aiDevStub.js';
 import { getActionPricing } from '../../lib/argus/callWrapper.js';
+import { siteWithPurchasedTier } from '../../lib/purchasedArionTier.js';
+
+// The collaborators the AI routes call, in one object so a test can run the
+// real preflight with the database and platform-api stubbed. Production never
+// changes these.
+export const aiDeps = { getServicesPool, siteWithPurchasedTier, loadBrandContext };
 import {
   ACTION_GENERATE_SECTION, ACTION_ASSEMBLE_PAGE,
 } from '../../lib/websiteBuilder/builderMeter.js';
@@ -1291,7 +1297,9 @@ router.get('/section-library', async (req, res) => {
       ownedProducts,
     });
 
-    const gate = aiTierGate(site);
+    // The AI offer follows the ARION tier the business pays for, not the
+    // raise-only site row (see lib/purchasedArionTier.js).
+    const gate = aiTierGate(await aiDeps.siteWithPurchasedTier(site, tenantId));
     const bookingHref = String(brand.booking_href || '');
 
     // Keep the site-wide "Book now" button in step with the booking page's
@@ -1455,9 +1463,18 @@ async function aiPreflight(req, res) {
     return null;
   }
 
-  const pool = await getServicesPool();
-  const site = await loadSite(pool, tenantId, siteId);
-  if (!site) { notFound(res, 'That website is not on your account.'); return null; }
+  const pool = await aiDeps.getServicesPool();
+  const siteRow = await loadSite(pool, tenantId, siteId);
+  if (!siteRow) { notFound(res, 'That website is not on your account.'); return null; }
+
+  // BY THE SUBSCRIPTION (Brandon, 11 Oct 2026: "ARION pro has different
+  // features than ARION lite"). The site row's arion_tier is raise-only, so a
+  // business that moved down to Lite kept the paid AI editor. The tier the
+  // business pays for (platform-api payload) now stands; the site row is only
+  // the fallback when the subscription carries no tier. The copy carries that
+  // tier on into proposeSectionEdit / proposePageEdit, so their own gate
+  // gives the same answer.
+  const site = await aiDeps.siteWithPurchasedTier(siteRow, tenantId);
 
   // The plan gate is here, ahead of everything expensive. A refused plan
   // costs no token, no credit and no round trip to a model.
@@ -1470,7 +1487,7 @@ async function aiPreflight(req, res) {
     return null;
   }
 
-  const brand = await loadBrandContext(pool, { tenantId, siteId });
+  const brand = await aiDeps.loadBrandContext(pool, { tenantId, siteId });
   return { tenantId, siteId, pageId, instruction, pool, site, brand };
 }
 
@@ -2444,7 +2461,7 @@ router.get('/ai-pricing', async (req, res) => {
     const site = await loadSite(pool, tenantId, siteId);
     if (!site) return notFound(res, 'That website is not on your account.');
 
-    const gate = aiTierGate(site);
+    const gate = aiTierGate(await aiDeps.siteWithPurchasedTier(site, tenantId));
     const actions = {};
     for (const [key, actionType] of [
       ['section', ACTION_SECTION_EDIT],
@@ -2490,6 +2507,6 @@ export const __test__ = {
   publicPageSettings, publicTemplates, publicSeo, publicUsage, TEMPLATE_LABELS, SEO_LIMITS,
   TOP_LEVEL_EL_TYPES, aiFailure, withFormRecipient, publicMediaItem,
   syncBookingButton, bookingPushed, BOOKING_PUSH_TTL_MS,
-  publicSection,
+  publicSection, aiPreflight,
 };
 
