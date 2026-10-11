@@ -224,20 +224,25 @@ test("F4 undecided gives the site row", async () => {
   assert.equal(tier, "pro");
 });
 
-test("F4 a non-Stripe source (comped, set by hand) keeps the higher of the two", async () => {
+// CHANGED 2026-10-11 (Brandon: "it's by their subscription"): a decided, real
+// tier from the payload stands from ANY source. Until then a non-Stripe tier
+// (comped, set by hand on core.tenant_services) was combined with the site row
+// as "the higher of", so a site row stamped above what the business pays for
+// kept unlocking features. The site row is now only the fallback.
+test("by the subscription: a tier set on core.tenant_services stands, even below the site row", async () => {
   const tier = await resolveArionTier(reqFor(), { getEntitlements: entFrom("standard", "core.tenant_services"), getServicesPool: sitePool("pro") });
-  assert.equal(tier, "pro");
+  assert.equal(tier, "standard");
 });
 
-test("F12 a COMPED ARION (tier_source 'comped', what platform-api now answers) is never lowered by the site row or a cheaper Stripe tier", async () => {
+test("F12 a COMPED ARION is the comped tier platform-api serves; the site row neither raises nor lowers it", async () => {
   // platform-api serves a comped row at the higher of the comped tier and any
-  // live Stripe tier, with tier_source 'comped' (platform-api b4495d1). Only a
-  // 'stripe' source may lower ARION here; 'comped' keeps the higher of.
+  // live Stripe tier, with tier_source 'comped' (platform-api b4495d1), so the
+  // comp is already protected there. Here that tier simply stands.
   assert.equal(await resolveArionTier(reqFor(), { getEntitlements: entFrom("business", "comped"), getServicesPool: sitePool("lite") }), "business");
-  assert.equal(await resolveArionTier(reqFor(), { getEntitlements: entFrom("standard", "comped"), getServicesPool: sitePool("pro") }), "pro");
+  assert.equal(await resolveArionTier(reqFor(), { getEntitlements: entFrom("standard", "comped"), getServicesPool: sitePool("pro") }), "standard");
 });
 
-test("F4 a Stripe tier word that is not a tier ('website') never demotes: higher of", async () => {
+test("F4 a Stripe tier word that is not a tier ('website') never demotes: the site row is the fallback", async () => {
   const tier = await resolveArionTier(reqFor(), { getEntitlements: entFrom("website", "stripe"), getServicesPool: sitePool("pro") });
   assert.equal(tier, "pro");
 });
