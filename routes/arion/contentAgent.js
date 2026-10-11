@@ -3,7 +3,7 @@
 // Task 6 — the review queue. Scope Section 21.
 //
 // Mounted under /arion, which already carries requireAuth -> tenantResolution
-// -> requireArionAccess -> requireArionTier. So req.tenant.tenantId is the
+// -> requireArionAccess -> arionRouteFeatures. So req.tenant.tenantId is the
 // RESOLVED active tenant.
 //
 // TENANT SCOPING RULE FOR THIS FILE: every statement takes its tenant from

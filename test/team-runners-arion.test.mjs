@@ -898,6 +898,7 @@ const STREAM_FILES = [
   // The feature catalog: routes and the review job name catalog keys (11 Oct 2026).
   'lib/featureGate.js', 'lib/featureKeys.js', 'lib/tierCheck.js',
   'routes/arion/gbp.js', 'routes/arion/integrations.js',
+  'lib/intelligence/index.js', 'routes/arion/sites.js',
 ];
 /** Deleted by this build (the old runner): must stay deleted. */
 const DELETED_FILES = ['lib/gbpAutoReplyRunner.js'];
@@ -925,6 +926,10 @@ const PRE_EXISTING = [
   // The booking site's default host name in lib/websiteBuilder/brandContext.js
   // (older than the 11 Oct 2026 work that put the file on the list).
   "process.env.BOOKING_HOSTNAME_SUFFIX || 'book.ia-dm.com',",
+  // routes/arion/sites.js's older custom-domain hook (the file went on the
+  // list on 11 Oct 2026 for a comment that named the deleted tier gate).
+  "import { completeWalkthroughTaskByKind } from '../../lib/walkthroughClient.js';",
+  "completeWalkthroughTaskByKind(req, 'arion_custom_domain').catch(() => {});",
 ];
 const DEFECT = [/Intelligent Analytics/i, /intelligentanalyticsdm/i, /ia-dm\.com/i,
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i,

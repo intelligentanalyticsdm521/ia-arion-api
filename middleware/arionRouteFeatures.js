@@ -25,7 +25,10 @@
 // Where the old single pattern covered several pages that a path can tell
 // apart (Search Console vs Sitemaps vs IndexNow; Business reviews vs posts vs
 // locations), the row is split so a per-business override of one page does
-// not move the others.
+// not move the others. Two rows have no old pattern and close a gap where
+// the Portal locked a page the API let through: GET /analytics/report (the
+// Analytics Reports page, arion_analytics_reports) and POST /hosting/pagespeed
+// (the Hosting Performance page, arion_hosting_performance).
 //
 // ANALYTICS: GET /arion/analytics answers every GA4 panel in one response
 // (sessions, users, channels, devices, top pages), so it cannot tell the
@@ -37,18 +40,26 @@ import { requireFeature, featureDecision, intentForMethod, logDecision, answerRe
 // undecided plan holds it instead of letting it run (requireFeature's rule).
 const SPEND_ON_POST = (req) => (String(req.method).toUpperCase() === 'POST' ? 'spend' : intentForMethod(req.method));
 const SEND_ON_POST = (req) => (String(req.method).toUpperCase() === 'POST' ? 'send' : intentForMethod(req.method));
+// Every write on these paths changes what the public sees on Google, Bing or
+// Apple (a profile edit, a photo, a Q&A answer, a post or a reply taken
+// down), so each one is a send: an undecided plan holds it.
+const SEND_ON_WRITE = (req) => (intentForMethod(req.method) === 'write' ? 'send' : 'read');
 
 export const ROUTE_FEATURES = Object.freeze([
-  // IA Insights Reports, every tier (matrix §6). First, so Analytics cannot catch them.
-  { re: /\/analytics\/(report|insights)\b/i, key: 'arion_ia_insights_reports' },
+  // Analytics Reports. GET /analytics/report is called only by the Portal's
+  // Analytics Reports page (arion_analytics_reports), so the API locks it
+  // where the menu does. First, so the Analytics overview row cannot catch it.
+  { re: /\/analytics\/report\b/i, key: 'arion_analytics_reports' },
+  // IA Insights Reports, every tier (matrix §6).
+  { re: /\/analytics\/insights\b/i, key: 'arion_ia_insights_reports' },
 
   // Analytics (GA4)
   { re: /\/(website-)?analytics\b/i, key: 'arion_analytics_overview' },
   { re: /\/ga4\b/i, key: 'arion_analytics_overview' },
 
   // Bing Places and Apple Business Connect, before the Bing Webmaster rows
-  { re: /\/my-business\/apple\b/i, key: 'arion_business_apple_overview' },
-  { re: /\/my-business\/bing\b/i, key: 'arion_business_bing_overview' },
+  { re: /\/my-business\/apple\b/i, key: 'arion_business_apple_overview', intent: SEND_ON_WRITE },
+  { re: /\/my-business\/bing\b/i, key: 'arion_business_bing_overview', intent: SEND_ON_WRITE },
 
   // Search Console, Bing Webmaster
   { re: /\/console\/bing\b/i, key: 'arion_search_bing_copilot' },
@@ -68,16 +79,21 @@ export const ROUTE_FEATURES = Object.freeze([
   // Website, Hosting
   { re: /\/staging\b/i, key: 'arion_website_staging' },
   { re: /\/hosting\/dns\b/i, key: 'arion_hosting_domain_dns' },
+  // POST /hosting/pagespeed runs the test the Portal's Hosting Performance page shows.
+  { re: /\/hosting\/pagespeed\b/i, key: 'arion_hosting_performance' },
 
   // Business Profile (Google, Bing Places, Apple)
   { re: /\/review-replies\b/i, key: 'arion_business_reviews', intent: SEND_ON_POST },
   { re: /\/sites\/[^/]+\/apple\b/i, key: 'arion_business_apple_overview' },
   { re: /\/business\/reviews\/[^/]+\/draft-reply\b/i, key: 'arion_business_reviews', intent: SPEND_ON_POST },
-  { re: /\/(business|gbp)\/reviews\b/i, key: 'arion_business_reviews', intent: SEND_ON_POST },
-  { re: /\/business\/posts\b/i, key: 'arion_business_posts', intent: SEND_ON_POST },
-  { re: /\/business\/services\b/i, key: 'arion_business_services' },
-  { re: /\/business\/insights\b/i, key: 'arion_business_insights' },
+  { re: /\/(business|gbp)\/reviews\b/i, key: 'arion_business_reviews', intent: SEND_ON_WRITE },
+  { re: /\/business\/posts\b/i, key: 'arion_business_posts', intent: SEND_ON_WRITE },
+  { re: /\/business\/services\b/i, key: 'arion_business_services', intent: SEND_ON_WRITE },
+  { re: /\/(business|gbp)\/insights\b/i, key: 'arion_business_insights' },
   { re: /\/(business-locations|gbp\/locations)\b/i, key: 'arion_business_locations' },
+  { re: /\/business\/(update|media|qanda)\b/i, key: 'arion_business_overview', intent: SEND_ON_WRITE },
+  { re: /\/gbp\/create-listing\b/i, key: 'arion_business_overview', intent: SEND_ON_WRITE },
+  { re: /\/my-business\/[^/]+\/?$/i, key: 'arion_business_overview', intent: SEND_ON_WRITE },
   { re: /\/(gbp|business-profile|google-business|my-business|business)\b/i, key: 'arion_business_overview' },
 
   // IA Insights Intelligence (matrix §6)

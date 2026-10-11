@@ -33,7 +33,8 @@ const MAP = [
   [`${S}/pages`, null],
   ['/arion/seo/overview', null], // SEO is requireSeoAddon's (the add-on, per site)
   ['/arion/hosting/dns?siteId=x', 'arion_hosting_domain_dns'],
-  ['/arion/analytics/report?siteId=x&type=monthly_summary', 'arion_ia_insights_reports'],
+  ['/arion/analytics/report?siteId=x&type=monthly_summary', 'arion_analytics_reports'],
+  ['/arion/hosting/pagespeed?siteId=x', 'arion_hosting_performance'],
   ['/arion/analytics/insights?siteId=x', 'arion_ia_insights_reports'],
   ['/arion/analytics?siteId=x', 'arion_analytics_overview'],
   ['/arion/website-analytics/GOOGLE?siteId=x', 'arion_analytics_overview'],
@@ -62,6 +63,11 @@ const MAP = [
   ['/arion/business/posts', 'arion_business_posts'],
   ['/arion/business/services', 'arion_business_services'],
   ['/arion/business/insights', 'arion_business_insights'],
+  [`${S}/gbp/insights`, 'arion_business_insights'],
+  ['/arion/business/update?siteId=x', 'arion_business_overview'],
+  ['/arion/business/media?siteId=x', 'arion_business_overview'],
+  ['/arion/business/qanda/q1/answer?siteId=x', 'arion_business_overview'],
+  [`${S}/gbp/create-listing`, 'arion_business_overview'],
   ['/arion/business-locations', 'arion_business_locations'],
   ['/arion/my-business/google?siteId=x', 'arion_business_overview'],
   ['/arion/my-business/apple?siteId=x', 'arion_business_apple_overview'],
@@ -119,6 +125,45 @@ test('undecided: a signed-in read runs; posting a review reply or a post HOLDS; 
   assert.equal(run.status, 503);
   const post = await quiet(() => gate('/arion/business/posts', und('arion_business_posts'), 'POST'));
   assert.equal(post.status, 503);
+});
+
+test('undecided: every write that changes the public Google, Bing or Apple listing HOLDS; reading those pages runs', async () => {
+  const und = (k) => planSaying({ [k]: entry(null) });
+  const publicWrites = [
+    ['/arion/business/update?siteId=x', 'PATCH', 'arion_business_overview'],
+    ['/arion/business/media?siteId=x', 'POST', 'arion_business_overview'],
+    ['/arion/business/media/m1?siteId=x', 'DELETE', 'arion_business_overview'],
+    ['/arion/business/qanda/q1/answer?siteId=x', 'POST', 'arion_business_overview'],
+    ['/arion/business/services?siteId=x', 'PUT', 'arion_business_services'],
+    ['/arion/business/reviews/r1/reply?siteId=x', 'DELETE', 'arion_business_reviews'],
+    ['/arion/business/posts/p1?siteId=x', 'DELETE', 'arion_business_posts'],
+    [`${S}/gbp/create-listing`, 'POST', 'arion_business_overview'],
+    ['/arion/my-business/google?siteId=x', 'PUT', 'arion_business_overview'],
+    ['/arion/my-business/apple?siteId=x', 'PUT', 'arion_business_apple_overview'],
+    ['/arion/my-business/bing?siteId=x', 'PUT', 'arion_business_bing_overview'],
+  ];
+  for (const [p, method, key] of publicWrites) {
+    assert.equal(featureForPath(p)?.key, key, p);
+    const held = await quiet(() => gate(p, und(key), method));
+    assert.equal(held.passed, false, `${method} ${p} must hold on an undecided plan`);
+    assert.equal(held.status, 503, p);
+    assert.equal(held.body.error, 'plan_not_confirmed', p);
+    const read = await quiet(() => gate(p, und(key), 'GET'));
+    assert.equal(read.passed, true, `GET ${p} runs on an undecided plan`);
+    const ok = await gate(p, planSaying({ [key]: entry(true) }), method);
+    assert.equal(ok.passed, true, `${method} ${p} runs when the plan includes it`);
+  }
+});
+
+test('the menu and the API agree: Analytics Reports and Hosting Performance are refused where the plan lacks them', async () => {
+  const reports = await gate('/arion/analytics/report?siteId=x&type=monthly_summary', planSaying({ arion_analytics_reports: entry(false, { needs: 'ARION Business' }), arion_ia_insights_reports: entry(true) }));
+  assert.equal(reports.status, 403);
+  assert.equal(reports.body.needs, 'ARION Business');
+  const psi = await gate('/arion/hosting/pagespeed?siteId=x', planSaying({ arion_hosting_performance: entry(false, { needs: 'ARION Standard' }) }), 'POST');
+  assert.equal(psi.status, 403);
+  assert.equal(psi.body.feature, 'arion_hosting_performance');
+  const insights = await gate('/arion/analytics/insights?siteId=x', planSaying({ arion_analytics_reports: entry(false), arion_ia_insights_reports: entry(true) }));
+  assert.equal(insights.passed, true, 'IA Insights reports stay every tier');
 });
 
 test('platform-api down: reads run, never a lock-out', async () => {

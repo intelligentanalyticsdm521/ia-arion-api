@@ -30,7 +30,7 @@
 // ═══ AUTH ══════════════════════════════════════════════════════════════════
 //
 // Mounted under /arion, which already carries requireAuth -> tenantResolution ->
-// requireArionAccess -> requireArionTier, and under requireArionTenantAdmin for
+// requireArionAccess -> arionRouteFeatures, and under requireArionTenantAdmin for
 // the write (see routes/arion.js). Every statement takes its tenant from
 // req.tenant.tenantId and NEVER from a param, query or body: the documented
 // wrong-tenant root cause on this platform is trusting a caller-supplied tenant,

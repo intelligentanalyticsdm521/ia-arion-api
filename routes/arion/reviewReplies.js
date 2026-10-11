@@ -6,7 +6,7 @@
 //
 // ARGUS employees, phase 1 (CONTRACT_ARGUS_EMPLOYEES_PHASE1 §G.2). Mounted at
 // /arion/review-replies behind the same chain as /arion/agents (routes/arion.js):
-// requireAuth -> tenantResolution -> requireArionAccess -> requireArionTier,
+// requireAuth -> tenantResolution -> requireArionAccess -> arionRouteFeatures,
 // and requireArionTenantAdmin for these writes.
 //
 // TENANT SCOPING: every statement takes its business from req.tenant.tenantId,

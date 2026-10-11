@@ -162,8 +162,9 @@ router.post('/provision', async (req, res) => {
       .input('tenantId', sql.UniqueIdentifier, tenantId)
       .input('domain', sql.NVarChar(253), domain.domain)
       .input('domainMode', sql.NVarChar(20), domain.mode)
-      // arion_tier = the resolved BASE tier so later add-site calls +
-      // middleware/requireArionTier.js resolve it per site. `tier` is the
+      // arion_tier = the resolved BASE tier so later add-site calls resolve
+      // the site limit from it (feature gates read the catalog, not this
+      // column). `tier` is the
       // SEO-ladder column (lib/integrationKickoff.js + lib/manifestBuilder.js
       // read it as starter/…/authority): it stays NULL here and is filled,
       // together with seo_addon_tier, by the purchase sync below when the
