@@ -29,6 +29,7 @@ const { filterOwned, checkOwnership, clearOwnershipCache } = own;
 const { runTick } = await import('../lib/contentAgent/tick.js');
 const { fakeJobsOn, fakeBriefFor } = await import('./helpers/team-job-fakes.mjs');
 const { runReviewReplyTick } = await import('../lib/gbpReplyRunner.js');
+const { ALLOW_ALL } = await import('./helpers/feature-fakes.mjs');
 
 const ON = '11111111-1111-4111-8111-111111111111';
 const OFF = '22222222-2222-4222-8222-222222222222';
@@ -204,7 +205,7 @@ async function gbpTick(ownership) {
   const readFor = [];
   const logs = [];
   const summary = await runReviewReplyTick(pool, (m) => logs.push(m), {
-    ownership,
+    ownership, getEntitlements: ALLOW_ALL,
     jobsOn: fakeJobsOn({ [ON]: ['arion.review_replies'], [OFF]: ['arion.review_replies'] }),
     briefFor: fakeBriefFor(),
     api: { fetchReviews: async (ref) => { readFor.push(ref); return { reviews: [] }; }, replyToReview: async () => ({}) },

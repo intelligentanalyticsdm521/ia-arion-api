@@ -21,6 +21,7 @@ import { WORDS as REVIEW_ROUTE_WORDS } from '../routes/arion/reviewReplies.js';
 import { RUN_WORDS as AGENTS_RUN_WORDS } from '../routes/arion/agents.js';
 import { HANDOFF_WORDS } from '../lib/contentAgent/socialHandoff.js';
 import { REVIEW_RUN_WORDS } from '../lib/gbpReplyRunner.js';
+import { ALLOW_ALL } from './helpers/feature-fakes.mjs';
 import { NOT_LIVE_PUBLISH_WORDS } from '../lib/contentAgent/publisher.js';
 
 import { runTick, haltTenant, gateJob, briefInputs } from '../lib/contentAgent/tick.js';
@@ -554,7 +555,7 @@ function reviewWorld({ reviews, mode = 'automatic', vars = {}, briefFields = { b
     replyToReview: async (_t, _l, id, text) => { posted.push({ id, text }); return { reply: {} }; },
   };
   const deps = {
-    ownership: ALL_ON, api,
+    ownership: ALL_ON, api, getEntitlements: ALLOW_ALL,
     jobsOn: fakeJobsOn({ [T1]: [['arion.review_replies', { mode, modeSetBy: mode === 'automatic' ? 'Dana Ruiz' : null, modeSetAt: '2026-10-08T12:00:00Z', vars }]] }),
     briefFor: fakeBriefFor(brief(briefFields)),
     draft: async ({ review }) => ({ ok: true, draft: review.comment?.includes('PRICE') ? 'It is only $20.' : `Thank you, ${review.reviewerName}.` }),
@@ -894,6 +895,9 @@ const STREAM_FILES = [
   // The website forms switch and the plugin's capture and tier push (11 Oct 2026).
   'routes/arion/forms.js', 'routes/arion/website.js',
   'lib/websiteBuilder/pageClient.js', 'lib/websiteBuilder/subscriptionConfig.js',
+  // The feature catalog: routes and the review job name catalog keys (11 Oct 2026).
+  'lib/featureGate.js', 'lib/featureKeys.js', 'lib/tierCheck.js',
+  'routes/arion/gbp.js', 'routes/arion/integrations.js',
 ];
 /** Deleted by this build (the old runner): must stay deleted. */
 const DELETED_FILES = ['lib/gbpAutoReplyRunner.js'];

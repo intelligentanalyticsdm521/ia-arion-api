@@ -40,7 +40,6 @@ import { getDomainInfo, getDnsRecords, createDnsRecords, deleteDnsRecords, getSs
 import { runPageSpeedTest } from '../lib/pagespeed.js';
 import { plugin as pluginApi, pluginGet, pluginPost, pluginFetchAll } from '../lib/pluginClient.js';
 import { effectiveInternalIps, mergedInternalIps, siteInternalIps, platformInternalIps, isValidIpOrCidr, callerIp, normalizeIp } from '../lib/internalTraffic.js';
-import { meetsMinTier } from '../lib/tierCheck.js';
 import { requireSeoAddon } from '../middleware/requireSeoAddon.js';
 import { AI_PROMPT_TIER_LIMITS, AI_PROMPT_ENGINES_BY_TIER, AIRT_ENGINE_BASE_NAMES, AIRT_BASE_NAME_TO_KEY, aiPromptAddDecision } from '../lib/aiPromptPolicy.js';
 import { getKeywordPositions, getProjectCompetitors, getAuditSummary, getProjectKeywords, getSiteOverview, getPositionsHistory, startSiteAudit, addCompetitor as seRankingAddCompetitor, rawRequest as seRankingRaw } from '../lib/seranking.js';
@@ -3546,12 +3545,14 @@ router.get('/seo/market-monitor', async (req, res) => {
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
 
     const tier = (site.seo_addon_tier || '').toLowerCase();
-    if (tier !== 'authority') {
+    // The rung Market Monitor needs is the catalog's (arion_seo_market_monitor
+    // addon_min_tier), decided by middleware/requireSeoAddon.js.
+    if (req.seoFeature?.met !== true) {
       return res.json({
         connected: true,
         authorityGated: true,
         tier,
-        message: 'Market Monitor requires the Authority SEO tier.',
+        message: `Market Monitor needs ${req.seoFeature?.needs || 'a higher SEO add-on'}.`,
         moves: [], backlinks: { new: [], lost: [], totals: { active: 0, newThisPeriod: 0, lostThisPeriod: 0 } },
         pageChanges: [],
         jobStatus: { moves: null, backlinks: null, page_changes: null },
@@ -3721,7 +3722,7 @@ router.get('/seo/market-monitor/watchlist', async (req, res) => {
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
     const tier = (site.seo_addon_tier || '').toLowerCase();
-    if (tier !== 'authority') {
+    if (req.seoFeature?.met !== true) {
       return res.json({ connected: true, authorityGated: true, tier, ownPages: [], competitorPages: [], usage: { own: 0, competitor: 0, limits: MM_LIMITS } });
     }
 
@@ -3784,9 +3785,8 @@ router.post('/seo/market-monitor/watchlist', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    const tier = (site.seo_addon_tier || '').toLowerCase();
-    if (tier !== 'authority') {
-      return res.status(403).json({ error: { code: 'AUTHORITY_REQUIRED', message: 'Market Monitor watchlist requires the Authority SEO tier.', status: 403 } });
+    if (req.seoFeature?.met !== true) {
+      return res.status(403).json({ error: 'feature_not_in_plan', feature: 'arion_seo_market_monitor', needs: req.seoFeature?.needs || null, message: `Not in your plan. This needs ${req.seoFeature?.needs || 'a higher SEO add-on'}.` });
     }
 
     // Normalize + validate + dedupe
@@ -3919,7 +3919,7 @@ router.get('/seo/market-monitor/suggestions', async (req, res) => {
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
     const tier = (site.seo_addon_tier || '').toLowerCase();
-    if (tier !== 'authority') {
+    if (req.seoFeature?.met !== true) {
       return res.json({ connected: true, authorityGated: true, tier, ownPageSuggestions: [], competitorSuggestions: [] });
     }
 
@@ -4285,13 +4285,16 @@ router.get('/seo/ai-search', async (req, res) => {
     if (!site.se_ranking_project_id) return res.json({ connected: false, engines: [], aggregate: null });
 
     const tier = (site.seo_addon_tier || '').toLowerCase();
+    // Per-engine rungs below (ChatGPT, Gemini) are the add-on's engine
+    // configuration; whether the page opens at all is the catalog's
+    // (arion_seo_ai_search addon_min_tier), decided by requireSeoAddon.
     const tierRank = { starter: 0, essentials: 1, growth: 2, authority: 3 }[tier] ?? 0;
-    if (tierRank < 2) {
+    if (req.seoFeature?.met !== true) {
       return res.json({
         connected: true,
         tierGated: true,
         tier,
-        message: 'AI Search Results require the Growth or Authority SEO tier.',
+        message: `AI Search Results need ${req.seoFeature?.needs || 'a higher SEO add-on'}.`,
         engines: [],
         aggregate: { totalMentions: 0, uniquePromptsMentioned: 0, totalPromptsTracked: 0, visibilityScore: 0, topSourcePages: [], competitorMentions: [] },
       });
@@ -6578,7 +6581,7 @@ router.post('/search/generate-sitemap', async (req, res) => {
   }
 });
 
-// --- POST /arion/hosting/dns?siteId= — Create/update DNS records (Pro+ tier) ---
+// --- POST /arion/hosting/dns?siteId= — Create/update DNS records (feature arion_hosting_domain_dns, middleware/arionRouteFeatures.js) ---
 router.post('/hosting/dns', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId;
@@ -6591,9 +6594,6 @@ router.post('/hosting/dns', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    if (!meetsMinTier(site.arion_tier, 'pro')) {
-      return res.status(402).json({ error: { code: 'TIER_LIMIT_REACHED', message: 'This feature requires pro tier or above', status: 402, upgrade: { current_tier: site.arion_tier, required_tier: 'pro' } } });
-    }
     if (!site.domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
 
     const result = await createDnsRecords(site.domain, records, !!overwrite);
@@ -6607,7 +6607,7 @@ router.post('/hosting/dns', async (req, res) => {
   }
 });
 
-// --- DELETE /arion/hosting/dns?siteId= — Delete DNS records (Pro+ tier) ---
+// --- DELETE /arion/hosting/dns?siteId= — Delete DNS records (feature arion_hosting_domain_dns, middleware/arionRouteFeatures.js) ---
 router.delete('/hosting/dns', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.query.siteId;
@@ -6620,9 +6620,6 @@ router.delete('/hosting/dns', async (req, res) => {
     const pool = await getServicesPool();
     const site = await getSiteForTenant(pool, tenantId, siteId);
     if (!site) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Site not found', status: 404 } });
-    if (!meetsMinTier(site.arion_tier, 'pro')) {
-      return res.status(402).json({ error: { code: 'TIER_LIMIT_REACHED', message: 'This feature requires pro tier or above', status: 402, upgrade: { current_tier: site.arion_tier, required_tier: 'pro' } } });
-    }
     if (!site.domain) return res.status(400).json({ error: { code: 'NO_DOMAIN', message: 'Site has no domain configured', status: 400 } });
 
     const result = await deleteDnsRecords(site.domain, records);

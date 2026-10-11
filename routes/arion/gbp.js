@@ -1,9 +1,13 @@
 import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
-import { meetsMinTier } from '../../lib/tierCheck.js';
 
 const router = Router({ mergeParams: true });
+
+// Which plan these routes need is the feature catalog's, not this file's:
+// every /sites/:siteId/gbp path is gated on its Business Profile key by
+// middleware/arionRouteFeatures.js (arion_business_overview / _reviews /
+// _locations), mounted in front of /arion.
 
 // GET / - GBP profile
 router.get('/', async (req, res) => {
@@ -28,14 +32,10 @@ router.get('/', async (req, res) => {
   }
 });
 
-// PATCH / - update GBP (Standard+ tier)
+// PATCH / - update GBP
 router.patch('/', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.params.siteId;
-
-  if (!meetsMinTier(req.site.tier, 'standard')) {
-    return res.status(403).json({ error: { code: 'TIER_REQUIRED', message: 'Standard tier or above is required for GBP updates', status: 403 } });
-  }
 
   const { business_name, description, phone, website, address, categories, hours } = req.body;
 
@@ -117,15 +117,11 @@ router.get('/reviews', async (req, res) => {
   }
 });
 
-// POST /reviews/:reviewId/reply - reply to review (Standard+ tier)
+// POST /reviews/:reviewId/reply - reply to review
 router.post('/reviews/:reviewId/reply', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.params.siteId;
   const reviewId = req.params.reviewId;
-
-  if (!meetsMinTier(req.site.tier, 'standard')) {
-    return res.status(403).json({ error: { code: 'TIER_REQUIRED', message: 'Standard tier or above is required to reply to reviews', status: 403 } });
-  }
 
   const { reply_text } = req.body;
   if (!reply_text || !reply_text.trim()) {

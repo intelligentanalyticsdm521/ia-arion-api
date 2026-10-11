@@ -8,8 +8,9 @@
  * arion.site.arion_tier is written raise-only (lib/purchaseTierSync.js), so
  * after a downgrade it still names the old, higher tier. Three places read it
  * on its own and kept handing a downgraded business its old features:
- *   - lib/gbpReplyRunner.js: Google review auto-replies (Pro), a public post on
- *     Google plus a model spend, every day;
+ *   - lib/gbpReplyRunner.js: Google review auto-replies, a public post on
+ *     Google plus a model spend, every day (since 11 Oct 2026 decided by the
+ *     feature catalog, arion_business_reviews, not by any tier read here);
  *   - routes/arion/pages.js: the AI page editor (Standard and above), a model
  *     spend, plus the AI offer and price list the editor shows;
  *   - routes/submit.js /public/provision-codes/redeem: the tier the IA plugin
@@ -25,7 +26,8 @@ import assert from 'node:assert/strict';
 import express from 'express';
 
 import { purchasedArionTier, effectiveArionTier, siteWithPurchasedTier } from '../lib/purchasedArionTier.js';
-import { runReviewReplyTick, REVIEW_RUN_WORDS } from '../lib/gbpReplyRunner.js';
+import { runReviewReplyTick, REVIEW_RUN_WORDS, REVIEW_REPLY_FEATURE } from '../lib/gbpReplyRunner.js';
+import { planSaying, entry, UNREACHABLE } from './helpers/feature-fakes.mjs';
 import { __test__ as pagesInternals, aiDeps } from '../routes/arion/pages.js';
 import submitRouter, { submitDeps } from '../routes/submit.js';
 import { fakeJobsOn, fakeBriefFor, brief } from './helpers/team-job-fakes.mjs';
@@ -61,7 +63,7 @@ test('purchasedArionTier: a decided tier stands; undecided, not owned and no tie
   assert.equal(site.arion_tier, 'pro', 'the row itself is not changed');
 });
 
-/* ── Google review auto-replies (Pro) ───────────────────────────────────── */
+/* ── Google review auto-replies (feature arion_business_reviews) ───────────────────────────────────── */
 
 function recordingPool(answer = () => null) {
   const statements = [];
@@ -89,7 +91,12 @@ function recordingPool(answer = () => null) {
 
 const ALL_ON = async (product, ids) => ({ product, owned: [...ids], off: [], unknown: [], undecided: false, error: null });
 
-function reviewWorld({ siteTier, getEntitlements }) {
+// MOVED TO THE FEATURE CATALOG (11 Oct 2026): the review job no longer reads a
+// tier at all, neither the payload's nor the raise-only site row's. It asks
+// features.arion_business_reviews with the intent 'send'; which tier that is
+// lives only in core.features. These run the real runner with platform-api
+// stubbed (test/helpers/feature-fakes.mjs).
+function reviewWorld({ siteTier = 'pro', getEntitlements }) {
   const posted = [];
   const drafted = [];
   const pool = recordingPool((text) => {
@@ -108,37 +115,41 @@ function reviewWorld({ siteTier, getEntitlements }) {
     jobsOn: fakeJobsOn({ [T1]: [['arion.review_replies', { mode: 'automatic', modeSetBy: 'Dana Ruiz', modeSetAt: '2026-10-08T12:00:00Z', vars: {} }]] }),
     briefFor: fakeBriefFor(brief({ brandVoice: 'Warm.' })),
     draft: async ({ review }) => { drafted.push(review.reviewId); return { ok: true, draft: `Thank you, ${review.reviewerName}.` }; },
-    arionTierFor: (tenantId) => purchasedArionTier(tenantId, { getEntitlements }),
+    getEntitlements,
   };
   return { pool, deps, posted, drafted };
 }
 
-test('review replies: site row says Pro but the business pays for Lite -> nothing written, nothing posted, the run says why', async () => {
-  const w = reviewWorld({ siteTier: 'pro', getEntitlements: arion('lite') });
+const reviews = (allowed, over = {}) => planSaying({ [REVIEW_REPLY_FEATURE]: entry(allowed, over) });
+
+test('review replies: the plan does not include them (allowed false) -> nothing written, nothing posted, the run names the plan', async () => {
+  const w = reviewWorld({ siteTier: 'pro', getEntitlements: reviews(false, { needs: 'ARION Pro' }) });
   const s = await runReviewReplyTick(w.pool, quiet, w.deps);
   assert.equal(w.drafted.length, 0, 'no model call');
   assert.equal(w.posted.length, 0, 'nothing posted on Google');
-  assert.equal(s.posted, 0);
   assert.equal(s.runs[0].outcome, 'blocked');
-  assert.equal(s.runs[0].words, REVIEW_RUN_WORDS.NOT_PRO);
+  assert.equal(s.runs[0].words, 'Google review replies are not in your plan. They need ARION Pro.');
 });
 
-test('review replies: the business pays for Pro -> answered as before (even when the site row is behind)', async () => {
-  const w = reviewWorld({ siteTier: 'lite', getEntitlements: arion('pro') });
+test('review replies: the plan includes them (allowed true) -> answered, whatever the site row says', async () => {
+  const w = reviewWorld({ siteTier: 'lite', getEntitlements: reviews(true) });
   const s = await runReviewReplyTick(w.pool, quiet, w.deps);
   assert.deepEqual(w.posted.map((p) => p.id), ['r5']);
   assert.equal(s.posted, 1);
 });
 
-test('review replies: subscription undecided or carrying no tier -> the site row decides, as before', async () => {
-  for (const getEntitlements of [unreachable, arion(null), arion('pro', { decided: false })]) {
-    const pro = reviewWorld({ siteTier: 'pro', getEntitlements });
-    await runReviewReplyTick(pro.pool, quiet, pro.deps);
-    assert.deepEqual(pro.posted.map((p) => p.id), ['r5'], 'Pro site row, no usable subscription tier: answered as before');
-    const lite = reviewWorld({ siteTier: 'lite', getEntitlements });
-    await runReviewReplyTick(lite.pool, quiet, lite.deps);
-    assert.equal(lite.posted.length, 0, 'Lite site row, no usable subscription tier: not answered, as before');
-  }
+test('review replies: undecided (allowed null), platform-api down, catalog unreadable or the key missing -> HELD: nothing written or posted', async () => {
+  const e = console.warn; console.warn = () => {};
+  try {
+    for (const getEntitlements of [reviews(null), UNREACHABLE, planSaying({}, { catalog: 'unreadable' }), planSaying({ [REVIEW_REPLY_FEATURE]: undefined })]) {
+      const w = reviewWorld({ siteTier: 'pro', getEntitlements });
+      const s = await runReviewReplyTick(w.pool, quiet, w.deps);
+      assert.equal(w.drafted.length, 0);
+      assert.equal(w.posted.length, 0);
+      assert.equal(s.runs[0].outcome, 'blocked');
+      assert.equal(s.runs[0].words, REVIEW_RUN_WORDS.PLAN_HELD);
+    }
+  } finally { console.warn = e; }
 });
 
 /* ── the AI page editor (Standard and above) ────────────────────────────── */

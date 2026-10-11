@@ -1,18 +1,14 @@
 import { Router } from 'express';
 import sql from 'mssql';
 import { getServicesPool } from '../../db/servicesPool.js';
-import { meetsMinTier } from '../../lib/tierCheck.js';
 
 const router = Router({ mergeParams: true });
 
-// GET /gsc - Google Search Console data (Standard+ tier)
+// GET /gsc - Google Search Console data (feature arion_search_performance,
+// gated by middleware/arionRouteFeatures.js)
 router.get('/gsc', async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.params.siteId;
-
-  if (!meetsMinTier(req.site.tier, 'standard')) {
-    return res.status(403).json({ error: { code: 'TIER_REQUIRED', message: 'Standard tier or above is required for GSC data', status: 403 } });
-  }
 
   const days = Math.min(90, Math.max(1, parseInt(req.query.days) || 30));
 

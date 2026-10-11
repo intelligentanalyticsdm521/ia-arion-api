@@ -6,12 +6,12 @@ import express from 'express';
 import { requireAuth } from './middleware/requireAuth.js';
 import { tenantResolution } from './middleware/tenantResolution.js';
 import { requireArionAccess } from './middleware/requireArionAccess.js';
-// ARION tier gate — "does your ARION tier include this feature?" (2026-08-06).
-// NOTE: lib/tierCheck.js requireTier() is NOT used: it reads req.siteRecord,
-// which nothing in this tree populates, so it would evaluate every request as
-// 'lite' and lock out every customer. requireArionTier resolves the tier from
-// arion.site.arion_tier / arion.tenant.plan instead.
-import { requireArionTier } from './middleware/requireArionTier.js';
+// ARION feature gate — "is this feature in your plan?" (11 Oct 2026). Each
+// tiered path names a catalog feature key (middleware/arionRouteFeatures.js
+// ROUTE_FEATURES); platform-api's payload.features[key] answers it. Replaces
+// the old per-path tier table (deleted 11 Oct 2026).
+import { arionRouteFeatures } from './middleware/arionRouteFeatures.js';
+import { checkFeatureKeysAtStartup } from './lib/featureKeys.js';
 // The signed-in ARION setup routes stop when ARION is not in the business's
 // subscription (11 Oct 2026); see the middleware's header.
 import { requireArionSubscription } from './middleware/requireArionSubscription.js';
@@ -200,7 +200,7 @@ app.use('/plugin', pluginRouter);
 // Must mount BEFORE the requireAuth-protected /arion namespace so first-match
 // routes /arion/sso/verify to ssoRouter instead of falling into requireAuth.
 app.use('/arion/sso', express.json(), ssoRouter);
-app.use('/arion', requireAuth, enforceEmergencyReadOnly(), enforceViewAsReadOnly(), tenantResolution, requireArionAccess, requireArionTier(), arionRouter);
+app.use('/arion', requireAuth, enforceEmergencyReadOnly(), enforceViewAsReadOnly(), tenantResolution, requireArionAccess, arionRouteFeatures(), arionRouter);
 // ARGUS AI credit endpoints — gated by standard tenant resolution, not
 // product-access (every tenant can see their balance even without ARION).
 app.use('/argus', requireAuth, enforceEmergencyReadOnly(), enforceViewAsReadOnly(), tenantResolution, argusRouter);
@@ -208,7 +208,7 @@ app.use('/argus', requireAuth, enforceEmergencyReadOnly(), enforceViewAsReadOnly
 // Brandon 2026-06-21 — ARION Platform Pulse (Trend+Intel)/2 per the canonical
 // equal-weight architecture. Read by platform-api to compose Business Pulse.
 // Requires ARION access since the cache lives in arion.platform_pulse_cache.
-app.use('/intelligence', requireAuth, enforceEmergencyReadOnly(), enforceViewAsReadOnly(), tenantResolution, requireArionAccess, requireArionTier(), intelligenceRouter);
+app.use('/intelligence', requireAuth, enforceEmergencyReadOnly(), enforceViewAsReadOnly(), tenantResolution, requireArionAccess, arionRouteFeatures(), intelligenceRouter);
 
 app.use((req, res) => res.status(404).json({ error: 'not_found', method: req.method, path: req.path }));
 
@@ -245,4 +245,6 @@ app.listen(port, () => {
   console.log('ARION API listening on http://localhost:' + port);
   console.log('[CORS] allowedOrigins: ' + allowedOrigins.join(', '));
   startAuditSweep(); // website checks a restart dropped are started again
+  // Once: every feature key this app gates on must be in the catalog.
+  checkFeatureKeysAtStartup().catch((e) => console.warn('[featureKeys] startup check failed:', e.message));
 });

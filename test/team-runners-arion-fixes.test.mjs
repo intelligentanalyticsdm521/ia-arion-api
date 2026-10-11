@@ -18,7 +18,7 @@ import { mayPublishTo, publishApproved, NOT_LIVE_PUBLISH_WORDS } from '../lib/co
 import { handoffSocial } from '../lib/contentAgent/socialHandoff.js';
 import { businessTimeZone, whenWords } from '../lib/businessTimeZone.js';
 import {
-  runReviewReplyTick, REVIEW_RUN_WORDS, REVIEW_REPLY_ACTION, runOutcome,
+  runReviewReplyTick, REVIEW_RUN_WORDS, REVIEW_REPLY_ACTION, runOutcome, notInPlanWords,
 } from '../lib/gbpReplyRunner.js';
 import { draftReviewReply } from '../lib/gbpAiReply.js';
 import { AGENT_ACTIONS } from '../lib/argus/suiteCeiling.js';
@@ -27,6 +27,7 @@ import { makeRunHandler, ownRunSummary } from '../routes/arion/agents.js';
 import { normaliseContentRow, normaliseReviewReplyRow } from '../lib/agents/activity.js';
 import { normaliseReviewRunRow } from '../lib/agents/runs.js';
 import { STARTERS, fakeJobsOn, fakeBriefFor, brief } from './helpers/team-job-fakes.mjs';
+import { ALLOW_ALL, planSaying, entry } from './helpers/feature-fakes.mjs';
 
 const C = JSON.parse(fs.readFileSync(new URL('./fixtures/agent-jobs-contract.json', import.meta.url), 'utf8'));
 const T1 = 'a1111111-1111-4111-8111-111111111111';
@@ -257,7 +258,7 @@ test('a review job whose description adds a check this runner cannot run fails c
   const pool = recordingPool((text) => (/FROM arion\.site\s+WHERE tenant_id IN/.test(text)
     ? [{ tenant_id: T1, site_id: 's1', arion_tier: 'pro', gbp_location_name: 'l', gbp_oauth_token_ref: 'r' }] : null));
   const s = await runReviewReplyTick(pool, quiet, {
-    ownership: ALL_ON, jobsOn: fakeJobsOn({ [T1]: [['arion.review_replies', { def }]] }),
+    ownership: ALL_ON, getEntitlements: ALLOW_ALL, jobsOn: fakeJobsOn({ [T1]: [['arion.review_replies', { def }]] }),
     briefFor: fakeBriefFor(brief({})), api: { fetchReviews: async () => { throw new Error('must not read'); } },
     draft: async () => { drafted.push(1); return { ok: true, draft: 'x' }; },
   });
@@ -383,7 +384,7 @@ function reviewPool(extra = () => null) {
 }
 const REVIEWS = [{ reviewId: 'r5', reviewerName: 'Lee', starRating: 5, comment: 'Great.' }, { reviewId: 'r4', reviewerName: 'Kim', starRating: 4, comment: 'Good.' }];
 const reviewDeps = (over = {}) => ({
-  ownership: ALL_ON,
+  ownership: ALL_ON, getEntitlements: ALLOW_ALL,
   jobsOn: fakeJobsOn({ [T1]: ['arion.review_replies'] }),
   briefFor: fakeBriefFor(brief({})),
   api: { fetchReviews: async () => ({ reviews: REVIEWS }), replyToReview: async () => ({ reply: {} }) },
@@ -456,17 +457,19 @@ test('what the run spent is written on its row (the governance cost column)', as
 
 /* ══ 5. review replies: what History and Run it now say ════════════════ */
 
-test('a business that is not connected, or below Pro, gets a blocked run with the reason', async () => {
+test('a business that is not connected, or whose plan does not include review replies, gets a blocked run with the reason', async () => {
   const none = recordingPool();
   const s1 = await runReviewReplyTick(none, quiet, reviewDeps());
   assert.equal(s1.runs[0].outcome, 'blocked');
   assert.equal(s1.runs[0].words, REVIEW_RUN_WORDS.NOT_CONNECTED);
-  const basic = recordingPool((text) => (/FROM arion\.site\s+WHERE tenant_id IN/.test(text)
-    ? [{ tenant_id: T1, site_id: 's1', arion_tier: 'basic', gbp_location_name: 'l', gbp_oauth_token_ref: 'r' }] : null));
-  const s2 = await runReviewReplyTick(basic, quiet, reviewDeps());
-  assert.equal(s2.runs[0].words, REVIEW_RUN_WORDS.NOT_PRO);
+  const basic = reviewPool();
+  const s2 = await runReviewReplyTick(basic, quiet, reviewDeps({
+    getEntitlements: planSaying({ arion_business_reviews: entry(false, { needs: 'ARION Pro' }) }),
+  }));
+  assert.equal(s2.runs[0].words, notInPlanWords('ARION Pro'));
+  assert.equal(s2.runs[0].words, 'Google review replies are not in your plan. They need ARION Pro.');
   const close = basic.statements.find((x) => /UPDATE arion\.gbp_reply_run/.test(x.text));
-  assert.deepEqual(JSON.parse(close.inputs.notes), [REVIEW_RUN_WORDS.NOT_PRO]);
+  assert.deepEqual(JSON.parse(close.inputs.notes), [notInPlanWords('ARION Pro')]);
 });
 
 test('Run it now answers 409 with the reason when the run could not start', async () => {

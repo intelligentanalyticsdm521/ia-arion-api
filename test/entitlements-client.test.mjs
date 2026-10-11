@@ -1,4 +1,4 @@
-// arion-api's thin entitlement client, SEAM-3-B, and the ARION tier gate.
+// arion-api's thin entitlement client and SEAM-3-B.
 //
 // arion was an EIGHTH source for "does this business have X?" that the seams
 // audit's §3 table does not list: middleware/requireArionTier.js resolved the
@@ -34,8 +34,6 @@ const {
   getEntitlements, clearEntitlementCache, productOf, addonOf, mayUseFeature, maySpend,
 } = await import("../lib/entitlements.js");
 const { RANK, rankOf, tierMeets } = await import("../lib/entitlementsRule.js");
-const { higherTier, resolveArionTier, requireArionTier } =
-  await import("../middleware/requireArionTier.js");
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CASES = JSON.parse(fs.readFileSync(path.join(ROOT, "test", "fixtures", "entitlement-rule-cases.json"), "utf8"));
@@ -106,90 +104,12 @@ test("an unconfigured or unreachable service yields null — features open, spen
   clearEntitlementCache();
 });
 
-/* ── the ARION tier gate ──────────────────────────────────────────────────── */
-
-const TENANT_ID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
-
-/** A services pool that returns one arion.site / arion.tenant row. */
-function poolWith(row, { throws = false } = {}) {
-  return {
-    request() {
-      const r = {
-        input() { return r; },
-        async query() {
-          if (throws) throw new Error("services db down");
-          return { recordset: row ? [row] : [] };
-        },
-      };
-      return r;
-    },
-  };
-}
-
-function reqFor() {
-  return { tenant: { tenantId: TENANT_ID }, originalUrl: "/arion/staging/publish", path: "/arion/staging/publish" };
-}
-
-const entSaying = (tier, decided = true) => async () => ({
-  decided, products: { arion: { owned: true, tier, tier_source: "stripe", decided } }, addons: {},
-});
-
-test("higherTier never lets either source demote the other", () => {
-  assert.equal(higherTier("pro", "standard"), "pro");
-  assert.equal(higherTier("standard", "pro"), "pro");
-  assert.equal(higherTier(null, "pro"), "pro");
-  assert.equal(higherTier("pro", null), "pro");
-  assert.equal(higherTier(null, null), null);
-});
-
-test("a business that bought Pro is Pro here even when the site row still says standard", async () => {
-  // This is the disagreement the pack removes: Portal and LUMEN said Pro, this
-  // gate said standard, and /staging 402'd for a paying customer.
-  const req = reqFor();
-  const tier = await resolveArionTier(req, {
-    getEntitlements: entSaying("pro"),
-    // eslint-disable-next-line no-unused-vars
-  });
-  assert.equal(tier, "pro");
-});
-
-test("an UNDECIDED entitlement never demotes the site row", async () => {
-  const req = reqFor();
-  const tier = await resolveArionTier(req, { getEntitlements: entSaying("lite", false) });
-  assert.equal(tier, null, "undecided is not a tier; the site row answers alone (and here there is none)");
-});
-
-test("the gate still fails OPEN when nothing resolves, and only denies a resolved shortfall", async () => {
-  const calls = [];
-  const res = { status(c) { calls.push(c); return { json() { return this; } }; } };
-
-  let nexted = false;
-  await requireArionTier({ getEntitlements: async () => null })(
-    { ...reqFor() }, res, () => { nexted = true; },
-  );
-  assert.equal(nexted, true, "nothing resolved → allow, never 402");
-  assert.deepEqual(calls, []);
-
-  nexted = false;
-  await requireArionTier({ getEntitlements: entSaying("standard") })(
-    { ...reqFor(), _arionTier: undefined }, res, () => { nexted = true; },
-  );
-  // /staging needs Pro and the business positively resolved to Standard.
-  assert.equal(nexted, false);
-  assert.deepEqual(calls, [402]);
-});
-
-test("an unlisted path is never gated at all, and never asks the service", async () => {
-  let asked = 0;
-  let nexted = false;
-  await requireArionTier({ getEntitlements: async () => { asked++; return null; } })(
-    { tenant: { tenantId: TENANT_ID }, originalUrl: "/arion/pages", path: "/arion/pages" },
-    { status() { throw new Error("must not respond"); } },
-    () => { nexted = true; },
-  );
-  assert.equal(nexted, true);
-  assert.equal(asked, 0);
-});
+/* ── the ARION feature gate ───────────────────────────────────────────────
+ * middleware/requireArionTier.js (and its site-row fallback, higherTier,
+ * resolveArionTier) was deleted on 11 Oct 2026: a route names a catalog
+ * feature key and platform-api's payload.features[key] answers it, tier and
+ * all. Those cases now live in test/require-feature.test.mjs and
+ * test/arion-route-features.test.mjs. */
 
 test("the client is thin — no Stripe, no tier SQL of its own", () => {
   const src = fs.readFileSync(path.join(ROOT, "lib", "entitlements.js"), "utf8")
@@ -200,51 +120,6 @@ test("the client is thin — no Stripe, no tier SQL of its own", () => {
   assert.match(src, /\/internal\/entitlements\//);
   assert.match(src, /PLATFORM_API_URL/);
   assert.match(src, /PLATFORM_INTERNAL_TOKEN/);
-});
-
-/* ── F4 (2026-10-07): a decided Stripe tier stands, even when it is LOWER ─── */
-
-const sitePool = (arion_tier) => async () => ({
-  request() {
-    const rq = { input() { return rq; }, async query() { return { recordset: [{ arion_tier, plan: null }] }; } };
-    return rq;
-  },
-});
-const entFrom = (tier, tier_source, decided = true) => async () => ({
-  decided, products: { arion: { owned: true, tier, tier_source, decided } }, addons: {},
-});
-
-test("F4 decided Stripe 'standard' with the site row at 'pro' gives standard — an ARION downgrade lowers ARION's tier", async () => {
-  const tier = await resolveArionTier(reqFor(), { getEntitlements: entFrom("standard", "stripe"), getServicesPool: sitePool("pro") });
-  assert.equal(tier, "standard");
-});
-
-test("F4 undecided gives the site row", async () => {
-  const tier = await resolveArionTier(reqFor(), { getEntitlements: entFrom("standard", "stripe", false), getServicesPool: sitePool("pro") });
-  assert.equal(tier, "pro");
-});
-
-// CHANGED 2026-10-11 (Brandon: "it's by their subscription"): a decided, real
-// tier from the payload stands from ANY source. Until then a non-Stripe tier
-// (comped, set by hand on core.tenant_services) was combined with the site row
-// as "the higher of", so a site row stamped above what the business pays for
-// kept unlocking features. The site row is now only the fallback.
-test("by the subscription: a tier set on core.tenant_services stands, even below the site row", async () => {
-  const tier = await resolveArionTier(reqFor(), { getEntitlements: entFrom("standard", "core.tenant_services"), getServicesPool: sitePool("pro") });
-  assert.equal(tier, "standard");
-});
-
-test("F12 a COMPED ARION is the comped tier platform-api serves; the site row neither raises nor lowers it", async () => {
-  // platform-api serves a comped row at the higher of the comped tier and any
-  // live Stripe tier, with tier_source 'comped' (platform-api b4495d1), so the
-  // comp is already protected there. Here that tier simply stands.
-  assert.equal(await resolveArionTier(reqFor(), { getEntitlements: entFrom("business", "comped"), getServicesPool: sitePool("lite") }), "business");
-  assert.equal(await resolveArionTier(reqFor(), { getEntitlements: entFrom("standard", "comped"), getServicesPool: sitePool("pro") }), "standard");
-});
-
-test("F4 a Stripe tier word that is not a tier ('website') never demotes: the site row is the fallback", async () => {
-  const tier = await resolveArionTier(reqFor(), { getEntitlements: entFrom("website", "stripe"), getServicesPool: sitePool("pro") });
-  assert.equal(tier, "pro");
 });
 
 test("migration 041: a paid ARION grant is billing_source 'stripe'; the founder's onboard-existing is 'manual'", () => {
