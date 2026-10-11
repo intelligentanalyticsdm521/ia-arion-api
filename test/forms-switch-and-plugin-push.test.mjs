@@ -260,12 +260,12 @@ test('SPARK undecided (platform-api could not say) -> false, never true', async 
   }
 });
 
-test('SPARK owned but the last form switched off -> false', async () => {
+test('SPARK owned but the last form switched off -> capture stays ON (SPARK features follow SPARK, the form rule lives server-side)', async () => {
   const db = fakeDb({ configs: [OUTCOMES()] });
   wire(db);
   const r = await post({ form_id: 'contact-7', is_active: false });
-  assert.equal(pushes[0].body.ia_spark_capture, false);
-  assert.equal(r.body.data.website.capture_reason, 'no_form_switched_on');
+  assert.equal(pushes[0].body.ia_spark_capture, true);
+  assert.equal(r.body.data.website.capture_reason, 'on_no_form_switched_on_yet');
 });
 
 test('a downgrade reaches the site: ARION lite is pushed even when the site held pro', async () => {
@@ -326,7 +326,9 @@ test('pluginTierFrom / sparkCaptureFrom / subscriptionConfigBody', () => {
   assert.deepEqual(pluginTierFrom(payloadOf({ arion: node(false, 'pro') })), { tier: null, reason: 'arion_not_owned' },
     'a tier word left on a node ARION is not owned for is never pushed');
   assert.equal(sparkCaptureFrom(payloadOf(), 2).capture, true);
-  assert.equal(sparkCaptureFrom(payloadOf(), 0).capture, false);
+  assert.equal(sparkCaptureFrom(payloadOf(), 0).capture, true, 'SPARK owned with no form switched on yet still keeps its SPARK features on the site');
+  assert.equal(sparkCaptureFrom(payloadOf(), 0).reason, 'on_no_form_switched_on_yet');
+  assert.equal(sparkCaptureFrom(payloadOf({ spark: node(false) }), 2).capture, false);
   assert.equal(sparkCaptureFrom(payloadOf({ arion: node(false) }), 2).capture, false);
   assert.equal(sparkCaptureFrom(payloadOf({ arion: node(true, 'pro', false) }), 2).capture, true,
     'ARION undecided does not take SPARK capture away');
@@ -401,9 +403,9 @@ test('the daily tick: one subscription answer per business, every connected site
   assert.equal(summary.sites, 2);
   assert.equal(summary.pushed, 2);
   assert.equal(summary.tier_pushed, 2);
-  assert.equal(summary.capture_on, 1, 'only the site with a form switched on captures');
+  assert.equal(summary.capture_on, 2, 'every site of a business with SPARK captures; the per-form rule is enforced where the inquiry crosses into SPARK');
   assert.deepEqual(bodies[0], [SITE, { ia_spark_capture: true, ia_tier: 'lite' }]);
-  assert.deepEqual(bodies[1][1], { ia_spark_capture: false, ia_tier: 'lite' });
+  assert.deepEqual(bodies[1][1], { ia_spark_capture: true, ia_tier: 'lite' });
 });
 
 /* ── the wire ──────────────────────────────────────────────────────────── */
@@ -436,7 +438,7 @@ test('a NEW form saved with outcomes only (no is_active) is OFF: saving outcomes
   assert.equal(Number(db.configs[0].is_active), 0, 'off until the business turns it on');
   assert.equal(db.configs[0].apply_tags, '["Quote"]');
   assert.equal(r.body.data.is_active, false);
-  assert.equal(pushes[0].body.ia_spark_capture, false, 'the site is not told to capture');
+  assert.equal(pushes[0].body.ia_spark_capture, true, 'the site keeps its SPARK features (SPARK is owned); this form stays off for delivery because its row is off');
   assert.equal(configWrite({ form_id: 'x' }).isActive, 0);
 });
 

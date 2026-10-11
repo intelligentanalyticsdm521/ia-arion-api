@@ -94,6 +94,24 @@ router.post('/booking-button-sync-tick', requireIngestKey, async (req, res) => {
   }
 });
 
+// POST /internal/subscription-config-tick — pushes each connected website's
+// subscription state to its plugin (2026-10-11): ia_spark_capture (the SPARK
+// identify call, pixel and chat tag run only for a business with SPARK) and
+// ia_tier (the ARION tier the business pays for), so a cancelled SPARK or a
+// downgrade reaches the site the same day. Rung daily by the arion-func timer
+// (subscriptionConfigSync.js); logic in lib/websiteBuilder/subscriptionConfig.js.
+router.post('/subscription-config-tick', requireIngestKey, async (req, res) => {
+  try {
+    const pool = await getServicesPool();
+    const { runSubscriptionConfigTick } = await import('../lib/websiteBuilder/subscriptionConfig.js');
+    const summary = await runSubscriptionConfigTick(pool, (m) => console.log(`[subscription-config-sync] ${m}`));
+    res.json({ ok: true, summary });
+  } catch (err) {
+    console.error('[internal:subscription-config-tick]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // POST /internal/insights-snapshot-tick — monthly IA Insights refresh,
 // triggered by the arion-func timer on the 1st (same thin-scheduler split as
 // gbp-auto-reply-tick). Aggregates SE Ranking position history + pulls the
