@@ -163,8 +163,16 @@ router.get('/seen', async (req, res) => {
 // 11 Oct 2026 every column absent from the body was written NULL on an
 // existing row, so flipping the switch erased the form's tags, list and
 // field map. Now a key that is absent keeps the stored value; a key that is
-// present (even as null) is written. A new row takes the old defaults
-// (form_type 'contact', switched on unless is_active is false).
+// present (even as null) is written. A new row is form_type 'contact' and
+// OFF unless the body says is_active true: the row's is_active IS "Send this
+// form to my SPARK inbox", which stays off until the business turns it on, so
+// saving a form's outcomes first never switches its SPARK delivery on.
+//
+// A body may send field_map and apply_tags back exactly as GET /config gave
+// them (JSON text) or parsed (an object, an array). Both are stored the same
+// way, so "read the row, flip is_active, post it back" never double-encodes
+// the field map or wipes the tags. A value that is neither is refused (400)
+// and nothing is written.
 //
 // After the save the site is told what it may now do (ia_spark_capture and
 // the ARION tier; lib/websiteBuilder/subscriptionConfig.js). The save never
@@ -183,29 +191,60 @@ export function bitFrom(value) {
  * Which columns this body sets, and to what. Pure, so the "a switch flip
  * never erases the outcomes" rule is testable on its own.
  */
+/** A stored JSON value read back: an object or array as it is, JSON text parsed. */
+function parsedJson(value) {
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return undefined; }
+}
+
+/** field_map -> { ok, value }: null clears it; an object (or its JSON text) is stored. */
+export function fieldMapFrom(value) {
+  if (value === null || value === undefined || value === '') return { ok: true, value: null };
+  const v = parsedJson(value);
+  if (v && typeof v === 'object' && !Array.isArray(v)) return { ok: true, value: JSON.stringify(v) };
+  return { ok: false, value: null };
+}
+
+/** apply_tags -> { ok, value }: null clears them; an array of names (or its JSON text) is stored. */
+export function tagsFrom(value) {
+  if (value === null || value === undefined || value === '') return { ok: true, value: null };
+  const v = parsedJson(value);
+  if (Array.isArray(v)) {
+    return { ok: true, value: JSON.stringify(v.map(String).map(t => t.trim()).filter(Boolean)) };
+  }
+  return { ok: false, value: null };
+}
+
 export function configWrite(body) {
   const b = body && typeof body === 'object' ? body : {};
   const active = bitFrom(b.is_active);
+  const optin = bitFrom(b.marketing_optin);
+  const fieldMap = has(b, 'field_map') ? fieldMapFrom(b.field_map) : { ok: true, value: null };
+  const tags = has(b, 'apply_tags') ? tagsFrom(b.apply_tags) : { ok: true, value: null };
+  const invalid = [];
+  if (!fieldMap.ok) invalid.push('field_map');
+  if (!tags.ok) invalid.push('apply_tags');
   return {
+    invalid,
     setFormName: has(b, 'form_name'),
     formName: b.form_name ? String(b.form_name) : null,
     setFormType: has(b, 'form_type') && !!b.form_type,
     formType: b.form_type ? String(b.form_type) : 'contact',
     setFieldMap: has(b, 'field_map'),
-    fieldMap: b.field_map ? JSON.stringify(b.field_map) : null,
+    fieldMap: fieldMap.value,
     setIsActive: active !== null,
-    isActive: active === false ? 0 : 1,
+    // A new row is OFF unless the body turns it on (see the note above).
+    isActive: active === true ? 1 : 0,
     // What should HAPPEN to whoever fills this form in. Tags are stored by
     // NAME so the config survives a tag being merged or recreated, and reads
     // as what it means rather than as an id nobody can interpret.
     setApplyTags: has(b, 'apply_tags'),
-    applyTags: Array.isArray(b.apply_tags)
-      ? JSON.stringify(b.apply_tags.map(String).map(t => t.trim()).filter(Boolean)) : null,
+    applyTags: tags.value,
     setAddToList: has(b, 'add_to_list_id'),
-    addToListId: b.add_to_list_id !== null && b.add_to_list_id !== '' && Number.isFinite(Number(b.add_to_list_id))
-      ? Number(b.add_to_list_id) : null,
+    addToListId: b.add_to_list_id !== null && b.add_to_list_id !== '' && typeof b.add_to_list_id !== 'boolean'
+      && Number.isFinite(Number(b.add_to_list_id)) ? Number(b.add_to_list_id) : null,
     setMarketingOptin: has(b, 'marketing_optin'),
-    marketingOptin: b.marketing_optin ? 1 : 0,
+    marketingOptin: optin === null ? (b.marketing_optin ? 1 : 0) : (optin ? 1 : 0),
   };
 }
 
@@ -274,6 +313,9 @@ router.post('/config', async (req, res) => {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'is_active must be true or false', status: 400 } });
   }
   const w = configWrite(body);
+  if (w.invalid.length) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: `${w.invalid.join(' and ')} could not be read, so nothing was saved`, status: 400 } });
+  }
   try {
     const pool = await formsDeps.getServicesPool();
     const result = await pool.request()
@@ -323,7 +365,7 @@ router.delete('/submissions/:submissionId', async (req, res) => {
   const tenantId = req.tenant?.tenantId;
   const siteId = req.params.siteId;
   const submissionId = req.params.submissionId;
-  if (!tenantId) return res.status(401).json({ error: { code: 'NO_TENANT', message: 'tenant header missing' } });
+  if (!tenantId) return res.status(401).json({ error: { code: 'BUSINESS_NOT_RESOLVED', message: "We couldn't tell which business you're working in. Reload the page, or sign out and sign in again." } });
   try {
     const pool = await formsDeps.getServicesPool();
     const r = await pool.request()
@@ -352,7 +394,7 @@ router.post('/submissions/bulk-delete', async (req, res) => {
   const tenantId = req.tenant?.tenantId;
   const siteId = req.params.siteId;
   const ids = Array.isArray(req.body?.submission_ids) ? req.body.submission_ids : [];
-  if (!tenantId) return res.status(401).json({ error: { code: 'NO_TENANT', message: 'tenant header missing' } });
+  if (!tenantId) return res.status(401).json({ error: { code: 'BUSINESS_NOT_RESOLVED', message: "We couldn't tell which business you're working in. Reload the page, or sign out and sign in again." } });
   if (!ids.length) return res.json({ data: { deleted: 0 } });
   try {
     const pool = await formsDeps.getServicesPool();

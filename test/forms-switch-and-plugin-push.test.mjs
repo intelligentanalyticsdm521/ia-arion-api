@@ -424,3 +424,115 @@ test('pushSubscriptionConfig posts both options to the plugin route with the sit
   await pushSubscriptionConfig(SITE_ROW, { ia_spark_capture: 'yes' }, { fetchImpl });
   assert.deepEqual(JSON.parse(seen[1].init.body), { ia_spark_capture: false }, 'only a real true is true; no tier key when none');
 });
+
+/* ── skeptic pass (11 Oct 2026): holes found after 09bcbdc ─────────────── */
+
+test('a NEW form saved with outcomes only (no is_active) is OFF: saving outcomes never turns SPARK delivery on', async () => {
+  const db = fakeDb();
+  wire(db);
+  const r = await post({ form_id: 'wpforms-30', apply_tags: ['Quote'], add_to_list_id: 7 });
+  assert.equal(r.status, 200);
+  assert.equal(db.configs.length, 1);
+  assert.equal(Number(db.configs[0].is_active), 0, 'off until the business turns it on');
+  assert.equal(db.configs[0].apply_tags, '["Quote"]');
+  assert.equal(r.body.data.is_active, false);
+  assert.equal(pushes[0].body.ia_spark_capture, false, 'the site is not told to capture');
+  assert.equal(configWrite({ form_id: 'x' }).isActive, 0);
+});
+
+test('the row read from GET /config, posted back with is_active flipped, keeps the field map and tags exactly', async () => {
+  const db = fakeDb({ configs: [OUTCOMES()] });
+  wire(db);
+  const echoed = { ...OUTCOMES(), is_active: false };
+  delete echoed.tenant_id; delete echoed.site_id;
+  const r = await post(echoed);
+  assert.equal(r.status, 200);
+  const row = db.configs[0];
+  assert.equal(Number(row.is_active), 0);
+  assert.equal(row.field_map, OUTCOMES().field_map, 'JSON text is stored as the same JSON, not encoded twice');
+  assert.equal(row.apply_tags, OUTCOMES().apply_tags, 'JSON text tags are kept, not wiped');
+  assert.equal(row.add_to_list_id, 42);
+  assert.equal(Number(row.marketing_optin), 1);
+});
+
+test('field_map or apply_tags that cannot be read is refused and nothing is written', async () => {
+  const db = fakeDb({ configs: [OUTCOMES()] });
+  wire(db);
+  for (const bad of [{ apply_tags: 'Newsletter' }, { apply_tags: { a: 1 } }, { field_map: 'not json' }, { field_map: [1, 2] }]) {
+    const r = await post({ form_id: 'contact-7', is_active: false, ...bad });
+    assert.equal(r.status, 400, JSON.stringify(bad));
+    assert.doesNotMatch(r.body.error.message, /tenant/i);
+  }
+  assert.deepEqual(db.configs[0], OUTCOMES(), 'the stored row is untouched');
+  assert.equal(pushes.length, 0);
+});
+
+test('marketing_optin "false" is off, not on', () => {
+  assert.equal(configWrite({ form_id: 'x', marketing_optin: 'false' }).marketingOptin, 0);
+  assert.equal(configWrite({ form_id: 'x', marketing_optin: true }).marketingOptin, 1);
+});
+
+test('a plugin on the first 2.0.3 build (no /subscription-config) still gets both options through /site/options', async () => {
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push({ url, body: JSON.parse(init.body) });
+    if (/\/subscription-config\?/.test(url)) return { ok: false, status: 404, text: async () => '{"code":"rest_no_route"}' };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, tier: 'lite', spark_capture: false, plugin_version: '2.0.3' }) };
+  };
+  const r = await pushSubscriptionConfig(SITE_ROW, { ia_spark_capture: false, ia_tier: 'lite' }, { fetchImpl });
+  assert.equal(r.ok, true);
+  assert.equal(r.via, 'site/options');
+  assert.match(seen[1].url, /\/wp-json\/intelligent-analytics\/v1\/site\/options\?/);
+  assert.deepEqual(seen[1].body, { ia_spark_capture: false, ia_tier: 'lite' });
+  assert.equal(r.data.ia_spark_capture, false, 'spark_capture read back under the /subscription-config name');
+  assert.equal(r.data.ia_tier, 'lite');
+
+  // And through the real decision: a site that read back a different capture is not_held.
+  const db = fakeDb({ configs: [OUTCOMES()] });
+  const lying = async (url) => (/\/subscription-config\?/.test(url)
+    ? { ok: false, status: 404, text: async () => '' }
+    : { ok: true, status: 200, text: async () => JSON.stringify({ tier: 'pro', spark_capture: false }) });
+  const out = await pushSiteSubscriptionConfig(db, SITE_ROW, {
+    payload: payloadOf(), log: () => {},
+    push: (s, body, o) => pushSubscriptionConfig(s, body, { ...o, fetchImpl: lying }),
+  });
+  assert.deepEqual(out.body, { ia_spark_capture: true, ia_tier: 'pro' });
+  assert.equal(out.outcome, 'not_held');
+});
+
+test('a plugin older than 2.0.3 (refuses both routes) is plugin_too_old, not a fault', async () => {
+  for (const second of [
+    { ok: false, status: 404, text: async () => '' },
+    { ok: false, status: 400, text: async () => JSON.stringify({ error: 'We do not set "ia_spark_capture" on your website.', code: 'not_in_whitelist' }) },
+  ]) {
+    const fetchImpl = async (url) => (/\/subscription-config\?/.test(url) ? { ok: false, status: 404, text: async () => '' } : second);
+    const db = fakeDb();
+    const logged = [];
+    const out = await pushSiteSubscriptionConfig(db, SITE_ROW, {
+      payload: payloadOf(), log: (m) => logged.push(m),
+      push: (s, body, o) => pushSubscriptionConfig(s, body, { ...o, fetchImpl }),
+    });
+    assert.equal(out.outcome, 'plugin_too_old');
+    assert.ok(!logged.some((l) => /push /.test(l)), logged.join('\n'));
+  }
+});
+
+test('the delete routes never say "tenant" to a business', async () => {
+  const app = express();
+  app.use(express.json());
+  app.use('/arion/sites/:siteId/forms', (req, _res, next) => { req.tenant = {}; next(); }, formsRouter);
+  const srv = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+  try {
+    const at = `http://127.0.0.1:${srv.address().port}/arion/sites/${SITE}/forms`;
+    const a = await fetch(`${at}/submissions/abc`, { method: 'DELETE' });
+    const b = await fetch(`${at}/submissions/bulk-delete`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"ids":["a"]}' });
+    for (const res of [a, b]) {
+      assert.equal(res.status, 401);
+      const text = await res.text();
+      assert.doesNotMatch(text, /tenant/i, text);
+      assert.match(text, /which business/);
+    }
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+  }
+});
