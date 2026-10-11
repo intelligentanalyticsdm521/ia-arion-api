@@ -1295,10 +1295,11 @@ router.get('/section-library', async (req, res) => {
     const bookingHref = String(brand.booking_href || '');
 
     // Keep the site-wide "Book now" button in step with the booking page's
-    // real state, without a timer and without a second Portal surface. Fire
-    // and forget, throttled, and it can never affect this response — the
-    // editor must not fail because a config push did.
-    syncBookingButton(site, bookingHref);
+    // real state. Fire and forget, throttled, and it can never affect this
+    // response — the editor must not fail because a config push did. Only a
+    // DECIDED answer is pushed: '' because OLIVER ended takes the button off,
+    // '' because platform-api did not answer leaves it alone.
+    syncBookingButton(site, bookingHref, { decided: brand.booking_href_decided === true });
 
     return res.json({
       data: {
@@ -1401,9 +1402,11 @@ async function primaryMenuItems(site) {
 const BOOKING_PUSH_TTL_MS = 10 * 60 * 1000;
 const bookingPushed = new Map(); // siteId -> { href, at }
 
-function syncBookingButton(site, bookingHref) {
+function syncBookingButton(site, bookingHref, { decided = true } = {}) {
   const siteId = String(site?.site_id || '');
   if (!siteId) return;
+  // "We could not tell" is never pushed (brandContext.resolveBookingTarget).
+  if (decided !== true) return;
   const last = bookingPushed.get(siteId);
   const now = Date.now();
   if (last && last.href === bookingHref && (now - last.at) < BOOKING_PUSH_TTL_MS) return;

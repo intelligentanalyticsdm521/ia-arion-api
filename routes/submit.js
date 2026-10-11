@@ -9,7 +9,7 @@ import { triggerOnboardingPageSpeed, getSiteForTenant } from './arion.js';
 import { plugin as pluginApiFull } from '../lib/pluginClient.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
 import { upsertSparkContact } from '../lib/sparkContactSync.js';
-import { resolveBookingHref } from '../lib/websiteBuilder/brandContext.js';
+import { resolveBookingTarget } from '../lib/websiteBuilder/brandContext.js';
 import { getEntitlements } from '../lib/entitlements.js';
 import { requireSiteArion } from '../middleware/requireSiteArion.js';
 import { entitlementsFor, loadFormConfig, productState, sparkCaptureDecision } from '../lib/siteCaptureGate.js';
@@ -25,6 +25,8 @@ export const submitDeps = {
   getEntitlements,
   upsertSparkContact,
   firePlatformEvent,
+  resolveBookingTarget,
+  redeemProvisionCode,
 };
 
 // requireSiteToken first (it finds the site and its business), then the ARION
@@ -683,8 +685,8 @@ router.post('/public/provision-codes/redeem', async (req, res) => {
   }
 
   try {
-    const pool = await getServicesPool();
-    const redemption = await redeemProvisionCode(pool, { code, fromUrl: site_url });
+    const pool = await submitDeps.getServicesPool();
+    const redemption = await submitDeps.redeemProvisionCode(pool, { code, fromUrl: site_url });
 
     if (!redemption.ok) {
       const statusMap = { invalid_format: 400, not_found: 404, already_redeemed: 410, expired: 410, revoked: 403 };
@@ -732,7 +734,7 @@ router.post('/public/provision-codes/redeem', async (req, res) => {
 
     // Fire provisioning event so platform event log captures this
     try {
-      await firePlatformEvent(pool, {
+      await submitDeps.firePlatformEvent(pool, {
         tenantId: tenant_id,
         eventType: 'arion.plugin.provisioned',
         sourceProduct: 'ia-plugin',
@@ -750,7 +752,7 @@ router.post('/public/provision-codes/redeem', async (req, res) => {
     (async () => {
       try {
         // Re-fetch site with token so we can call the plugin back
-        const p = await getServicesPool();
+        const p = await submitDeps.getServicesPool();
         const siteWithToken = await getSiteForTenant(p, tenant_id, site_id);
         if (siteWithToken) {
           // Apply defaults — wait ~5s for plugin to be fully initialized
@@ -783,10 +785,13 @@ router.post('/public/provision-codes/redeem', async (req, res) => {
       .query('SELECT arion_tier, seo_addon_tier FROM arion.site WHERE site_id = @siteId');
 
     // Ops B6 — where the site's "Book now" button should point, if the
-    // business has an online booking page. Always present in the response,
-    // '' included, because an empty value takes a stale button back off.
-    // Never fatal: `resolveBookingHref` already fails closed.
-    const bookingUrl = await resolveBookingHref(pool, tenant_id);
+    // business owns OLIVER and has an online booking page. A DECIDED answer is
+    // always sent, '' included, because an empty value takes a stale button
+    // back off (OLIVER ended, or no booking page). An UNDECIDED answer sends no
+    // booking_url at all: the plugin only writes the option when the key is
+    // present, so the site keeps what it had rather than losing a paying
+    // business's button over a platform-api hiccup. Never fatal.
+    const booking = await submitDeps.resolveBookingTarget(pool, tenant_id);
 
     res.json({
       data: {
@@ -797,7 +802,7 @@ router.post('/public/provision-codes/redeem', async (req, res) => {
         tier: seoResult.recordset[0]?.arion_tier || null,
         seo_addon: seoResult.recordset[0]?.seo_addon_tier || null,
         domain: siteRow.domain || null,
-        booking_url: bookingUrl,
+        ...(booking.decided ? { booking_url: booking.href } : {}),
       },
       meta: { timestamp: new Date().toISOString() },
     });

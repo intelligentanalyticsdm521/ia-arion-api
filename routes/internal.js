@@ -77,6 +77,23 @@ router.post('/content-agent-tick', requireIngestKey, async (req, res) => {
   }
 });
 
+// POST /internal/booking-button-sync-tick — keeps every connected website's
+// "Book now" button in step with the business's OLIVER subscription (FEATURES
+// row 17): OLIVER ended or no booking page -> the button is taken off; OLIVER
+// owned with a booking page -> it points there; undecided -> left as it is.
+// Rung daily by the arion-func timer; logic in lib/bookingButtonSync.js.
+router.post('/booking-button-sync-tick', requireIngestKey, async (req, res) => {
+  try {
+    const pool = await getServicesPool();
+    const { runBookingButtonSyncTick } = await import('../lib/bookingButtonSync.js');
+    const summary = await runBookingButtonSyncTick(pool, (m) => console.log(`[booking-button-sync] ${m}`));
+    res.json({ ok: true, summary });
+  } catch (err) {
+    console.error('[internal:booking-button-sync-tick]', err);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
+  }
+});
+
 // POST /internal/insights-snapshot-tick — monthly IA Insights refresh,
 // triggered by the arion-func timer on the 1st (same thin-scheduler split as
 // gbp-auto-reply-tick). Aggregates SE Ranking position history + pulls the
