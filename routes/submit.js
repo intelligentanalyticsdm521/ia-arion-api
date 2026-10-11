@@ -10,8 +10,27 @@ import { plugin as pluginApiFull } from '../lib/pluginClient.js';
 import { generateSiteToken, hashSiteToken } from '../lib/siteToken.js';
 import { upsertSparkContact } from '../lib/sparkContactSync.js';
 import { resolveBookingHref } from '../lib/websiteBuilder/brandContext.js';
+import { getEntitlements } from '../lib/entitlements.js';
+import { requireSiteArion } from '../middleware/requireSiteArion.js';
+import { entitlementsFor, loadFormConfig, productState, sparkCaptureDecision } from '../lib/siteCaptureGate.js';
 
 const router = Router();
+
+// The collaborators the website routes call, in one object so a test can run
+// the real handlers with the database, platform-api and the event writer
+// stubbed. Production never changes these.
+export const submitDeps = {
+  getServicesPool,
+  requireSiteToken,
+  getEntitlements,
+  upsertSparkContact,
+  firePlatformEvent,
+};
+
+// requireSiteToken first (it finds the site and its business), then the ARION
+// check: a business whose ARION has ended does not have its website collected.
+const siteToken = (req, res, next) => submitDeps.requireSiteToken(req, res, next);
+const siteArion = (req, res, next) => requireSiteArion({ getEntitlements: submitDeps.getEntitlements })(req, res, next);
 
 // 2026-05-31 — F-125 backwards-compat shim for the WordPress plugin
 // (intelligent-analytics v2.0.13). The plugin sends a flat object with a
@@ -57,7 +76,7 @@ function extractContactFieldsFromMap(fieldsMap) {
   return out;
 }
 
-router.post('/forms/submit', requireSiteToken, async (req, res) => {
+router.post('/forms/submit', siteToken, siteArion, async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.site.site_id;
   let {
@@ -89,19 +108,15 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
   // form_type still wins when it sends one (the plugin knows its own forms
   // best); the config fills the gap for everything else; 'contact' remains the
   // last resort, which is what every submission used to be regardless.
+  //
+  // The same row is also the form's "send to my SPARK inbox" switch (below).
+  // loadFormConfig never throws: a broken lookup must not cost the ARION
+  // record, and "no row" already means "not sent to SPARK".
   let formOutcomeCfg = null;
   if (form_id) {
     try {
-      const pool = await getServicesPool();
-      const cfg = await pool.request()
-        .input('tenantId', sql.UniqueIdentifier, tenantId)
-        .input('siteId', sql.UniqueIdentifier, siteId)
-        .input('formId', sql.NVarChar(120), String(form_id))
-        .query(`SELECT TOP 1 form_type, apply_tags, add_to_list_id, marketing_optin
-                  FROM arion.site_form_config
-                 WHERE tenant_id=@tenantId AND site_id=@siteId
-                   AND form_id=@formId AND is_active=1`);
-      formOutcomeCfg = cfg.recordset[0] || null;
+      const pool = await submitDeps.getServicesPool();
+      formOutcomeCfg = await loadFormConfig(pool, { tenantId, siteId, formId: form_id });
       // The caller's own type still wins — the plugin knows its own forms best.
       if (!form_type && formOutcomeCfg?.form_type) form_type = formOutcomeCfg.form_type;
     } catch (e) {
@@ -112,6 +127,10 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
   }
   if (!form_type) form_type = 'contact';
 
+  // May this submission be written into SPARK? SPARK decided owned AND this
+  // form switched on (an active site_form_config row). See lib/siteCaptureGate.js.
+  const capture = sparkCaptureDecision({ payload: req.entitlements, formConfig: formOutcomeCfg, tenantId, where: 'form submission' });
+
   // Store the full submission either way so we don't lose data the
   // pattern matcher didn't recognize.
   if (!raw_fields && fields) raw_fields = fields;
@@ -121,7 +140,7 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
   }
 
   try {
-    const pool = await getServicesPool();
+    const pool = await submitDeps.getServicesPool();
 
     if (submission_key) {
       const existing = await pool.request()
@@ -165,18 +184,25 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
              @utmSource, @utmMedium, @utmCampaign, 0, SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET())
         `);
 
-      // Single-source-of-truth contact write (founder decision 2026-05-25):
-      // every form submission also lands in lumen.contact so SPARK is the
-      // canonical CRM. Idempotent — won't duplicate by (tenant_id, email).
+      // SPARK CONTACT WRITE — ONLY BY SUBSCRIPTION AND ONLY FOR A FORM THAT IS
+      // SET UP FOR IT (Brandon, 11 Oct 2026). This OVERRIDES the founder
+      // decision of 2026-05-25 that every form submission also lands in
+      // lumen.contact: a business without SPARK, or whose form is not switched
+      // on (no active arion.site_form_config row), gets no SPARK row of any
+      // kind — no contact, no activity, no tags, no list, no opt-in. The ARION
+      // record above and the event below are written either way.
+      // Idempotent when it does run — won't duplicate by (tenant_id, email).
       // F-128: upsertSparkContact ALSO applies lifecycle:lead + source:web_form
       // tags + writes a contact.created entry to lumen.contact_activity
       // when it creates a NEW contact.
-      const contactUuid = await upsertSparkContact(transaction, {
-        tenantId,
-        firstName: first_name, lastName: last_name,
-        email, phone,
-        source: 'arion_form',
-      });
+      const contactUuid = capture.write
+        ? await submitDeps.upsertSparkContact(transaction, {
+          tenantId,
+          firstName: first_name, lastName: last_name,
+          email, phone,
+          source: 'arion_form',
+        })
+        : null;
 
       // F-128 — write a form.submitted activity row regardless of whether
       // the contact is new or existing (returning visitors get the timeline
@@ -288,11 +314,11 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
         }
       }
 
-      await firePlatformEvent(transaction, {
+      await submitDeps.firePlatformEvent(transaction, {
         tenantId,
         eventType: 'arion.form.submitted',
         eventRefId: submissionId,
-        payload: { submission_id: submissionId, site_id: siteId, form_type, form_id, email, first_name, last_name, phone, utm_source }
+        payload: { submission_id: submissionId, site_id: siteId, form_type, form_id, email, first_name, last_name, phone, utm_source, spark_capture: capture.capture }
       });
 
       await transaction.commit();
@@ -301,14 +327,14 @@ router.post('/forms/submit', requireSiteToken, async (req, res) => {
       throw txErr;
     }
 
-    res.json({ data: { submission_id: submissionId, duplicate: false }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+    res.json({ data: { submission_id: submissionId, duplicate: false, spark_capture: capture.capture }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
   } catch (err) {
     console.error('[submit:form]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
   }
 });
 
-router.post('/bookings/submit', requireSiteToken, async (req, res) => {
+router.post('/bookings/submit', siteToken, siteArion, async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.site.site_id;
   const {
@@ -324,7 +350,7 @@ router.post('/bookings/submit', requireSiteToken, async (req, res) => {
   }
 
   try {
-    const pool = await getServicesPool();
+    const pool = await submitDeps.getServicesPool();
 
     if (submission_key) {
       const existing = await pool.request()
@@ -335,6 +361,10 @@ router.post('/bookings/submit', requireSiteToken, async (req, res) => {
         return res.json({ data: { booking_request_id: existing.recordset[0].booking_request_id, duplicate: true }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
       }
     }
+
+    // Same rule as /forms/submit: SPARK owned AND this booking form switched on.
+    const bookingCfg = await loadFormConfig(pool, { tenantId, siteId, formId: form_id });
+    const capture = sparkCaptureDecision({ payload: req.entitlements, formConfig: bookingCfg, tenantId, where: 'booking request' });
 
     const bookingId = crypto.randomUUID();
     const transaction = pool.transaction();
@@ -380,21 +410,24 @@ router.post('/bookings/submit', requireSiteToken, async (req, res) => {
              'new', 0, SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET())
         `);
 
-      // Single-source-of-truth contact write — pairs with the same call
-      // in /forms/submit. Booking forms additionally carry an address so
-      // we backfill the structured address fields on lumen.contact.
-      await upsertSparkContact(transaction, {
-        tenantId,
-        firstName: first_name, lastName: last_name,
-        email, phone,
-        addressStreet: address_line_1,
-        addressCity: city,
-        addressState: state,
-        addressZip: postal_code,
-        source: 'arion_booking',
-      });
+      // SPARK contact write — pairs with the same gate in /forms/submit (and
+      // overrides the 2026-05-25 "every submission lands in lumen.contact"
+      // rule the same way). Booking forms additionally carry an address so we
+      // backfill the structured address fields on lumen.contact.
+      if (capture.write) {
+        await submitDeps.upsertSparkContact(transaction, {
+          tenantId,
+          firstName: first_name, lastName: last_name,
+          email, phone,
+          addressStreet: address_line_1,
+          addressCity: city,
+          addressState: state,
+          addressZip: postal_code,
+          source: 'arion_booking',
+        });
+      }
 
-      await firePlatformEvent(transaction, {
+      await submitDeps.firePlatformEvent(transaction, {
         tenantId,
         eventType: 'arion.booking.requested',
         eventRefId: bookingId,
@@ -402,7 +435,8 @@ router.post('/bookings/submit', requireSiteToken, async (req, res) => {
           booking_request_id: bookingId, site_id: siteId, form_id,
           email, first_name, last_name, phone,
           service_type, preferred_date, preferred_time,
-          address_line_1, city, state, postal_code, utm_source
+          address_line_1, city, state, postal_code, utm_source,
+          spark_capture: capture.capture,
         }
       });
 
@@ -412,7 +446,7 @@ router.post('/bookings/submit', requireSiteToken, async (req, res) => {
       throw txErr;
     }
 
-    res.json({ data: { booking_request_id: bookingId, duplicate: false }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
+    res.json({ data: { booking_request_id: bookingId, duplicate: false, spark_capture: capture.capture }, meta: { tenant_id: tenantId, timestamp: new Date().toISOString() } });
   } catch (err) {
     console.error('[submit:booking]', err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message, status: 500 } });
@@ -420,7 +454,7 @@ router.post('/bookings/submit', requireSiteToken, async (req, res) => {
 });
 
 // --- POST /webhooks/site-event --- (receives events from the IA WordPress plugin)
-router.post('/webhooks/site-event', requireSiteToken, async (req, res) => {
+router.post('/webhooks/site-event', siteToken, siteArion, async (req, res) => {
   const tenantId = req.tenant.tenantId;
   const siteId = req.site.site_id;
 
@@ -439,13 +473,27 @@ router.post('/webhooks/site-event', requireSiteToken, async (req, res) => {
   }
 
   try {
-    const pool = await getServicesPool();
+    const pool = await submitDeps.getServicesPool();
+
+    // A form event writes into SPARK under the same rule as /forms/submit.
+    // Decided before the transaction opens; the event below is queued either
+    // way and the processor decides delivery.
+    const isFormEvent = event_type === 'form.submitted' && !!payload.email;
+    const capture = isFormEvent
+      ? sparkCaptureDecision({
+        payload: req.entitlements,
+        formConfig: await loadFormConfig(pool, { tenantId, siteId, formId: payload.form_id }),
+        tenantId,
+        where: 'site form event',
+      })
+      : null;
+
     const transaction = pool.transaction();
     await transaction.begin();
 
     try {
       // ── form.submitted — persist to site_form_submission ──
-      if (event_type === 'form.submitted' && payload.email) {
+      if (isFormEvent) {
         const submissionId = crypto.randomUUID();
         await transaction.request()
           .input('submissionId', sql.UniqueIdentifier, submissionId)
@@ -474,15 +522,19 @@ router.post('/webhooks/site-event', requireSiteToken, async (req, res) => {
                @utmSource, @utmMedium, @utmCampaign, 0, SYSDATETIMEOFFSET(), SYSDATETIMEOFFSET())
           `);
 
-        // Single-source-of-truth contact write (founder decision 2026-05-25)
-        await upsertSparkContact(transaction, {
-          tenantId,
-          firstName: payload.first_name, lastName: payload.last_name,
-          email: payload.email, phone: payload.phone,
-          source: 'arion_form',
-        });
+        // SPARK contact write only when SPARK is owned and the form is set up
+        // for it (overrides the founder decision of 2026-05-25; see /forms/submit).
+        if (capture.write) {
+          await submitDeps.upsertSparkContact(transaction, {
+            tenantId,
+            firstName: payload.first_name, lastName: payload.last_name,
+            email: payload.email, phone: payload.phone,
+            source: 'arion_form',
+          });
+        }
 
         payload.submission_id = submissionId;
+        payload.spark_capture = capture.capture;
       }
 
       // ── Content lifecycle events → site_content_change ──
@@ -596,7 +648,7 @@ router.post('/webhooks/site-event', requireSiteToken, async (req, res) => {
           `);
       }
 
-      const eventId = await firePlatformEvent(transaction, {
+      const eventId = await submitDeps.firePlatformEvent(transaction, {
         tenantId,
         eventType: `arion.${event_type}`,
         sourceProduct: 'ia-plugin',
@@ -764,7 +816,7 @@ router.post('/webhooks/beacon', async (req, res) => {
   }
 
   try {
-    const pool = await getServicesPool();
+    const pool = await submitDeps.getServicesPool();
 
     // Verify the site_id exists (lightweight check, no token required)
     const siteResult = await pool.request()
@@ -776,6 +828,17 @@ router.post('/webhooks/beacon', async (req, res) => {
     }
 
     const tenantId = siteResult.recordset[0].tenant_id;
+
+    // Page views are ARION data: stored only for a business that owns ARION.
+    // Decided "not owned" stores nothing (silently, like every beacon reply);
+    // undecided stores as before, because it is the business's own data.
+    const arionState = productState(await entitlementsFor(tenantId, submitDeps.getEntitlements), 'arion');
+    if (arionState === 'not_owned') {
+      return res.json({ ok: true, stored: false });
+    }
+    if (arionState === 'undecided') {
+      console.warn(`[webhooks:beacon] ARION subscription undecided for ${tenantId}; storing the page view as before`);
+    }
 
     // Log the page view (insert into site_page_view if table exists, otherwise fire as event)
     const pageViewId = crypto.randomUUID();
