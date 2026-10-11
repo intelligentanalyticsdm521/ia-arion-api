@@ -890,7 +890,7 @@ const STREAM_FILES = [
   // subscription" work), so the list test stays an honest list.
   'lib/pluginClient.js', 'lib/siteCaptureGate.js', 'lib/bookingButtonSync.js',
   'lib/websiteBuilder/brandContext.js', 'lib/purchasedArionTier.js',
-  'routes/arion/pages.js', 'routes/submit.js',
+  'routes/arion/pages.js', 'routes/submit.js', 'index.js',
 ];
 /** Deleted by this build (the old runner): must stay deleted. */
 const DELETED_FILES = ['lib/gbpAutoReplyRunner.js'];

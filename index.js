@@ -12,6 +12,9 @@ import { requireArionAccess } from './middleware/requireArionAccess.js';
 // 'lite' and lock out every customer. requireArionTier resolves the tier from
 // arion.site.arion_tier / arion.tenant.plan instead.
 import { requireArionTier } from './middleware/requireArionTier.js';
+// The signed-in ARION setup routes stop when ARION is not in the business's
+// subscription (11 Oct 2026); see the middleware's header.
+import { requireArionSubscription } from './middleware/requireArionSubscription.js';
 import { enforceEmergencyReadOnly } from './middleware/enforceEmergencyReadOnly.js';
 import { enforceViewAsReadOnly } from './middleware/enforceViewAsReadOnly.js';
 
@@ -140,6 +143,7 @@ app.use(
   enforceEmergencyReadOnly(),
   enforceViewAsReadOnly(),
   tenantResolution,
+  requireArionSubscription(),
   onboardingRunnerRouter,
 );
 
@@ -153,6 +157,7 @@ app.use(
   enforceEmergencyReadOnly(),
   enforceViewAsReadOnly(),
   tenantResolution,
+  requireArionSubscription(),
   onboardingGoogleOauthRouter,
 );
 app.use(
@@ -161,6 +166,7 @@ app.use(
   enforceEmergencyReadOnly(),
   enforceViewAsReadOnly(),
   tenantResolution,
+  requireArionSubscription(),
   onboardingBingOauthRouter,
 );
 
